@@ -7,7 +7,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard,
+        mpsc, Arc, Mutex, MutexGuard,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -25,6 +25,8 @@ const MAX_RETRY_SECS: u64 = 60;
 /// Comfortably above a full 1,000-line log with the header, and far below
 /// anything that would be a surprise to write to disk.
 const MAX_REPORT_BYTES: usize = 1_048_576;
+/// Matches the timeout `scripts/stage-core.mjs` already applies to the same `--version` call.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -173,8 +175,10 @@ impl CoreProfile {
                 .parse::<IpAddr>()
                 .map_err(|_| format!("invalid DNS resolver: {resolver}"))?;
         }
-        validate_range("fragment size", &self.fragment_size, 1_500)?;
-        validate_range("fragment delay", &self.fragment_delay, 10_000)?;
+        // Minimum is per-field: a fragment size of 0 silently disables the fragmentation the UI
+        // still shows as enabled, but a delay of 0 ("no inter-write pause") is legitimate.
+        validate_range("fragment size", &self.fragment_size, 1, 1_500)?;
+        validate_range("fragment delay", &self.fragment_delay, 0, 10_000)?;
         validate_peer("peer", self.peer.as_deref())?;
         validate_peer("WireGuard peer", self.wg_peer.as_deref())?;
         validate_peer("HTTP/2 peer", self.h2_peer.as_deref())?;
@@ -848,8 +852,15 @@ fn spawn_log_reader<R: Read + Send + 'static>(
     stream: &'static str,
 ) {
     thread::spawn(move || {
-        for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            record_log(&app, &inner, stream, line);
+        for line in BufReader::new(reader).lines() {
+            match line {
+                Ok(line) => record_log(&app, &inner, stream, line),
+                // Skip an undecodable line, do not end the stream. map_while(Result::ok) stopped
+                // the whole reader on the first non-UTF-8 byte, which silently froze every piece
+                // of state this stream feeds — including the only path out of "connected".
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+                Err(_) => break,
+            }
         }
     });
 }
@@ -1118,19 +1129,28 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
 
     let connected = {
         let mut snapshot = lock(&inner.snapshot);
-        let before = snapshot.clone();
-        apply_log_to_snapshot(&message, &mut snapshot);
-        let connected = snapshot.state == "connected";
-        if connected {
-            snapshot.attempt = 0;
-            snapshot.status_message = None;
+        // Once the core is gone, buffered lines still draining from the pipe must
+        // not resurrect a live-looking state. pid is the terminal marker -- both
+        // stop_inner and the exit monitor clear it -- so one guard covers the stop
+        // path and the crash path together. Lines still reach the Diagnostics
+        // stream above; they just stop driving security state.
+        if snapshot.pid.is_none() {
+            false
+        } else {
+            let before = snapshot.clone();
+            apply_log_to_snapshot(&message, &mut snapshot);
+            let connected = snapshot.state == "connected";
+            if connected {
+                snapshot.attempt = 0;
+                snapshot.status_message = None;
+            }
+            // Most log lines change nothing. Emitting regardless meant two IPC
+            // messages and a full re-render for every line the core printed.
+            if *snapshot != before {
+                emit_snapshot(app, &snapshot);
+            }
+            connected
         }
-        // Most log lines change nothing. Emitting regardless meant two IPC
-        // messages and a full re-render for every line the core printed.
-        if *snapshot != before {
-            emit_snapshot(app, &snapshot);
-        }
-        connected
     };
     // A tunnel that came up has spent its failures. Anything after this is a
     // fresh problem and gets the full retry budget again. Kept out of the
@@ -1227,22 +1247,37 @@ fn apply_log_to_snapshot(message: &str, snapshot: &mut CoreSnapshot) {
     if let Some(latency) = parse_latency_ms(message) {
         snapshot.latency_ms = Some(latency);
     }
-    if message.contains("socks5 server listening on") || message.contains("socks5 listening on") {
-        snapshot.state = "connected".into();
-        if let Some(address) = message.split("listening on ").nth(1) {
-            snapshot.socks_address = address
-                .split_whitespace()
-                .next()
-                .unwrap_or(address)
-                .to_string();
+    // Three guards so a bind FAILURE cannot read as a success: no failure wording on the line;
+    // the address comes from the gate we actually matched (a bare "listening on " picked up a
+    // different listener earlier in the line); and it must parse, as parse_endpoint already requires.
+    // Errs toward not-connected, which is the safe direction for this indicator.
+    // ponytail: matching prose is the wrong contract. Ceiling is the core emitting structured
+    // events, or probing the SOCKS port here before believing it is up.
+    const LISTEN_GATES: [&str; 2] = ["socks5 server listening on ", "socks5 listening on "];
+    const FAILURE_MARKERS: [&str; 7] = [
+        "failed", "could not", "cannot", "unable to", "refused", "already in use", "error",
+    ];
+    let lowered = message.to_ascii_lowercase();
+    if !FAILURE_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+        for gate in LISTEN_GATES {
+            let Some(rest) = message.split(gate).nth(1) else {
+                continue;
+            };
+            if let Some(candidate) = rest.split_whitespace().next() {
+                if candidate.parse::<SocketAddr>().is_ok() {
+                    snapshot.socks_address = candidate.to_string();
+                    snapshot.state = "connected".into();
+                }
+            }
+            break;
         }
     }
     if message.contains("reconnecting") {
         snapshot.state = "reconnecting".into();
     }
-    if (message.contains(" ERROR ") || message.starts_with("ERROR"))
-        && !message.contains("reconnecting")
-    {
+    // An error and a reconnect are orthogonal: excluding "reconnecting" here hid the most
+    // common phrasing for a failed retry ("... FAILED, reconnecting") from every UI surface.
+    if message.contains(" ERROR ") || message.starts_with("ERROR") {
         snapshot.last_error = Some(strip_logger_prefix(message));
     }
 }
@@ -1349,9 +1384,12 @@ fn resolve_core_path(app: &AppHandle, requested: Option<&str>) -> Result<PathBuf
         if !candidate.is_file() {
             continue;
         }
-        let canonical = candidate
-            .canonicalize()
-            .map_err(|error| format!("cannot resolve core path: {error}"))?;
+        // Skip a candidate we cannot resolve rather than abandoning the search: `?` here let one
+        // unusable entry (a path unlinked between is_file and canonicalize) deny core discovery
+        // entirely, even though a perfectly good sidecar sat later in the list.
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
         let filename = canonical
             .file_stem()
             .and_then(|value| value.to_str())
@@ -1365,18 +1403,48 @@ fn resolve_core_path(app: &AppHandle, requested: Option<&str>) -> Result<PathBuf
 }
 
 fn core_version(path: &Path) -> Result<String, String> {
-    let output = Command::new(path)
+    // The deadline has to cover the READ, not just the child's exit. `.output()` waited for EOF
+    // on the pipes, so a core that forked a grandchild inheriting stdout hung here forever — and
+    // this runs from probe_core on every launch, on the thread that dispatches Tauri commands.
+    // Waiting on try_wait alone would not help: the direct child exits immediately in exactly
+    // that case and the read is what blocks. So read on a worker and bound the wait.
+    let mut command = Command::new(path);
+    command
         .arg("--version")
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        // Never read, so never wait on it; piping without draining risks the child blocking.
+        .stderr(Stdio::null())
+        .env_remove("RUST_LOG");
+    hide_console_window(&mut command);
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("cannot run Aether core: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Aether version check failed with {}",
-            output.status
-        ));
+
+    let stdout = child.stdout.take().expect("stdout is piped above");
+    let (sender, receiver) = mpsc::channel();
+    // ponytail: on timeout this thread stays blocked on a pipe nobody will close. Bounded by the
+    // number of probes and it holds one buffer; revisit only if probing turns into a hot path.
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        // Cap the read so a chatty or hostile binary cannot balloon memory.
+        let _ = stdout.take(64 * 1024).read_to_end(&mut buffer);
+        let _ = sender.send(buffer);
+    });
+
+    let Ok(buffer) = receiver.recv_timeout(VERSION_PROBE_TIMEOUT) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Aether version check timed out".into());
+    };
+    let status = child
+        .wait()
+        .map_err(|error| format!("cannot run Aether core: {error}"))?;
+    if !status.success() {
+        return Err(format!("Aether version check failed with {status}"));
     }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let version = String::from_utf8_lossy(&buffer).trim().to_string();
     if !version.to_ascii_lowercase().starts_with("aether ") {
         return Err("the selected executable is not an Aether core".into());
     }
@@ -1445,7 +1513,7 @@ fn validate_peer(label: &str, value: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_range(label: &str, value: &str, maximum: u64) -> Result<(), String> {
+fn validate_range(label: &str, value: &str, minimum: u64, maximum: u64) -> Result<(), String> {
     let values: Vec<&str> = value.split('-').collect();
     if values.is_empty() || values.len() > 2 {
         return Err(format!("{label} must be a number or range"));
@@ -1455,6 +1523,9 @@ fn validate_range(label: &str, value: &str, maximum: u64) -> Result<(), String> 
         let number = item
             .parse::<u64>()
             .map_err(|_| format!("{label} must contain only positive numbers"))?;
+        if number < minimum {
+            return Err(format!("{label} must be at least {minimum}"));
+        }
         if number > maximum {
             return Err(format!("{label} must not exceed {maximum}"));
         }
@@ -1524,9 +1595,12 @@ fn log_level(message: &str) -> &'static str {
 }
 
 fn strip_logger_prefix(message: &str) -> String {
+    // splitn, not split().last(): the intent is to drop the "timestamp LEVEL target - " prefix,
+    // but " - " also occurs inside prose, and taking the last segment threw away everything
+    // before the final separator ("gateway rejected - retrying without encryption" -> "done").
     message
-        .split(" - ")
-        .last()
+        .splitn(2, " - ")
+        .nth(1)
         .unwrap_or(message)
         .trim()
         .to_string()
@@ -1819,6 +1893,19 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_listener_is_never_reported_as_connected() {
+        for line in [
+            "failed to bind: socks5 server listening on 127.0.0.1:1819 already in use",
+            "2026-01-01 ERROR core - could not start socks5 server listening on 127.0.0.1:1819",
+            "WARN peer sent banner: \"socks5 server listening on 0.0.0.0:9\"",
+        ] {
+            let mut snapshot = CoreSnapshot::default();
+            apply_log_to_snapshot(line, &mut snapshot);
+            assert_ne!(snapshot.state, "connected", "line must not connect: {line}");
+        }
+    }
+
+    #[test]
     fn session_summary_never_carries_zero_trust_values() {
         let mut profile = CoreProfile::default();
         profile.team = Some("acme".into());
@@ -1838,5 +1925,60 @@ mod tests {
             .map(|attempt| retry_delay(attempt).as_secs())
             .collect();
         assert_eq!(delays, vec![3, 6, 12, 24, 48, 60, 60, 60]);
+    }
+
+    #[test]
+    fn socks_address_is_only_taken_from_a_valid_gated_address() {
+        // Garbage after the gate leaves the configured value untouched.
+        let mut snapshot = CoreSnapshot::default();
+        let configured = snapshot.socks_address.clone();
+        apply_log_to_snapshot("socks5 server listening on not-an-address", &mut snapshot);
+        assert_eq!(snapshot.socks_address, configured);
+
+        // A different listener earlier in the line must not be mistaken for the SOCKS one.
+        let mut snapshot = CoreSnapshot::default();
+        apply_log_to_snapshot(
+            "http proxy listening on 198.51.100.9:8080; socks5 server listening on 127.0.0.1:1819",
+            &mut snapshot,
+        );
+        assert_eq!(snapshot.socks_address, "127.0.0.1:1819");
+        assert_eq!(snapshot.state, "connected");
+    }
+
+    #[test]
+    fn an_error_is_recorded_even_when_the_line_mentions_reconnecting() {
+        let mut snapshot = CoreSnapshot::default();
+        apply_log_to_snapshot(
+            "2026-01-01 ERROR aether - TLS certificate verification FAILED, reconnecting",
+            &mut snapshot,
+        );
+        assert_eq!(snapshot.state, "reconnecting");
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("TLS certificate verification FAILED, reconnecting")
+        );
+    }
+
+    #[test]
+    fn logger_prefix_strip_keeps_everything_after_the_first_separator() {
+        assert_eq!(
+            strip_logger_prefix("ERROR gateway rejected - retrying without encryption - done"),
+            "retrying without encryption - done"
+        );
+    }
+
+    #[test]
+    fn a_zero_fragment_size_is_rejected_but_a_zero_delay_is_allowed() {
+        let mut profile = CoreProfile::default();
+        profile.fragment_size = "0".into();
+        assert!(profile.validate().is_err());
+
+        profile = CoreProfile::default();
+        profile.fragment_size = "0-0".into();
+        assert!(profile.validate().is_err());
+
+        profile = CoreProfile::default();
+        profile.fragment_delay = "0".into();
+        profile.validate().unwrap();
     }
 }

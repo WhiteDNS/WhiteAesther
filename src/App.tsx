@@ -61,19 +61,22 @@ export default function App() {
         return;
       }
       try {
-        const [info, saved, current, history] = await Promise.all([
-          runtimeInfo(), loadProfile(), getCoreStatus(), getCoreLogs(),
-        ]);
-        if (disposed) return;
-        setRuntime(`${info.os} · ${info.arch}`);
-        setProfile(saved);
-        setSnapshot(current);
-        setLogs(history);
-        setProbe(await probeCore(saved));
+        // Subscribe first, then settle the rest independently: with Promise.all, one rejection
+        // (loadProfile throws on any stored profile that fails validation) skipped subscribeCore
+        // too, leaving the app blind to a running core for the whole session.
         unsubscribe = await subscribeCore(
           (next) => { if (!disposed) setSnapshot(next); },
           (entry) => { if (!disposed) setLogs((current) => [...current.slice(-999), entry]); },
         );
+        if (disposed) return;
+        const [info, saved, current, history] = await Promise.allSettled([runtimeInfo(), loadProfile(), getCoreStatus(), getCoreLogs()]);
+        if (disposed) return;
+        if (info.status === "fulfilled") setRuntime(`${info.value.os} · ${info.value.arch}`);
+        if (saved.status === "fulfilled") setProfile(saved.value);
+        if (current.status === "fulfilled") setSnapshot(current.value);
+        if (history.status === "fulfilled") setLogs(history.value);
+        if (saved.status === "rejected") showError(saved.reason);
+        setProbe(await probeCore(saved.status === "fulfilled" ? saved.value : DEFAULT_PROFILE));
       } catch (error) {
         if (!disposed) showError(error);
       }

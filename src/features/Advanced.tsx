@@ -548,8 +548,10 @@ function Identity({ profile, onChange }: AdvancedProps) {
             help="Skips sign-in when you already hold one." />
         </div>
         <p className="text-[13px] text-muted-foreground">
-          The secret and the token are held in memory and passed to the core through its environment. Neither is
-          written to the profile on disk, and neither appears in a diagnostics report.
+          The client secret and the token are held in memory and passed to the core through its environment.
+          Neither is written to the profile on disk, and neither appears in a diagnostics report. The team,
+          client ID and email <b className="font-medium text-foreground">are</b> saved with the profile on this
+          device.
         </p>
         <Separator />
         <Row first title="Send web traffic to Gateway" help="Applies the enrolled organisation's policy. Adds a hop, and permits its logging.">
