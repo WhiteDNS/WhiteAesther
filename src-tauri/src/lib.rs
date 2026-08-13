@@ -114,6 +114,15 @@ pub fn run() {
             core_supervisor::save_profile,
             core_supervisor::load_profile,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running WhiteAesther");
+        .build(tauri::generate_context!())
+        .expect("error while running WhiteAesther")
+        // prevent_close() above means WindowEvent::Destroyed never fires, so it was never a
+        // cleanup path — Cmd+Q, Dock Quit and logout all exited here instead, orphaning a live
+        // core (std::process::Child does not kill on drop). shutdown() is idempotent.
+        // ponytail: cannot cover SIGKILL/OOM — that needs a pid file reaped at next launch.
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<CoreSupervisor>().shutdown();
+            }
+        });
 }

@@ -64,17 +64,22 @@ function App() {
         return;
       }
       try {
-        const [info, saved, current, history] = await Promise.all([runtimeInfo(), loadProfile(), getCoreStatus(), getCoreLogs()]);
-        if (disposed) return;
-        setRuntime(`${info.os} · ${info.arch}`);
-        setProfile(saved);
-        setSnapshot(current);
-        setLogs(history);
-        setProbe(await probeCore(saved));
+        // Subscribe first, then settle the rest independently: with Promise.all, one rejection
+        // (loadProfile throws on any stored profile that fails validation) skipped subscribeCore
+        // too, leaving the app blind to a running core for the whole session.
         unsubscribe = await subscribeCore(
           (next) => { if (!disposed) setSnapshot(next); },
           (entry) => { if (!disposed) setLogs((currentLogs) => [...currentLogs.slice(-999), entry]); },
         );
+        if (disposed) return;
+        const [info, saved, current, history] = await Promise.allSettled([runtimeInfo(), loadProfile(), getCoreStatus(), getCoreLogs()]);
+        if (disposed) return;
+        if (info.status === "fulfilled") setRuntime(`${info.value.os} · ${info.value.arch}`);
+        if (saved.status === "fulfilled") setProfile(saved.value);
+        if (current.status === "fulfilled") setSnapshot(current.value);
+        if (history.status === "fulfilled") setLogs(history.value);
+        if (saved.status === "rejected") showError(saved.reason);
+        setProbe(await probeCore(saved.status === "fulfilled" ? saved.value : DEFAULT_PROFILE));
       } catch (error) {
         showError(error);
       }
@@ -261,7 +266,7 @@ function Routing({ profile, onChange }: ProfileProps) {
 }
 
 function Identity({ profile, onChange }: ProfileProps) {
-  return <><PageIntro badge="CORE TODAY" title="Zero Trust identity" copy="Enrollment settings are sent to Aether; secrets remain memory-only until OS-vault integration lands." /><div className="two-col"><article className="card"><div className="section-head"><div><span className="label">ORGANIZATION</span><h3>Cloudflare Zero Trust</h3></div></div><div className="form-grid two"><TextField label="Team" value={profile.team??""} placeholder="team name" onChange={(value)=>onChange({...profile,team:value||null})}/><TextField label="Email" value={profile.accessEmail??""} placeholder="you@example.com" onChange={(value)=>onChange({...profile,accessEmail:value||null})}/><TextField label="Access client ID" value={profile.accessClientId??""} onChange={(value)=>onChange({...profile,accessClientId:value||null})}/><TextField label="Access client secret" type="password" value={profile.accessClientSecret??""} onChange={(value)=>onChange({...profile,accessClientSecret:value||null})}/><TextField label="Existing token" type="password" value={profile.accessToken??""} onChange={(value)=>onChange({...profile,accessToken:value||null})}/></div></article><article className="card"><div className="section-head"><div><span className="label">GATEWAY</span><h3>Organization filtering</h3></div><Switch checked={profile.gateway} onCheckedChange={(checked)=>onChange({...profile,gateway:checked})}/></div><p className="warning">Gateway adds a hop and permits organization filtering and logging for web traffic.</p><ToggleField label="Send web traffic to Gateway" copy="Applies the enrolled organization policy." checked={profile.gateway} onChange={(checked)=>onChange({...profile,gateway:checked})}/><SettingRow name="Secret persistence" value="Disabled"/></article></div></>;
+  return <><PageIntro badge="CORE TODAY" title="Zero Trust identity" copy="Enrollment settings are sent to Aether. The client secret and token stay in memory only; the team, client ID and email are saved with the profile on this device." /><div className="two-col"><article className="card"><div className="section-head"><div><span className="label">ORGANIZATION</span><h3>Cloudflare Zero Trust</h3></div></div><div className="form-grid two"><TextField label="Team" value={profile.team??""} placeholder="team name" onChange={(value)=>onChange({...profile,team:value||null})}/><TextField label="Email" value={profile.accessEmail??""} placeholder="you@example.com" onChange={(value)=>onChange({...profile,accessEmail:value||null})}/><TextField label="Access client ID" value={profile.accessClientId??""} onChange={(value)=>onChange({...profile,accessClientId:value||null})}/><TextField label="Access client secret" type="password" value={profile.accessClientSecret??""} onChange={(value)=>onChange({...profile,accessClientSecret:value||null})}/><TextField label="Existing token" type="password" value={profile.accessToken??""} onChange={(value)=>onChange({...profile,accessToken:value||null})}/></div></article><article className="card"><div className="section-head"><div><span className="label">GATEWAY</span><h3>Organization filtering</h3></div><Switch checked={profile.gateway} onCheckedChange={(checked)=>onChange({...profile,gateway:checked})}/></div><p className="warning">Gateway adds a hop and permits organization filtering and logging for web traffic.</p><ToggleField label="Send web traffic to Gateway" copy="Applies the enrolled organization policy." checked={profile.gateway} onChange={(checked)=>onChange({...profile,gateway:checked})}/><SettingRow name="Client secret & token" value="Never stored"/><SettingRow name="Team, client ID, email" value="Stored on this device"/></article></div></>;
 }
 
 function Diagnostics({ snapshot, logs }: { snapshot: CoreSnapshot; logs: CoreLogEvent[] }) {
