@@ -11,7 +11,7 @@ export function buildCoreCommand(profile: ConnectionProfile): string {
     "--validate-secs", String(profile.validateSecs),
     "--startup-secs", String(profile.startupSecs),
     "--reconnect-secs", String(profile.reconnectSecs),
-    "--dns", profile.dns.join(","),
+    "--dns", quote(profile.dns.join(",")),
     "--noize", profile.noize,
     "--keepalive", String(profile.keepaliveSecs),
     "--log-level", profile.logLevel,
@@ -38,5 +38,8 @@ function option(name: string, value: string | null): string {
 }
 
 function quote(value: string): string {
-  return /^[A-Za-z0-9._,:/@+\-=]+$/.test(value) ? value : JSON.stringify(value);
+  // Single quotes, not JSON.stringify: its double quotes still expand $(...) and backticks, and
+  // this string is offered to the user as the command to run. Also restores real newlines, which
+  // JSON.stringify turned into a literal \n.
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
