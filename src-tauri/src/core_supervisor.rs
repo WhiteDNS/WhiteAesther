@@ -1243,12 +1243,16 @@ fn hold(
 ///
 /// The core takes one transport and never falls back between them. H3 rides
 /// QUIC, and a network that blocks UDP kills it outright -- so retrying the same
-/// dead transport eight times is eight guaranteed failures. Alternate instead:
-/// the configured transport on odd attempts, the other one on even. Only MASQUE
-/// has a second transport to alternate to.
+/// dead transport eight times is eight guaranteed failures. Alternate instead.
+///
+/// The *first* retry switches. A retry now follows a complete fruitless sweep,
+/// which is two minutes of evidence that this transport is not getting through
+/// right now; spending another two minutes proving it again is the single
+/// slowest thing this supervisor could do. Only MASQUE has a second transport
+/// to alternate to.
 fn profile_for_attempt(base: &CoreProfile, attempt: u32) -> CoreProfile {
     let mut profile = base.clone();
-    if attempt > 0 && base.protocol == "masque" && attempt % 2 == 0 {
+    if attempt > 0 && base.protocol == "masque" && attempt % 2 == 1 {
         profile.masque_transport = if base.masque_transport == "h2" {
             "h3".into()
         } else {
@@ -1329,6 +1333,19 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
             connected
         }
     };
+    // The core hunts, fails, and hunts again on its own, forever, without ever
+    // exiting. Every retry this supervisor has -- the attempt count, the widening
+    // backoff, the H2/H3 alternation, the give-up screen -- hangs off the process
+    // exiting, so none of it ever ran: the app sat on "Searching" repeating the
+    // same sweep on the same transport until someone gave up watching.
+    //
+    // Take the decision back. One fruitless sweep is enough to know this
+    // transport is not getting through right now, and trying the other one is
+    // worth more than a second identical pass.
+    if !connected && sweep_exhausted(&message) {
+        end_fruitless_sweep(app, inner);
+    }
+
     // A tunnel that came up has spent its failures. Anything after this is a
     // fresh problem and gets the full retry budget again. Kept out of the
     // snapshot lock above so the two are never held at once.
@@ -1444,6 +1461,46 @@ fn clear_system_proxy(app: &AppHandle, inner: &SupervisorInner) {
             )
         }
     }
+}
+
+/// Whether the core has just announced that a whole sweep found nothing and it
+/// intends to run the same one again.
+///
+/// Matched on the core's own words, which is a contract made of prose and will
+/// need revisiting if the wording changes -- the same caveat that already
+/// applies to every other line read here. Both phrasings are required to appear
+/// together in practice; either alone is enough to act on.
+fn sweep_exhausted(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("rescanning shortly")
+        || lowered.contains("no usable masque gateway found")
+        || lowered.contains("scan deadline reached with no gateway")
+}
+
+/// Ends a session whose sweep came back empty, so the supervisor's own retry
+/// runs instead of the core quietly repeating itself.
+///
+/// Killing the child is the whole mechanism: the exit monitor sees it go, and
+/// `handle_exit` applies the attempt count, the backoff and the transport
+/// alternation that were already written and never previously reachable from
+/// this state.
+fn end_fruitless_sweep(app: &AppHandle, inner: &SupervisorInner) {
+    let mut guard = lock(&inner.child);
+    let Some(child) = guard.as_mut() else {
+        return;
+    };
+    // Already gone, or on its way: the exit monitor owns it from here.
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let _ = child.kill();
+    drop(guard);
+    supervisor_log(
+        app,
+        inner,
+        "warn",
+        "a full sweep found no gateway; trying the other transport rather than repeating it".into(),
+    );
 }
 
 fn apply_log_to_snapshot(message: &str, snapshot: &mut CoreSnapshot) {
@@ -1917,9 +1974,10 @@ mod tests {
     fn retries_alternate_masque_transports() {
         let profile = CoreProfile::default();
         assert_eq!(profile.masque_transport, "h2");
-        // The configured transport on odd attempts, the other on even, so a
-        // network that blocks UDP is not retried eight times over QUIC.
-        for (attempt, expected) in [(0, "h2"), (1, "h2"), (2, "h3"), (3, "h2"), (4, "h3")] {
+        // The first retry switches, because it follows two minutes of evidence
+        // that the configured transport is not getting out. Then it alternates,
+        // so a network that blocks UDP is not retried eight times over QUIC.
+        for (attempt, expected) in [(0, "h2"), (1, "h3"), (2, "h2"), (3, "h3"), (4, "h2")] {
             assert_eq!(
                 profile_for_attempt(&profile, attempt).masque_transport,
                 expected,
@@ -1942,8 +2000,8 @@ mod tests {
     #[test]
     fn alternating_transport_rebuilds_the_arguments_for_it() {
         let profile = CoreProfile::default();
-        let h2 = profile_for_attempt(&profile, 1).args(Path::new("identity.toml"));
-        let h3 = profile_for_attempt(&profile, 2).args(Path::new("identity.toml"));
+        let h2 = profile_for_attempt(&profile, 2).args(Path::new("identity.toml"));
+        let h3 = profile_for_attempt(&profile, 1).args(Path::new("identity.toml"));
         assert!(h2.contains(&"--h2".to_string()));
         assert!(h2.contains(&"--fragment".to_string()));
         // Fragmentation is an HTTP/2 measure; carrying it onto QUIC would pass
@@ -2048,6 +2106,37 @@ mod tests {
         assert!(current.is_some());
     }
 
+    #[test]
+    fn a_sweep_that_found_nothing_is_recognised() {
+        // Verbatim from a Windows 1.2.0 session that sat on "Searching" for
+        // twenty-six minutes: the core repeated the same H2 sweep because it
+        // never exited, so no retry of ours ever ran.
+        for line in [
+            "[2026-08-14T06:25:02.686Z WARN  aether] [-] no usable MASQUE gateway found: prober: \
+             no clean endpoint found; rescanning shortly",
+            "[2026-08-14T06:25:02.685Z WARN  aether::prober] [-] scan deadline reached with no gateway",
+        ] {
+            assert!(sweep_exhausted(line), "not recognised: {line}");
+        }
+    }
+
+    #[test]
+    fn ordinary_scanning_lines_do_not_end_a_sweep() {
+        // Killing the core mid-search would be far worse than the stall: these
+        // are what a healthy sweep looks like on its way to succeeding.
+        for line in [
+            "[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)",
+            "[*] scan mode=balanced ip=dual-stack candidates=3012 ports=[443] concurrency=16 \
+             per_probe=6s budget=120s",
+            "[+] obfuscation profile: balanced",
+            "tls verification: pin-based (2 pins loaded)",
+            "[+] selected MASQUE gateway 162.159.198.7:443 (rtt 71.4ms)",
+            "[+] identity ready: device=5571c9de ipv4=0.0.0.0:0",
+        ] {
+            assert!(!sweep_exhausted(line), "would have killed a live scan: {line}");
+        }
+    }
+
     fn pinned(mode: &str) -> CoreProfile {
         let mut profile = CoreProfile::default();
         profile.endpoint_mode = mode.into();
@@ -2118,11 +2207,12 @@ mod tests {
     #[test]
     fn fallback_and_transport_alternation_apply_together() {
         // Independent axes: a pinned H2 endpoint that fails should be retried
-        // over H3 discovery, not just one or the other.
+        // over H3 discovery, not just one or the other. Both land on the first
+        // retry, which is the one that follows a sweep proving H2 got nowhere.
         let base = pinned("custom-first");
-        let second = profile_for_attempt(&base, 2);
-        assert_eq!(second.endpoint_mode, "automatic");
-        assert_eq!(second.masque_transport, "h3");
+        let first = profile_for_attempt(&base, 1);
+        assert_eq!(first.endpoint_mode, "automatic");
+        assert_eq!(first.masque_transport, "h3");
     }
 
     #[test]
