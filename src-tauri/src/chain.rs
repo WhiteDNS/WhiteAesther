@@ -1437,7 +1437,10 @@ mod tests {
         // The process rule is what actually holds it: the address is unknown
         // until a gateway has been picked and changes on every reconnect, so a
         // rule keyed on it alone leaves the loop closed exactly when it matters.
-        assert!(config.contains("- PROCESS-NAME,aether.exe,DIRECT"), "{config}");
+        assert!(
+            config.contains(&format!("- PROCESS-NAME,{TUNNEL_PROCESS},DIRECT")),
+            "{config}"
+        );
         // And it has to be the first rule, or a rule above it could claim the
         // tunnel first and the loop closes anyway.
         let rules = config.split("rules:\n").nth(1).expect("a rules section");
@@ -1493,7 +1496,10 @@ mod tests {
             endpoint: None,
             ..Default::default()
         });
-        assert!(config.contains("- PROCESS-NAME,aether.exe,DIRECT"), "{config}");
+        assert!(
+            config.contains(&format!("- PROCESS-NAME,{TUNNEL_PROCESS},DIRECT")),
+            "{config}"
+        );
         // The gateway rule is the one that cannot be written without an
         // address. The local ranges are constants and are always there.
         assert!(
