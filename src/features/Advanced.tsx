@@ -274,6 +274,13 @@ function Licences() {
           >
             <span className="font-mono text-[12.5px] text-muted-foreground">GPL-3.0</span>
           </Row>
+          <Separator />
+          <Row
+            title="Iran routing lists"
+            help="The addresses and domains behind “Iranian sites bypass the tunnel”, bundled as data. Source at github.com/Chocolate4U/Iran-clash-rules"
+          >
+            <span className="font-mono text-[12.5px] text-muted-foreground">GPL-3.0</span>
+          </Row>
         </CardContent>
       </Card>
 
@@ -438,13 +445,28 @@ function Routes({ profile, onChange }: AdvancedProps) {
           <Row title="Try other obfuscation profiles" help="On WireGuard, fall back through the other profiles when one finds nothing.">
             <Switch checked={profile.profileRetry} onCheckedChange={(profileRetry) => set({ profileRetry })} />
           </Row>
-          <Row title="WireGuard keepalive" help="How often to hold the UDP mapping open.">
+          <Row title="WireGuard keepalive" help="How often to hold the UDP mapping open. Zero leaves it to the engine.">
             <div className="w-[132px]">
               <NumberField
-                unit="sec" min={1} max={300}
+                unit="sec" min={0} max={300}
                 value={profile.keepaliveSecs} onChange={(keepaliveSecs) => set({ keepaliveSecs })}
               />
             </div>
+          </Row>
+          <Row
+            title="Match domain rules on sniffed names"
+            help="Reads the host name from the first bytes of a connection, so rules written as domains still match when a program connects to a bare address. Off, those rules only match when a name was supplied."
+          >
+            <Switch checked={profile.routeSniff} onCheckedChange={(routeSniff) => set({ routeSniff })} />
+          </Row>
+          <Row
+            title="Register again if the identity is refused"
+            help="Cloudflare sometimes stops accepting a saved device, and the handshake then succeeds while nothing passes. Off, the refusal is reported and the identity kept — which is what you want while diagnosing an account, and not otherwise."
+          >
+            <Switch
+              checked={profile.autoReprovision}
+              onCheckedChange={(autoReprovision) => set({ autoReprovision })}
+            />
           </Row>
           <Separator />
           <div className="grid grid-cols-2 gap-4 pt-4">
@@ -459,6 +481,12 @@ function Routes({ profile, onChange }: AdvancedProps) {
               placeholder="Core default"
               onChange={(value) => set({ tlsGroups: value || null })}
               help="Key exchange groups to offer, comma separated."
+            />
+            <TextField
+              label="Dial through a local proxy" mono value={profile.upstreamProxy}
+              placeholder="socks5://host:port"
+              onChange={(upstreamProxy) => set({ upstreamProxy })}
+              help="The endpoint search goes through it too, so it never reveals the address the tunnel hides."
             />
           </div>
         </CardContent>
@@ -609,6 +637,16 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProp
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4 pt-2">
+          <Row
+            first
+            title="Iranian sites bypass the tunnel"
+            help="Filtering only applies to traffic that looks like it left Iran, so these sites gain nothing from the tunnel and only pay for the exit's bandwidth. The list ships with the app and is not fetched."
+          >
+            <Switch
+              checked={profile.bypassIranSites}
+              onCheckedChange={(bypassIranSites) => set({ bypassIranSites })}
+            />
+          </Row>
           <div className="grid grid-cols-2 gap-4">
             <RulesField
               label="Never send" value={profile.routeBlock}

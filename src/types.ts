@@ -75,6 +75,31 @@ export interface ConnectionProfile {
   routeBlock: string;
   routeDirect: string;
   routesFile: string | null;
+  /**
+   * Dial out through a proxy already running on this machine.
+   *
+   * `socks5://host:port` or `http://host:port`. Sent to the engine in the
+   * environment, never on the command line: it can carry a password.
+   */
+  upstreamProxy: string;
+  /** Read the host name from the first bytes so domain rules match. On by default. */
+  routeSniff: boolean;
+  /** Register a fresh device when Cloudflare refuses the saved one. On by default. */
+  autoReprovision: boolean;
+  /**
+   * Capture every application through a network device rather than asking them
+   * to follow a proxy. The only way to close a DNS leak, and the only mode
+   * that catches programs which ignore proxy settings entirely.
+   */
+  fullTunnel: boolean;
+  /**
+   * Send Iranian sites straight out instead of through the tunnel.
+   *
+   * Filtering only applies to traffic that looks like it left Iran, so these
+   * sites gain nothing from the tunnel and only pay for the exit's bandwidth.
+   * The lists are bundled with the app, not fetched.
+   */
+  bypassIranSites: boolean;
   team: string | null;
   accessClientId: string | null;
   accessClientSecret: string | null;
@@ -147,7 +172,7 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   ech: null,
   tlsGroups: null,
   performanceProfile: "auto",
-  keepaliveSecs: 5,
+  keepaliveSecs: 25,
   noize: "balanced",
   profileRetry: true,
   logLevel: "info",
@@ -158,6 +183,11 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   routeBlock: "",
   routeDirect: "",
   routesFile: null,
+  upstreamProxy: "",
+  routeSniff: true,
+  autoReprovision: true,
+  fullTunnel: false,
+  bypassIranSites: false,
   team: null,
   accessClientId: null,
   accessClientSecret: null,

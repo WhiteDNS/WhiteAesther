@@ -211,6 +211,48 @@ export interface LanStatus {
  * Takes effect immediately rather than at the next connect, because the person
  * flipping it is usually standing next to the device they are configuring.
  */
+/**
+ * Turns full tunnel on or off on a live connection.
+ *
+ * Returns whether the device is actually up — not whether it was asked for.
+ * The engine keeps running when it cannot create the adapter, so anything that
+ * trusted the call succeeding would report a captured machine that is not.
+ */
+export async function setFullTunnel(enabled: boolean): Promise<boolean> {
+  requireDesktop();
+  return invoke("set_full_tunnel", { enabled });
+}
+
+/**
+ * What [`setFullTunnel`] reports when the device needs permission this process
+ * does not have. Matched rather than shown: the screen turns it into an offer
+ * to restart, which is the only thing that actually helps.
+ */
+export const NEEDS_ADMINISTRATOR = "needs-administrator";
+
+/** Whether full tunnel can start without asking for anything first. */
+export async function fullTunnelIsPermitted(): Promise<boolean> {
+  if (!isDesktopRuntime()) return false;
+  return invoke("full_tunnel_is_permitted");
+}
+
+/** Whether this copy was restarted to finish switching full tunnel on. */
+export async function resumingFullTunnel(): Promise<boolean> {
+  if (!isDesktopRuntime()) return false;
+  return invoke("resuming_full_tunnel");
+}
+
+/**
+ * Restarts the app with the permission a network device needs.
+ *
+ * Resolves only if the prompt was refused or failed — on success this process
+ * is on its way out and nothing after the call runs.
+ */
+export async function restartAsAdministrator(): Promise<void> {
+  requireDesktop();
+  return invoke("restart_as_administrator");
+}
+
 export async function setLanShare(settings: LanSettings): Promise<LanStatus> {
   requireDesktop();
   return invoke("set_lan_share", { settings });

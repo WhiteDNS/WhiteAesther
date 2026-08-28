@@ -1,6 +1,6 @@
 [package]
 name = "whiteaesther"
-version = "1.5.4"
+version = "1.6.0"
 description = "Cross-platform desktop client for the Aether connection core"
 authors = ["WhiteDNS"]
 # WhiteAesther links the Aether engine, which is AGPL-3.0, so it is a derivative
@@ -34,4 +34,14 @@ serde_json = "1"
 # only adds the dependency edge.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Networking_WinInet",
+    # Full tunnel needs a network adapter, which needs an elevated process:
+    # these are what ask for one and what check whether we already have it.
+    "Win32_UI_Shell",
+    "Win32_Security",
+    "Win32_System_Threading",
+    # Letting an ordinary launch reach an elevated copy: see
+    # elevation::allow_launches_from_an_ordinary_user.
+    "Win32_UI_WindowsAndMessaging",
+] }

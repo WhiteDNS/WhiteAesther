@@ -60,6 +60,10 @@ export const SETTINGS: SettingEntry[] = [
   { label: "How the gateway is chosen", section: "endpoint", where: "Endpoint", keywords: "automatic custom first custom only endpoint mode" },
   { label: "Per-protocol overrides", section: "endpoint", where: "Endpoint", keywords: "h2 peer wireguard peer separate address" },
 
+  { label: "Dial through a local proxy", section: "routes", where: "Routes & transports", keywords: "upstream proxy socks5 http chain behind another vpn local proxy" },
+  { label: "Match domain rules on sniffed names", section: "routes", where: "Routes & transports", keywords: "sniff sni host header domain rules match bare address route" },
+  { label: "Register again if the identity is refused", section: "routes", where: "Routes & transports", keywords: "reprovision identity refused device cloudflare account handshake nothing passes" },
+
   { label: "Route through a second hop", section: "chain", where: "Exit chain", keywords: "chain proxy exit country change ip location second hop mihomo geo" },
   { label: "Subscriptions", section: "chain", where: "Exit chain", keywords: "sub subscription link config nodes servers add" },
   { label: "Configs pasted by hand", section: "chain", where: "Exit chain", keywords: "vless vmess trojan shadowsocks ss hysteria tuic paste uri manual config" },
@@ -71,6 +75,7 @@ export const SETTINGS: SettingEntry[] = [
   { label: "Share this connection on my network", section: "traffic", where: "Traffic & DNS", keywords: "lan share network other devices phone tv wifi hotspot proxy for phone username password" },
   { label: "Local proxy address", section: "traffic", where: "Traffic & DNS", keywords: "socks5 socks port 1819 bind listener point apps at" },
   { label: "DNS resolvers", section: "traffic", where: "Traffic & DNS", keywords: "dns resolver 1.1.1.1 leak nameserver" },
+  { label: "Iranian sites bypass the tunnel", section: "traffic", where: "Traffic & DNS", keywords: "iran iranian ir domestic local sites bypass direct split geo digikala disconnect speed" },
   { label: "Routing rules", section: "traffic", where: "Traffic & DNS", keywords: "route block direct bypass split tunnel exclude sites rules file" },
 
   { label: "Cloudflare Zero Trust", section: "identity", where: "Identity", keywords: "team access client id secret token enrolment organisation login" },
