@@ -52,6 +52,24 @@ Because mihomo is conveyed as a separate executable rather than linked, its lice
 to WhiteAesther's own source, which remains AGPL-3.0. GPL-3.0 still obliges us to pass the licence
 on with the binary and to say where its source is; both are above.
 
+## Iran routing lists
+
+The lists behind "Iranian sites bypass the tunnel": the IP ranges allocated to Iran, and the
+non-`.ir` domains hosted inside it. Compiled into the binary as plain text (see
+`routing/` and `src-tauri/src/iran_routes.rs`) rather than fetched at runtime, because
+fetching them would need the working connection they exist to make unnecessary.
+
+- Upstream: <https://github.com/Chocolate4U/Iran-clash-rules>
+- The snapshot shipped here: `ircidr.txt` and `ir-lite.txt` from the `release` branch, taken
+  unmodified apart from a four-line provenance header, and refreshed by
+  `scripts/update-iran-routes.mjs`
+- Licence: GNU General Public License v3.0
+- Copyright: the Iran-clash-rules contributors
+
+These are data rather than code, and they are conveyed verbatim. WhiteAesther is AGPL-3.0, which
+carries the same obligations GPL-3.0 asks of us here: the source of the lists is named above and
+the app's own source stays public.
+
 ## Cloudflare WARP
 
 WhiteAesther connects to Cloudflare's WARP and MASQUE infrastructure using the protocols Aether

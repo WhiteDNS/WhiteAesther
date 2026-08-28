@@ -21,7 +21,7 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -39,6 +39,22 @@ const TUNNEL_PROXY: &str = "aether";
 const EXIT_GROUP: &str = "exit";
 /// The provider holding whatever the user pasted by hand.
 const MANUAL_PROVIDER: &str = "manual";
+/// The bundled rule-providers that let Iranian sites skip the exit group.
+/// See [`crate::iran_routes`] for where the lists come from.
+const IRAN_IP_PROVIDER: &str = "iran-ip";
+const IRAN_DOMAIN_PROVIDER: &str = "iran-domain";
+/// The name the TUN device takes, so a person looking at their adapter list
+/// can tell what made it.
+const TUN_DEVICE: &str = "WhiteAesther";
+/// The tunnel's executable, named so its own packets can be kept out of the
+/// device they would otherwise be fed back into.
+#[cfg(windows)]
+const TUNNEL_PROCESS: &str = "aether.exe";
+#[cfg(not(windows))]
+const TUNNEL_PROCESS: &str = "aether";
+/// How long to wait for the TUN device to actually come up before giving up on
+/// it. Creating an adapter and installing routes is slower than binding a port.
+const TUN_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long to wait for mihomo to answer its own API before giving up on it.
 const READY_TIMEOUT: Duration = Duration::from_secs(12);
@@ -91,6 +107,42 @@ impl Default for ChainSettings {
             manual: String::new(),
             node: None,
         }
+    }
+}
+
+/// What one run of the routing engine has to do.
+///
+/// mihomo began here as the second hop and is now also what carries full-tunnel
+/// mode and the Iran bypass, so a run is no longer described by one setting.
+/// Passed as a struct rather than five positional arguments because three of
+/// them are bare bools and an Option, which is exactly the shape that gets
+/// silently transposed at a call site.
+pub struct ChainRequest<'a> {
+    /// The tunnel's SOCKS5 listener, when one is up.
+    pub tunnel: Option<SocketAddr>,
+    pub settings: &'a ChainSettings,
+    /// Let Iranian sites go straight out. See [`crate::iran_routes`].
+    pub bypass_iran_sites: bool,
+    /// Capture every application's traffic through a TUN device, including the
+    /// ones that ignore proxy settings entirely -- which is the only way to
+    /// close a DNS leak, since a program that speaks to port 53 directly never
+    /// consults a proxy.
+    pub tun: bool,
+    /// The gateway address the tunnel is connected to.
+    ///
+    /// Only used with `tun`, and required by it: with a default route pointing
+    /// into the TUN device, the tunnel's own packets to its gateway would be
+    /// captured and fed back into the tunnel that produced them. Naming the
+    /// address here is what lets that one destination stay on the physical
+    /// interface.
+    pub endpoint: Option<IpAddr>,
+}
+
+impl ChainRequest<'_> {
+    /// Whether a second hop is wanted, as opposed to the engine running only to
+    /// hold up a TUN device.
+    fn wants_exit_chain(&self) -> bool {
+        self.settings.enabled
     }
 }
 
@@ -148,28 +200,37 @@ impl Chain {
         self.address().is_some()
     }
 
-    /// Starts mihomo with every node dialling through `tunnel`.
+    /// Starts mihomo for whatever the request asks of it.
     ///
     /// Returns the address to point applications at. Fails rather than starting
-    /// a chain that would silently bypass the tunnel.
-    pub fn start(
-        &self,
-        app: &AppHandle,
-        tunnel: Option<SocketAddr>,
-        settings: &ChainSettings,
-    ) -> Result<SocketAddr, String> {
+    /// something that would silently bypass the tunnel, or report a TUN device
+    /// that never came up.
+    pub fn start(&self, app: &AppHandle, request: &ChainRequest) -> Result<SocketAddr, String> {
         self.stop();
 
+        let settings = request.settings;
+        let tunnel = request.tunnel;
         let usable: Vec<&ChainSource> = settings
             .sources
             .iter()
             .filter(|source| source.enabled && !source.url.trim().is_empty())
             .collect();
-        if usable.is_empty() && settings.manual.trim().is_empty() {
-            return Err("add a subscription or a config before turning the chain on".into());
+        if request.wants_exit_chain() {
+            if usable.is_empty() && settings.manual.trim().is_empty() {
+                return Err("add a subscription or a config before turning the chain on".into());
+            }
+            if settings.through_tunnel && tunnel.is_none() {
+                return Err("connect first, or turn off \"dial nodes through the tunnel\"".into());
+            }
+        } else if !request.tun {
+            // Nothing to do: no second hop wanted and no device to hold up.
+            return Err("the chain has nothing to carry".into());
         }
-        if settings.through_tunnel && tunnel.is_none() {
-            return Err("connect first, or turn off \"dial nodes through the tunnel\"".into());
+        // Full tunnel forwards everything to the tunnel's listener, so without
+        // one it would capture the machine's traffic and have nowhere to send
+        // it -- which is worse than not capturing it.
+        if request.tun && tunnel.is_none() {
+            return Err("connect first: full tunnel has nothing to forward to".into());
         }
 
         let binary = locate(app)?;
@@ -201,8 +262,31 @@ impl Chain {
             std::fs::write(home.join("providers").join("manual.txt"), settings.manual.trim())
                 .map_err(|error| format!("cannot write the pasted configs: {error}"))?;
         }
+        if request.bypass_iran_sites {
+            std::fs::write(
+                home.join("providers").join(format!("{IRAN_IP_PROVIDER}.txt")),
+                crate::iran_routes::ip_ranges_for_mihomo(),
+            )
+            .map_err(|error| format!("cannot write the Iran IP list: {error}"))?;
+            std::fs::write(
+                home.join("providers").join(format!("{IRAN_DOMAIN_PROVIDER}.txt")),
+                crate::iran_routes::domains_for_mihomo(),
+            )
+            .map_err(|error| format!("cannot write the Iran domain list: {error}"))?;
+        }
 
-        let config = render(tunnel, mixed, api, &secret, &usable, &settings.manual);
+        let config = render(&RenderPlan {
+            tunnel,
+            mixed,
+            api,
+            secret: &secret,
+            sources: &usable,
+            manual: &settings.manual,
+            bypass_iran_sites: request.bypass_iran_sites,
+            exit_chain: request.wants_exit_chain(),
+            tun: request.tun,
+            endpoint: request.endpoint,
+        });
         let config_path = home.join("config.yaml");
         std::fs::write(&config_path, config)
             .map_err(|error| format!("cannot write the chain config: {error}"))?;
@@ -258,7 +342,16 @@ impl Chain {
         }
 
         let api_address = SocketAddr::from((Ipv4Addr::LOCALHOST, api));
-        if let Err(error) = wait_until_ready(api_address, &secret) {
+        let mut outcome = wait_until_ready(api_address, &secret);
+        // mihomo does not exit when it cannot create the device: it logs the
+        // refusal and carries on serving its mixed port, so a run that captured
+        // nothing at all would otherwise look exactly like a successful one.
+        // Its API reports the device's real state rather than what the config
+        // asked for, which is what makes this checkable.
+        if outcome.is_ok() && request.tun {
+            outcome = wait_until_tun_is_up(api_address, &secret);
+        }
+        if let Err(error) = outcome {
             // A half-started chain must never be left behind: the system proxy
             // would point at a port nothing is listening on.
             let _ = child.kill();
@@ -575,14 +668,56 @@ impl Drop for Chain {
 /// the user had already replaced. Pointing the fetch at the tunnel is what
 /// makes it independent of the hop it is trying to configure, and it still
 /// never leaves the machine in the clear.
-fn render(
+/// Everything one generated config depends on.
+///
+/// A struct because the list outgrew what anyone can read positionally: four of
+/// these are bools and Options of the same shape, and transposing two of them
+/// would produce a config that is valid, silently wrong, and routes traffic.
+struct RenderPlan<'a> {
     tunnel: Option<SocketAddr>,
     mixed: u16,
     api: u16,
-    secret: &str,
-    sources: &[&ChainSource],
-    manual: &str,
-) -> String {
+    secret: &'a str,
+    sources: &'a [&'a ChainSource],
+    manual: &'a str,
+    bypass_iran_sites: bool,
+    /// Whether a second hop is being set up, or the engine is only holding up
+    /// a TUN device in front of the tunnel.
+    exit_chain: bool,
+    tun: bool,
+    endpoint: Option<IpAddr>,
+}
+
+impl Default for RenderPlan<'_> {
+    fn default() -> Self {
+        Self {
+            tunnel: None,
+            mixed: DEFAULT_MIXED_PORT,
+            api: 1821,
+            secret: "",
+            sources: &[],
+            manual: "",
+            bypass_iran_sites: false,
+            exit_chain: true,
+            tun: false,
+            endpoint: None,
+        }
+    }
+}
+
+fn render(plan: &RenderPlan) -> String {
+    let RenderPlan {
+        tunnel,
+        mixed,
+        api,
+        secret,
+        sources,
+        manual,
+        bypass_iran_sites,
+        exit_chain,
+        tun,
+        endpoint,
+    } = *plan;
     let mut config = String::new();
     config.push_str(&format!("mixed-port: {mixed}\n"));
     // Loopback only, with a secret that changes every run. Without both, any
@@ -594,13 +729,68 @@ fn render(
     // minute and now go to the app log rather than an undrained pipe.
     config.push_str("mode: rule\nlog-level: info\nipv6: true\n");
 
+    // The device that makes this a full tunnel rather than a proxy. Written
+    // line by line because it is YAML, where one wrong space changes what it
+    // means.
+    if tun {
+        config.push_str("tun:\n");
+        config.push_str("  enable: true\n");
+        // gVisor rather than the system stack: it needs no kernel driver
+        // beyond the adapter itself, and it is the stack mihomo treats as its
+        // portable default.
+        config.push_str("  stack: gvisor\n");
+        config.push_str(&format!("  device: {TUN_DEVICE}\n"));
+        // Installs the default route. Without it the device exists and nothing
+        // is sent to it.
+        config.push_str("  auto-route: true\n");
+        config.push_str("  auto-detect-interface: true\n");
+        // `strict-route` is deliberately not set, and this is the reason.
+        //
+        // It exists to force in the traffic `auto-route` misses -- a DNS query
+        // to a resolver on the local network never crosses the default route,
+        // so it is never hijacked -- which is exactly the hole this mode is
+        // meant to close. But it closes it by refusing to let anything leave
+        // except through the device, and the tunnel this whole arrangement
+        // feeds is a *separate process* whose packets have to reach a gateway
+        // on the open internet. Turning it on took the connection out
+        // entirely once the exit chain was in the path.
+        //
+        // The exemption below is the same idea done at a layer that can tell
+        // the difference. Revisit only with a way to test it: the failure is
+        // total loss of connectivity, which is not something to guess at.
+        //
+        // A program that speaks to port 53 itself never consults a proxy, so
+        // this is what stops the query leaving in the clear alongside a
+        // tunnelled connection. Both transports: a resolver that is refused
+        // over UDP will retry the same query over TCP.
+        config.push_str("  dns-hijack:\n    - any:53\n    - tcp://any:53\n");
+    }
+
     // Resolvers live inside the chain. A query that escapes to the local
     // network names the destination even when the traffic itself does not.
-    config.push_str(
-        "dns:\n  enable: true\n  ipv6: true\n  enhanced-mode: fake-ip\n  \
-         fake-ip-range: 198.18.0.1/16\n  nameserver:\n    - https://1.1.1.1/dns-query\n    \
-         - https://dns.google/dns-query\n",
-    );
+    config.push_str("dns:\n");
+    config.push_str("  enable: true\n");
+    config.push_str("  ipv6: true\n");
+    config.push_str("  enhanced-mode: fake-ip\n");
+    config.push_str("  fake-ip-range: 198.18.0.1/16\n");
+    // Names that must resolve to something real. A machine on the local
+    // network handed a fake address is simply unreachable, and the person
+    // trying to print blames the tunnel, correctly.
+    config.push_str("  fake-ip-filter:\n    - \"*.lan\"\n    - \"*.local\"\n    - \"*.home.arpa\"\n");
+    // Plain addresses, used only to resolve the hostnames of the resolvers
+    // below. Without it a DoH URL written as a name cannot be looked up
+    // without already having a resolver.
+    config.push_str("  default-nameserver:\n    - 1.1.1.1\n    - 9.9.9.9\n");
+    config.push_str("  nameserver:\n    - https://1.1.1.1/dns-query\n    - https://dns.google/dns-query\n");
+    // Resolving the proxies' own hostnames cannot go through the proxies: that
+    // is the same circle as fetching a subscription through the node it
+    // describes.
+    config.push_str("  proxy-server-nameserver:\n    - https://1.1.1.1/dns-query\n");
+    // Anything mihomo does resolve itself follows the same rules as the
+    // traffic. Without this those queries take a direct route regardless of
+    // where the traffic goes, so the resolver and the exit end up in different
+    // countries -- which is both a leak and a mismatch anyone can see.
+    config.push_str("  respect-rules: true\n");
 
     // Declared only when there is a tunnel to declare. A socks5 proxy pointing
     // at a port nothing is listening on would fail every node it fronted.
@@ -620,10 +810,10 @@ fn render(
     };
 
     let mut names: Vec<String> = Vec::new();
-    if !sources.is_empty() || !manual.trim().is_empty() {
+    if exit_chain && (!sources.is_empty() || !manual.trim().is_empty()) {
         config.push_str("proxy-providers:\n");
     }
-    for (index, source) in sources.iter().enumerate() {
+    for (index, source) in sources.iter().enumerate().filter(|_| exit_chain) {
         let key = format!("source{index}");
         names.push(key.clone());
         config.push_str(&format!(
@@ -635,7 +825,7 @@ fn render(
             provider_cache(&source.url),
         ));
     }
-    if !manual.trim().is_empty() {
+    if exit_chain && !manual.trim().is_empty() {
         names.push(MANUAL_PROVIDER.into());
         config.push_str(&format!(
             "  {MANUAL_PROVIDER}:\n    type: file\n    path: ./providers/manual.txt{through}\n    \
@@ -644,13 +834,109 @@ fn render(
         ));
     }
 
-    config.push_str(&format!(
-        "proxy-groups:\n  - name: {EXIT_GROUP}\n    type: select\n    use: [{}]\n",
-        names.join(", ")
-    ));
-    // Everything goes to the exit group. A rule that let anything take a direct
-    // route would put that traffic on the local network in the clear.
-    config.push_str("rules:\n  - MATCH,{}\n".replace("{}", EXIT_GROUP).as_str());
+    if exit_chain {
+        config.push_str(&format!(
+            "proxy-groups:\n  - name: {EXIT_GROUP}\n    type: select\n    use: [{}]\n",
+            names.join(", ")
+        ));
+    }
+
+    // Where everything that matches nothing else ends up: the second hop when
+    // there is one, otherwise the tunnel itself. A rule that let it take a
+    // direct route would put that traffic on the local network in the clear.
+    let catch_all = if exit_chain { EXIT_GROUP } else { TUNNEL_PROXY };
+
+    if bypass_iran_sites {
+        // Written line by line rather than as one long literal: this is YAML,
+        // where a stray space changes the meaning, and a single string with
+        // embedded newlines hides that from review.
+        config.push_str("rule-providers:\n");
+        for (name, behavior) in
+            [(IRAN_DOMAIN_PROVIDER, "domain"), (IRAN_IP_PROVIDER, "ipcidr")]
+        {
+            config.push_str(&format!("  {name}:\n"));
+            config.push_str("    type: file\n");
+            config.push_str(&format!("    behavior: {behavior}\n"));
+            config.push_str("    format: text\n");
+            config.push_str(&format!("    path: ./providers/{name}.txt\n"));
+        }
+    }
+
+    config.push_str("rules:\n");
+
+    // First, before anything else can claim it: the tunnel's own traffic.
+    //
+    // `auto-route` points the default route at the TUN device, and the tunnel
+    // is an ordinary program on this machine -- so its packets to Cloudflare
+    // would be captured and handed back to the tunnel that produced them. The
+    // loop is silent and total: nothing reaches the network, including the
+    // traffic that would have told anyone why.
+    //
+    // Matched on the process rather than on the gateway address, because the
+    // address is the wrong thing to key on twice over: it is not known at all
+    // until the tunnel has picked one, and it changes under us every time the
+    // tunnel reconnects somewhere else -- either of which leaves the rule
+    // matching nothing and the loop closed. The process is the same process
+    // throughout. The address rule stays as a second line of defence for a
+    // platform where process matching is unavailable.
+    if tun {
+        config.push_str(&format!("  - PROCESS-NAME,{TUNNEL_PROCESS},DIRECT\n"));
+        if let Some(address) = endpoint {
+            let prefix = if address.is_ipv4() { 32 } else { 128 };
+            // `no-resolve` because the address is already an address, and
+            // resolving it would be one more DNS query going through the
+            // device this rule exists to keep it out of.
+            config.push_str(&format!("  - IP-CIDR,{address}/{prefix},DIRECT,no-resolve\n"));
+        }
+    }
+
+    // The local network, which is not somewhere a tunnel can take you.
+    //
+    // With a default route into the device, a request to a printer, a NAS or
+    // the router itself is captured like everything else and sent to an exit
+    // node that has no path back to it. Two things follow, and both were seen:
+    // the local machine is simply unreachable, and a DNS query aimed at the
+    // router fails there and is retried by Windows on whatever other adapter
+    // it can find -- which is how a query escapes a tunnel that looked
+    // complete. Windows Delivery Optimization alone was pushing peer transfers
+    // for 192.168.x addresses through the exit.
+    //
+    // `no-resolve` throughout: these are addresses already, and resolving them
+    // would be a DNS query made to decide where a DNS query should go.
+    //
+    // The fake-ip range is deliberately absent. It is not a real destination:
+    // it is how the engine hands a name back to itself, and sending it direct
+    // would break every name it stands for.
+    for range in [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        // Link-local, carrier-grade NAT, and multicast: local in the same
+        // sense, and equally unroutable from an exit node.
+        "169.254.0.0/16",
+        "100.64.0.0/10",
+        "224.0.0.0/4",
+    ] {
+        config.push_str(&format!("  - IP-CIDR,{range},DIRECT,no-resolve
+"));
+    }
+    for range in ["fc00::/7", "fe80::/10"] {
+        config.push_str(&format!("  - IP-CIDR6,{range},DIRECT,no-resolve
+"));
+    }
+
+    // Iranian sites are the one deliberate exception to everything going out
+    // through the tunnel: filtering only applies to traffic that looks like it
+    // left the country, so a site already reachable directly gains nothing
+    // from the exit and only pays for its bandwidth.
+    if bypass_iran_sites {
+        config.push_str("  - DOMAIN-SUFFIX,ir,DIRECT\n");
+        config.push_str(&format!("  - RULE-SET,{IRAN_DOMAIN_PROVIDER},DIRECT\n"));
+        config.push_str(&format!("  - RULE-SET,{IRAN_IP_PROVIDER},DIRECT\n"));
+    }
+
+    config.push_str(&format!("  - MATCH,{catch_all}\n"));
     config
 }
 
@@ -778,6 +1064,41 @@ fn wait_until_ready(api: SocketAddr, secret: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(250));
     }
     Err(format!("the chain did not become ready: {last}"))
+}
+
+/// Waits for the TUN device to actually exist, rather than for mihomo to have
+/// been asked for one.
+///
+/// The distinction is the whole point. mihomo does not exit when it cannot
+/// create the device -- it logs `configure tun interface: Access is denied` and
+/// keeps serving its mixed port -- so the process being alive says nothing
+/// about whether a single packet is being captured. Its API answers the real
+/// question: `tun.enable` in `/configs` reports the running state, and comes
+/// back `false` on a run whose config asked for `true`.
+fn wait_until_tun_is_up(api: SocketAddr, secret: &str) -> Result<(), String> {
+    let deadline = Instant::now() + TUN_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(body) = get(api, secret, "/configs") {
+            if tun_is_enabled(&body) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(
+        "the full-tunnel device did not come up. Creating a network adapter needs permission \
+         this copy was not started with -- switch Full tunnel on again and accept the restart \
+         when it is offered."
+            .into(),
+    )
+}
+
+/// Whether mihomo reports a live TUN device in its own configuration dump.
+fn tun_is_enabled(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("tun")?.get("enable")?.as_bool())
+        .unwrap_or(false)
 }
 
 fn encode(value: &str) -> String {
@@ -934,7 +1255,7 @@ mod tests {
         // local network and leaving the exit address unchanged.
         let sources = [source("ours", "https://example.com/a"), source("theirs", "https://example.com/b")];
         let refs: Vec<&ChainSource> = sources.iter().collect();
-        let config = render(tunnel(), 1820, 1821, "s", &refs, "vless://pasted");
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, manual: "vless://pasted", ..Default::default() });
 
         let providers = config.matches("dialer-proxy: aether").count();
         assert_eq!(providers, 3, "two subscriptions and the pasted block, all behind the tunnel");
@@ -948,7 +1269,7 @@ mod tests {
         // cache, and the screen showed one stale node out of seven.
         let sources = [source("ours", "https://example.com/a")];
         let refs: Vec<&ChainSource> = sources.iter().collect();
-        let config = render(tunnel(), 1820, 1821, "s", &refs, "");
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
         assert!(config.contains("\n    proxy: aether"), "the fetch must name the tunnel");
         // And the nodes it carries still dial through the tunnel: these are two
         // different routes and setting one must not have replaced the other.
@@ -959,7 +1280,7 @@ mod tests {
     fn without_a_tunnel_the_fetch_names_no_proxy_at_all() {
         let sources = [source("ours", "https://example.com/a")];
         let refs: Vec<&ChainSource> = sources.iter().collect();
-        let config = render(None, 1820, 1821, "s", &refs, "");
+        let config = render(&RenderPlan { mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
         assert!(!config.contains("proxy: aether"), "there is no tunnel to fetch through");
     }
 
@@ -970,8 +1291,8 @@ mod tests {
         // could not refresh.
         let old = [source("ours", "https://example.com/old")];
         let new = [source("ours", "https://example.com/new")];
-        let old_config = render(tunnel(), 1820, 1821, "s", &old.iter().collect::<Vec<_>>(), "");
-        let new_config = render(tunnel(), 1820, 1821, "s", &new.iter().collect::<Vec<_>>(), "");
+        let old_config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &old.iter().collect::<Vec<_>>(), ..Default::default() });
+        let new_config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &new.iter().collect::<Vec<_>>(), ..Default::default() });
         let path_of = |config: &str| {
             config
                 .lines()
@@ -984,17 +1305,33 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_allowed_to_take_a_direct_route() {
-        let config = render(tunnel(), 1820, 1821, "s", &[], "vless://pasted");
+    fn nothing_routable_is_allowed_to_take_a_direct_route() {
+        // Local addresses are exempt on purpose -- an exit node has no path to
+        // a printer -- so the rule is no longer "nothing is direct". It is that
+        // nothing which could actually leave this network is: the catch-all
+        // must be the exit, and every direct rule must name a range that is
+        // unroutable from outside.
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://pasted", ..Default::default() });
         assert!(config.contains("MATCH,exit"));
-        assert!(!config.contains("DIRECT"), "a direct rule would leak that traffic locally");
+        assert!(!config.contains("MATCH,DIRECT"), "the catch-all must never be direct");
+
+        const LOCAL: [&str; 9] = [
+            "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+            "169.254.0.0/16", "100.64.0.0/10", "224.0.0.0/4", "fc00::/7", "fe80::/10",
+        ];
+        for line in config.lines().filter(|line| line.contains("DIRECT")) {
+            assert!(
+                LOCAL.iter().any(|range| line.contains(range)),
+                "a direct rule that is not a local range would leak that traffic: {line}"
+            );
+        }
     }
 
     #[test]
     fn dns_resolves_inside_the_chain() {
         // A query that escapes names the destination even when the traffic does
         // not, which is the most common way a chain like this leaks.
-        let config = render(tunnel(), 1820, 1821, "s", &[], "vless://x");
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
         assert!(config.contains("enhanced-mode: fake-ip"));
         assert!(config.contains("https://1.1.1.1/dns-query"));
         assert!(!config.contains("\n    - 8.8.8.8"), "a plain resolver would leave the chain");
@@ -1002,7 +1339,7 @@ mod tests {
 
     #[test]
     fn the_control_api_is_never_exposed() {
-        let config = render(tunnel(), 1820, 1821, "s3cret", &[], "vless://x");
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s3cret", manual: "vless://x", ..Default::default() });
         assert!(config.contains("external-controller: 127.0.0.1:1821"));
         assert!(config.contains("secret: \"s3cret\""));
     }
@@ -1013,10 +1350,267 @@ mod tests {
         off.enabled = false;
         let on = source("on", "https://example.com/on");
         let refs: Vec<&ChainSource> = vec![&on];
-        let config = render(tunnel(), 1820, 1821, "s", &refs, "");
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
         assert!(config.contains("example.com/on"));
         assert!(!config.contains("example.com/off"));
         let _ = off;
+    }
+
+    #[test]
+    fn full_tunnel_declares_a_device_and_hijacks_dns() {
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            ..Default::default()
+        });
+        assert!(config.contains("tun:"), "the device has to be declared");
+        assert!(config.contains("enable: true"));
+        assert!(config.contains("auto-route: true"), "without this nothing is sent to it");
+        // The reason the feature exists: a program that speaks to port 53
+        // itself never consults a proxy, so only hijacking catches it.
+        assert!(config.contains("dns-hijack:"), "{config}");
+        assert!(config.contains("any:53"), "{config}");
+    }
+
+    #[test]
+    fn full_tunnel_hijacks_dns_on_both_transports() {
+        // A program that speaks to port 53 itself never consults a proxy, so
+        // hijacking is what stops the query leaving in the clear beside a
+        // tunnelled connection.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            ..Default::default()
+        });
+        assert!(config.contains("dns-hijack:"), "{config}");
+        assert!(config.contains("- any:53"), "{config}");
+        // A resolver refused over UDP retries the same query over TCP.
+        assert!(config.contains("tcp://any:53"), "{config}");
+    }
+
+    #[test]
+    fn dns_that_the_engine_resolves_itself_follows_the_traffic() {
+        // Without this, those queries take a direct route whatever the traffic
+        // does -- so the resolver and the exit end up in different countries,
+        // which is both a leak and a mismatch anyone can see on a leak test.
+        let config = render(&RenderPlan { tunnel: tunnel(), manual: "vless://x", ..Default::default() });
+        assert!(config.contains("respect-rules: true"), "{config}");
+        // Resolving the proxies' own names cannot go through the proxies.
+        assert!(config.contains("proxy-server-nameserver:"), "{config}");
+        // And a name on the local network must resolve to something real, or
+        // the printer is unreachable and the tunnel gets the blame.
+        assert!(config.contains("fake-ip-filter:"), "{config}");
+        assert!(config.contains("*.lan"), "{config}");
+    }
+
+    #[test]
+    fn without_full_tunnel_no_device_is_declared() {
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            ..Default::default()
+        });
+        assert!(!config.contains("tun:"));
+        assert!(!config.contains("dns-hijack"));
+    }
+
+    #[test]
+    fn the_tunnels_own_gateway_is_kept_out_of_the_device_it_feeds() {
+        // The loop this prevents is silent and total: auto-route sends the
+        // default route into the device, the tunnel is an ordinary program on
+        // this machine, and its packets to the gateway would be captured and
+        // handed back to the tunnel that produced them -- taking everything
+        // down including whatever would have explained why.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            endpoint: Some("162.159.198.2".parse().unwrap()),
+            ..Default::default()
+        });
+        assert!(
+            config.contains("- IP-CIDR,162.159.198.2/32,DIRECT,no-resolve"),
+            "{config}"
+        );
+        // The process rule is what actually holds it: the address is unknown
+        // until a gateway has been picked and changes on every reconnect, so a
+        // rule keyed on it alone leaves the loop closed exactly when it matters.
+        assert!(
+            config.contains(&format!("- PROCESS-NAME,{TUNNEL_PROCESS},DIRECT")),
+            "{config}"
+        );
+        // And it has to be the first rule, or a rule above it could claim the
+        // tunnel first and the loop closes anyway.
+        let rules = config.split("rules:\n").nth(1).expect("a rules section");
+        let first = rules.lines().next().expect("a first rule");
+        assert!(first.contains("PROCESS-NAME"), "the tunnel must be exempted first: {first}");
+    }
+
+    #[test]
+    fn the_local_network_is_never_sent_to_an_exit_node() {
+        // An exit node has no path back to a printer, a NAS or the router. Two
+        // things follow and both were seen on a live machine: the local
+        // machine is unreachable, and a DNS query aimed at the router fails
+        // there and is retried by Windows on some other adapter -- which is
+        // how a query escapes a tunnel that looked complete.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            ..Default::default()
+        });
+        for range in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"] {
+            assert!(
+                config.contains(&format!("- IP-CIDR,{range},DIRECT,no-resolve")),
+                "{range} must stay off the exit: {config}"
+            );
+        }
+        assert!(config.contains("- IP-CIDR6,fe80::/10,DIRECT,no-resolve"), "{config}");
+
+        // The fake-ip range must never be direct: it is not a destination, it
+        // is how the engine hands a name back to itself, and sending it out
+        // would break every name it stands for.
+        assert!(!config.contains("- IP-CIDR,198.18"), "{config}");
+
+        // And they have to be checked before the catch-all, or the catch-all
+        // claims them first and none of this matters.
+        let rules = config.split("rules:
+").nth(1).expect("a rules section");
+        let private = rules.find("192.168.0.0/16").expect("the private rule");
+        let catch_all = rules.find("MATCH,").expect("the catch-all");
+        assert!(private < catch_all, "private ranges must be decided first");
+    }
+
+    #[test]
+    fn the_tunnel_is_exempted_even_when_no_gateway_is_known_yet() {
+        // The address is not known until a gateway has been picked, and it
+        // changes under us on every reconnect. Keyed on it alone the rule
+        // matches nothing, and every packet the tunnel sends is handed back to
+        // the tunnel -- so the exemption cannot depend on knowing it.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            endpoint: None,
+            ..Default::default()
+        });
+        assert!(
+            config.contains(&format!("- PROCESS-NAME,{TUNNEL_PROCESS},DIRECT")),
+            "{config}"
+        );
+        // The gateway rule is the one that cannot be written without an
+        // address. The local ranges are constants and are always there.
+        assert!(
+            !config.contains(",DIRECT,no-resolve
+  - IP-CIDR,162"),
+            "no gateway rule without a gateway: {config}"
+        );
+        assert_eq!(
+            config.matches("IP-CIDR,").count(),
+            7,
+            "only the seven local IPv4 ranges: {config}"
+        );
+    }
+
+    #[test]
+    fn strict_route_is_never_set() {
+        // It refuses to let anything leave except through the device, and the
+        // tunnel this arrangement feeds is a separate process that has to
+        // reach a gateway on the open internet. With it on, the connection
+        // went away entirely once the exit chain was in the path.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            endpoint: Some("162.159.198.2".parse().unwrap()),
+            ..Default::default()
+        });
+        assert!(!config.contains("strict-route"), "{config}");
+    }
+
+    #[test]
+    fn an_ipv6_gateway_gets_the_right_prefix_length() {
+        // /32 on an IPv6 address would silently exempt a sixteenth of the
+        // internet rather than one host.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            manual: "vless://x",
+            tun: true,
+            endpoint: Some("2606:4700:d0::a29f:c602".parse().unwrap()),
+            ..Default::default()
+        });
+        assert!(config.contains("- IP-CIDR,2606:4700:d0::a29f:c602/128,DIRECT,no-resolve"), "{config}");
+    }
+
+    #[test]
+    fn full_tunnel_without_a_second_hop_sends_everything_to_the_tunnel() {
+        // The engine runs to hold up the device even when no exit chain was
+        // asked for. With no exit group to point at, the catch-all has to name
+        // the tunnel itself -- pointing at a group that was never declared
+        // would be a config mihomo rejects.
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            exit_chain: false,
+            tun: true,
+            ..Default::default()
+        });
+        assert!(config.contains("- MATCH,aether"), "{config}");
+        assert!(!config.contains("proxy-groups"), "no group without a second hop");
+        assert!(!config.contains("MATCH,exit"));
+    }
+
+    #[test]
+    fn a_second_hop_still_takes_the_catch_all_when_both_are_on() {
+        let source = source("ours", "https://example.com/a");
+        let refs: Vec<&ChainSource> = vec![&source];
+        let config = render(&RenderPlan {
+            tunnel: tunnel(),
+            sources: &refs,
+            tun: true,
+            ..Default::default()
+        });
+        assert!(config.contains("- MATCH,exit"), "{config}");
+        assert!(config.contains("proxy-groups"));
+    }
+
+    #[test]
+    fn a_tun_device_that_never_came_up_is_not_reported_as_running() {
+        // mihomo answers this with the running state, not the requested one:
+        // it keeps serving its mixed port after refusing to make the adapter,
+        // so a failed run is otherwise indistinguishable from a good one.
+        assert!(!tun_is_enabled(r#"{"tun":{"enable":false,"device":"WhiteAesther"}}"#));
+        assert!(tun_is_enabled(r#"{"tun":{"enable":true,"device":"WhiteAesther"}}"#));
+        // Nothing to read is not a yes.
+        assert!(!tun_is_enabled("{}"));
+        assert!(!tun_is_enabled("not json at all"));
+        assert!(!tun_is_enabled(r#"{"tun":{}}"#));
+    }
+
+    #[test]
+    fn iran_bypass_adds_rule_providers_ahead_of_the_exit_group() {
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", bypass_iran_sites: true, ..Default::default() });
+        assert!(config.contains("DOMAIN-SUFFIX,ir,DIRECT"));
+        assert!(config.contains("RULE-SET,iran-domain,DIRECT"));
+        assert!(config.contains("RULE-SET,iran-ip,DIRECT"));
+        // Order matters: a match earlier in the list wins, so the direct
+        // rules have to come before the catch-all or they never fire.
+        let direct = config.find("RULE-SET,iran-ip,DIRECT").unwrap();
+        let catch_all = config.find("MATCH,exit").unwrap();
+        assert!(direct < catch_all, "the direct rules must be checked before MATCH");
+        assert!(config.contains("behavior: domain"));
+        assert!(config.contains("behavior: ipcidr"));
+    }
+
+    #[test]
+    fn without_the_iran_bypass_no_rule_provider_is_declared() {
+        // The default: nothing here should change for someone who never
+        // touched the setting.
+        let config = render(&RenderPlan { tunnel: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
+        assert!(!config.contains("rule-providers"));
+        assert!(!config.contains("DOMAIN-SUFFIX,ir"));
+        assert_eq!(config.matches("MATCH,exit").count(), 1);
     }
 
     #[test]
@@ -1024,7 +1618,7 @@ mod tests {
         // The whole point of the fallback: on a network that resets MASQUE the
         // tunnel never comes up, and a config that still insisted on dialling
         // through it would leave the user with nothing working at all.
-        let config = render(None, 1820, 1821, "s", &[], "vless://x");
+        let config = render(&RenderPlan { mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
         assert!(!config.contains("dialer-proxy"), "nothing to dial through");
         assert!(
             !config.contains("type: socks5"),
@@ -1174,5 +1768,42 @@ mod tests {
         let taken = held.local_addr().unwrap().port();
         let chosen = preferred_port(taken).unwrap();
         assert_ne!(chosen, taken);
+    }
+}
+
+#[cfg(test)]
+mod config_dump {
+    use super::*;
+
+    /// Writes the config the app would generate with the Iran bypass on, so it
+    /// can be handed to the real mihomo for validation. Not part of the suite:
+    /// it exists to be run by hand when the generated shape changes.
+    #[test]
+    #[ignore = "writes a config for manual validation against the mihomo binary"]
+    fn dump_iran_bypass_config() {
+        let out = std::env::var("WHITEAESTHER_CONFIG_DUMP")
+            .expect("set WHITEAESTHER_CONFIG_DUMP to the path to write");
+        let source = ChainSource {
+            name: "ours".into(),
+            url: "https://example.com/sub".into(),
+            enabled: true,
+        };
+        let refs: Vec<&ChainSource> = vec![&source];
+        let config = render(&RenderPlan {
+            tunnel: Some("127.0.0.1:1819".parse().unwrap()),
+            mixed: 1820,
+            api: 1821,
+            secret: "secret",
+            sources: &refs,
+            bypass_iran_sites: true,
+            // Set from the environment so one dump can cover either shape.
+            tun: std::env::var("WHITEAESTHER_CONFIG_DUMP_TUN").is_ok(),
+            endpoint: std::env::var("WHITEAESTHER_CONFIG_DUMP_ENDPOINT")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+            ..Default::default()
+        });
+        std::fs::write(&out, config).unwrap();
+        println!("wrote {out}");
     }
 }

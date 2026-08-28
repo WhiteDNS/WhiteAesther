@@ -41,12 +41,17 @@ export const CARRY_OPTIONS: CarryOption[] = [
     title: "Full tunnel",
     detail: "Every app, even ones that ignore proxies",
     icon: Layers,
-    disabled: true,
-    disabledReason: "Not in this build yet",
   },
 ];
 
-export function carryFromProfile(systemProxy: boolean): CarryMode {
+/**
+ * Which of the three the profile currently describes.
+ *
+ * Full tunnel wins when both are set: it is the stronger of the two, and a
+ * system proxy left over from before is not what the person chose last.
+ */
+export function carryFromProfile(systemProxy: boolean, fullTunnel = false): CarryMode {
+  if (fullTunnel) return "tun";
   return systemProxy ? "system" : "app";
 }
 
@@ -59,7 +64,9 @@ export function carryFromProfile(systemProxy: boolean): CarryMode {
  */
 export function describeCarry(mode: CarryMode, carryAddress: string): string {
   if (mode === "system") return "Your system proxy is set, and will be put back when you disconnect.";
-  if (mode === "tun") return "Every app on this machine is going through the tunnel.";
+  if (mode === "tun") {
+    return "Every app is captured through a network device, including the ones that ignore proxy settings.";
+  }
   return `Point apps at ${carryAddress} to use it.`;
 }
 

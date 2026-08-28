@@ -119,6 +119,15 @@ function settingsLine(profile: ConnectionProfile): string {
     ["logLevel", profile.logLevel],
     ["ech", profile.ech && profile.ech !== "off" ? "set" : "off"],
     ["routeRules", profile.routeBlock.trim().length > 0 || profile.routeDirect.trim().length > 0],
+    ["fullTunnel", profile.fullTunnel],
+    // Presence only. The URL may carry a password, and this file gets handed
+    // to other people — same reason the endpoint and organisation are reported
+    // as booleans above.
+    ["upstreamProxy", profile.upstreamProxy.trim().length > 0],
+    ["routeSniff", profile.routeSniff],
+    ["autoReprovision", profile.autoReprovision],
+    ["keepaliveSecs", profile.keepaliveSecs],
+    ["bypassIranSites", profile.bypassIranSites],
     ["endpoint", profile.endpointMode],
     // Values, not just presence, would put the user's endpoint and their
     // organization into a file they are about to send somewhere.

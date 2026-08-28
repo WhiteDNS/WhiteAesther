@@ -1,6 +1,8 @@
 mod chain;
 mod core_supervisor;
+mod elevation;
 mod http_bridge;
+mod iran_routes;
 mod lan_share;
 mod latency;
 mod scanner;
@@ -13,6 +15,22 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
+
+/// The tray icon's id, used to create it and to take it away again.
+///
+/// Windows keeps showing a tray icon after the process that owns it is gone --
+/// it only notices on the next hover -- so every path that ends this process
+/// has to remove the icon itself. A build installed over a running copy is the
+/// common way to collect a row of dead icons.
+const TRAY_ID: &str = "whiteaesther";
+
+/// Takes the tray icon away before the process goes.
+///
+/// Idempotent, and safe to call from every exit path: removing an icon that has
+/// already gone does nothing.
+fn remove_tray(app: &AppHandle) {
+    app.remove_tray_by_id(TRAY_ID);
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +121,13 @@ pub fn run() {
                 Err(error) => eprintln!("could not restore the system proxy: {error}"),
             }
 
+            // Full tunnel restarts this app elevated, and from then on the
+            // desktop shortcut is at a lower integrity level than the copy it
+            // is trying to wake. Windows blocks messages sent up that gradient,
+            // so without this a click on the icon found the running copy and
+            // silently failed to reach it.
+            elevation::allow_launches_from_an_ordinary_user(&app.config().identifier);
+
             // One thread delivers logs and status to the window on a timer, so
             // the core's own progress never waits on the interface.
             core_supervisor::start_pump(app.handle().clone(), &app.state::<CoreSupervisor>());
@@ -139,7 +164,7 @@ pub fn run() {
                 .cloned()
                 .ok_or("application icon is unavailable")?;
 
-            TrayIconBuilder::with_id("whiteaesther")
+            TrayIconBuilder::with_id(TRAY_ID)
                 .icon(icon)
                 .tooltip(format!("WhiteAesther {}", app.package_info().version))
                 .menu(&menu)
@@ -163,6 +188,7 @@ pub fn run() {
                     }
                     "quit" => {
                         app.state::<CoreSupervisor>().shutdown(app);
+                        remove_tray(app);
                         app.exit(0);
                     }
                     _ => {}
@@ -206,6 +232,10 @@ pub fn run() {
             core_supervisor::save_report,
             core_supervisor::set_system_proxy,
             core_supervisor::set_chain,
+            core_supervisor::set_full_tunnel,
+            core_supervisor::full_tunnel_is_permitted,
+            core_supervisor::resuming_full_tunnel,
+            core_supervisor::restart_as_administrator,
             core_supervisor::set_lan_share,
             core_supervisor::lan_share_status,
             scanner::scan_endpoints,
@@ -226,8 +256,16 @@ pub fn run() {
         // core (std::process::Child does not kill on drop). shutdown() is idempotent.
         // ponytail: cannot cover SIGKILL/OOM — that needs a pid file reaped at next launch.
         .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                app.state::<CoreSupervisor>().shutdown(app);
+            match event {
+                // Asked to go: an installer replacing this build, a logout, or
+                // a quit from the dock. The icon has to be withdrawn while
+                // there is still a process to withdraw it.
+                tauri::RunEvent::ExitRequested { .. } => remove_tray(app),
+                tauri::RunEvent::Exit => {
+                    app.state::<CoreSupervisor>().shutdown(app);
+                    remove_tray(app);
+                }
+                _ => {}
             }
         });
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BadgeCheck, Search, Settings2, ShieldAlert } from "lucide-react";
+import { ArrowUpCircle, BadgeCheck, Search, Settings2, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Advanced } from "@/features/Advanced";
@@ -9,9 +9,12 @@ import { SAMPLE_MS, type Sample, append } from "@/features/latency";
 import { CommandPalette } from "@/features/CommandPalette";
 import type { SectionId } from "@/features/settingsIndex";
 import logo from "@/assets/logo.png";
+import { type Release, checkForUpdate, dismiss as dismissUpdate } from "@/core/updates";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getCoreLogs, getCoreStatus, isDesktopRuntime, loadProfile, probeCore, probeLatency, runtimeInfo,
-  saveProfile as persistProfile, setSystemProxy, startCore, stopCore, subscribeCore,
+  NEEDS_ADMINISTRATOR, fullTunnelIsPermitted, restartAsAdministrator, resumingFullTunnel,
+  saveProfile as persistProfile, setFullTunnel, setSystemProxy, startCore, stopCore, subscribeCore,
   subscribeTrayActions,
 } from "@/core/api";
 import { withNormalizedEndpoint } from "@/core/endpoint";
@@ -45,6 +48,8 @@ export default function App() {
   const [latency, setLatency] = useState<Sample[]>([]);
   const [palette, setPalette] = useState(false);
   const [jumpTo, setJumpTo] = useState<{ section: SectionId; at: number } | null>(null);
+  /** A published release newer than this build, once one has been noticed. */
+  const [update, setUpdate] = useState<Release | null>(null);
 
   const desktop = isDesktopRuntime();
   const effective = useMemo(() => withNormalizedEndpoint(profile), [profile]);
@@ -127,6 +132,56 @@ export default function App() {
     return () => {
       disposed = true;
       window.clearTimeout(timer);
+    };
+  }, [desktop, snapshot.state]);
+
+  // The elevated copy is started with a flag saying why, and it says so rather
+  // than acting on it. Connecting is the one thing this app must never decide
+  // for someone: a tunnel that comes up on its own is a tunnel nobody asked
+  // for, on a network where that can be the wrong thing to have done.
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (!desktop || resumedRef.current) return;
+    void resumingFullTunnel().then((resuming) => {
+      if (!resuming || resumedRef.current) return;
+      resumedRef.current = true;
+      notify(
+        "Restarted with permission",
+        "Full tunnel is ready. Press Connect when you want it.",
+      );
+    });
+  }, [desktop, notify]);
+
+  // A wish for full tunnel outlives the launch that made it, so an ordinary
+  // start routinely has it switched on with no permission to honour it. Asking
+  // then -- once, on the way in -- is what makes the app get the permission by
+  // itself instead of quietly running without the thing it says it is doing.
+  const askedRef = useRef(false);
+  useEffect(() => {
+    if (!desktop || askedRef.current || !profile.fullTunnel) return;
+    askedRef.current = true;
+    void fullTunnelIsPermitted()
+      .then((permitted) => {
+        if (!permitted) setElevationPrompt(true);
+      })
+      .catch(() => {
+        // Not knowing is not a reason to interrupt anyone.
+      });
+  }, [desktop, profile.fullTunnel]);
+
+  // Asked on the way in, and again the moment a tunnel comes up. On the
+  // networks this app exists for, GitHub is not reachable until then -- so the
+  // first attempt is expected to fail and the second is the one that answers.
+  // Failure is silent either way: nobody needs telling that a version check did
+  // not happen.
+  useEffect(() => {
+    if (!desktop) return;
+    let disposed = false;
+    void checkForUpdate(appVersion, snapshot.state === "connected").then((release) => {
+      if (!disposed && release) setUpdate(release);
+    });
+    return () => {
+      disposed = true;
     };
   }, [desktop, snapshot.state]);
 
@@ -226,24 +281,61 @@ export default function App() {
     [desktop, showError],
   );
 
-  const carry: CarryMode = carryFromProfile(profile.systemProxy);
+  const carry: CarryMode = carryFromProfile(profile.systemProxy, profile.fullTunnel);
+  /** Set when full tunnel was asked for without the permission it needs. */
+  const [elevationPrompt, setElevationPrompt] = useState(false);
   const setCarry = useCallback(
     (next: CarryMode) => {
-      if (next === "tun") return;
       const wantsSystem = next === "system";
-      applyProfile({ systemProxy: wantsSystem });
+      const wantsTun = next === "tun";
+      applyProfile({ systemProxy: wantsSystem, fullTunnel: wantsTun });
       // The screen offers this choice while connected, so it has to take effect
       // then, rather than only at the next connect.
       if (!desktop || !ACTIVE.has(snapshot.state)) return;
-      void setSystemProxy(wantsSystem)
+
+      // Order matters on the way in and on the way out. Turning the device on
+      // before dropping the system proxy would leave the machine pointed at a
+      // listener that is about to be replaced; turning it off after would leave
+      // a moment with neither carrying anything.
+      const apply = wantsTun
+        ? setSystemProxy(false).then(() => setFullTunnel(true))
+        : setFullTunnel(false).then(() => setSystemProxy(wantsSystem));
+
+      void apply
         .then((applied) => {
-          if (wantsSystem && applied) {
+          if (wantsTun && !applied) {
+            // The device is the one carry mode the system itself can refuse.
+            // Leaving the choice looking selected would have the screen
+            // claiming a captured machine that is not.
+            applyProfile({ fullTunnel: false });
+            notify(
+              "Full tunnel did not start",
+              "The network device could not be created. Try Whole machine instead.",
+              true,
+            );
+            return;
+          }
+          if (wantsTun) {
+            notify("Full tunnel", "Every app on this machine is going through the tunnel.");
+          } else if (wantsSystem && applied) {
             notify("Whole machine", "Your system proxy now follows the active route.");
-          } else if (!wantsSystem) {
+          } else if (next === "app") {
             notify("This app only", "Your system proxy has been put back.");
           }
         })
-        .catch(showError);
+        .catch((error) => {
+          // Creating a network device needs permission this copy was not
+          // started with. That is not a failure to report and walk away from:
+          // it is a thing the app can go and get, so it offers to. The choice
+          // stays selected across the restart, because the restart is how it
+          // gets honoured.
+          if (wantsTun && String(error).includes(NEEDS_ADMINISTRATOR)) {
+            setElevationPrompt(true);
+            return;
+          }
+          if (wantsTun) applyProfile({ fullTunnel: false });
+          showError(error);
+        });
     },
     [applyProfile, desktop, snapshot.state, notify, showError],
   );
@@ -291,6 +383,44 @@ export default function App() {
           </Button>
         </div>
       </header>
+
+      {update ? (
+        <div className="flex shrink-0 items-center gap-3 border-b border-primary/30 bg-primary/[0.08] px-[18px] py-2.5">
+          <ArrowUpCircle className="size-4 shrink-0 text-primary" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-semibold text-primary">
+              WhiteAesther {update.version} is available
+            </div>
+            <div className="truncate text-[11.5px] text-muted-foreground">
+              You are running {appVersion}. Opening this takes you to the download page.
+            </div>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => {
+              // Opened in the real browser, not in this window: downloading an
+              // installer inside the app's own webview is not something it is
+              // built to do.
+              void openUrl(update.url).catch(showError);
+            }}
+          >
+            Get it
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Dismiss this update"
+            onClick={() => {
+              // Remembered against this version only, so waving one away does
+              // not silence the next.
+              dismissUpdate(update.version);
+              setUpdate(null);
+            }}
+          >
+            <X className="size-4" />
+          </Button>
+        </div>
+      ) : null}
 
       {snapshot.blocking ? (
         <div className="flex shrink-0 items-center gap-3 border-b border-warning/30 bg-warning/[0.09] px-[18px] py-2.5">
@@ -362,6 +492,60 @@ export default function App() {
       />
 
       <Credits engineVersion={probe.version} />
+
+      {elevationPrompt ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 grid place-items-center bg-background/80 p-6"
+        >
+          <div className="w-full max-w-[440px] rounded-xl border bg-popover p-5 shadow-xl">
+            <div className="text-[15px] font-semibold">Full tunnel needs permission</div>
+            <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+              Capturing every application means creating a network device, and Windows only lets an
+              administrator do that. WhiteAesther can restart itself with that permission and pick up
+              where it left off — you will see one Windows prompt.
+            </p>
+            <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
+              Your connection will drop for a moment while it restarts.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setElevationPrompt(false);
+                  // The switch was never honoured, so it must not stay looking
+                  // as though it was.
+                  applyProfile({ fullTunnel: false });
+                }}
+              >
+                Not now
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setElevationPrompt(false);
+                  void restartAsAdministrator().catch((error) => {
+                    // Refusing the Windows prompt lands here. Nothing was torn
+                    // down, so the only thing to undo is the choice itself.
+                    applyProfile({ fullTunnel: false });
+                    notify(
+                      "Full tunnel not started",
+                      String(error).includes("refused")
+                        ? "Permission was refused, so nothing was changed."
+                        : String(error),
+                      true,
+                    );
+                  });
+                }}
+              >
+                Restart with permission
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {toast ? (
         <div

@@ -12,7 +12,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use crate::chain::{Chain, ChainSettings};
+use crate::chain::{Chain, ChainRequest, ChainSettings};
 use crate::http_bridge::{self, HttpBridge};
 use crate::lan_share::{LanDoor, LanSettings, LanStatus};
 use crate::system_proxy::{self, ProxyTargets};
@@ -66,6 +66,50 @@ pub struct CoreProfile {
     pub route_block: String,
     pub route_direct: String,
     pub routes_file: Option<String>,
+    /// Capture every application through a TUN device rather than asking them
+    /// to follow a proxy.
+    ///
+    /// The only way to close a DNS leak: a program that speaks to port 53
+    /// itself never consults a proxy setting, so no amount of pointing the
+    /// system proxy at the tunnel catches it. Needs permission to create a
+    /// network adapter, which is why it is not simply always on.
+    #[serde(default)]
+    pub full_tunnel: bool,
+    /// Dial out through a proxy already running on this machine.
+    ///
+    /// `socks5://host:port` or `http://host:port`, credentials allowed in the
+    /// URL. The endpoint sweep, the registration calls and the ECH lookup all
+    /// go through it too, so the search does not reveal an address the tunnel
+    /// then hides.
+    ///
+    /// Carried to the engine in the environment rather than on the command
+    /// line, because this string can hold a password and a command line is
+    /// readable by anything that can list processes.
+    #[serde(default)]
+    pub upstream_proxy: String,
+    /// Read the host name out of the first bytes of a stream, so rules written
+    /// as domains match connections made to a bare address.
+    ///
+    /// On by default in the engine, and what "Iranian sites bypass the tunnel"
+    /// leans on whenever a destination arrives without a name.
+    #[serde(default = "yes")]
+    pub route_sniff: bool,
+    /// Register a fresh device when Cloudflare refuses the saved identity.
+    ///
+    /// On by default in the engine. Off, a refused identity is reported and
+    /// kept, which is what someone diagnosing an account wants and what
+    /// everyone else would experience as a tunnel that will not come up.
+    #[serde(default = "yes")]
+    pub auto_reprovision: bool,
+    /// Send Iranian sites straight out instead of through the tunnel.
+    ///
+    /// Filtering only applies to traffic that looks like it left Iran, so a
+    /// site already reachable directly gains nothing from the tunnel and only
+    /// pays for the exit's bandwidth -- which is otherwise a reason to
+    /// disconnect just to get ordinary speed on an ordinary site. The list
+    /// this draws on is bundled with the app; see `iran_routes`.
+    #[serde(default)]
+    pub bypass_iran_sites: bool,
     pub team: Option<String>,
     pub access_client_id: Option<String>,
     pub access_client_secret: Option<String>,
@@ -93,6 +137,13 @@ pub struct CoreProfile {
     pub kill_switch: bool,
 }
 
+/// `#[serde(default)]` on a bool means false, and both of these default to on
+/// in the engine -- so a profile written before they existed has to read as on
+/// or upgrading would silently change how traffic is routed.
+fn yes() -> bool {
+    true
+}
+
 impl Default for CoreProfile {
     fn default() -> Self {
         Self {
@@ -115,7 +166,7 @@ impl Default for CoreProfile {
             ech: None,
             tls_groups: None,
             performance_profile: "auto".into(),
-            keepalive_secs: 5,
+            keepalive_secs: 25,
             auto_reconnect: true,
             chain: ChainSettings::default(),
             lan_share: LanSettings::default(),
@@ -130,6 +181,11 @@ impl Default for CoreProfile {
             route_block: String::new(),
             route_direct: String::new(),
             routes_file: None,
+            bypass_iran_sites: false,
+            full_tunnel: false,
+            upstream_proxy: String::new(),
+            route_sniff: true,
+            auto_reprovision: true,
             team: None,
             access_client_id: None,
             access_client_secret: None,
@@ -187,7 +243,10 @@ impl CoreProfile {
         if self.reconnect_secs > 120 {
             return Err("reconnect delay must not exceed 120 seconds".into());
         }
-        if !(1..=300).contains(&self.keepalive_secs) {
+        // Zero is allowed and means "say nothing, let the engine choose",
+        // which keeps the one default in the engine rather than copying it
+        // here to drift. Same contract as the Android client.
+        if !(0..=300).contains(&self.keepalive_secs) {
             return Err("WireGuard keepalive must be between 1 and 300 seconds".into());
         }
         if self.dns.is_empty() || self.dns.len() > 8 {
@@ -255,14 +314,17 @@ impl CoreProfile {
             self.dns.join(","),
             "--noize".into(),
             self.noize.clone(),
-            "--keepalive".into(),
-            self.keepalive_secs.to_string(),
             "--log-level".into(),
             self.process_log_level().into(),
             "--config".into(),
             identity_path.to_string_lossy().into_owned(),
         ];
 
+        // Left out entirely at zero, which is how the engine is told to keep
+        // its own default rather than being handed a copy of it.
+        if self.keepalive_secs > 0 {
+            args.extend(["--keepalive".into(), self.keepalive_secs.to_string()]);
+        }
         if self.protocol == "masque" && self.masque_transport == "h2" {
             args.push("--h2".into());
         }
@@ -479,6 +541,21 @@ impl CoreSupervisor {
         (snapshot.state == "connected").then(|| snapshot.socks_address.clone())
     }
 
+    /// The gateway the tunnel is connected to, as an address.
+    ///
+    /// Full tunnel needs it: with the default route pointing into the TUN
+    /// device, the tunnel's own packets to this address would be captured and
+    /// handed back to the tunnel that produced them.
+    pub fn endpoint_address(&self) -> Option<IpAddr> {
+        let snapshot = lock(&self.inner.snapshot);
+        snapshot
+            .endpoint
+            .as_deref()?
+            .parse::<SocketAddr>()
+            .ok()
+            .map(|address| address.ip())
+    }
+
     /// Whether the first hop can carry a QUIC handshake.
     ///
     /// MASQUE cannot and WireGuard can, and the difference is 28 bytes: see
@@ -673,9 +750,24 @@ fn launch(
         .map_err(|error| format!("cannot create identity directory: {error}"))?;
     let identity_path = identity_dir.join("aether.toml");
 
+    // The bundled Iran list and the user's own routes file both become one
+    // `--routes` argument: Aether reads only one such path, so having each
+    // land in a different place would mean the two features quietly overwrite
+    // each other rather than combining, and whichever the user set second
+    // would win with no sign the other stopped applying.
+    let mut effective_profile = profile.clone();
+    if profile.bypass_iran_sites {
+        let generated = config_dir.join("routing").join("generated-routes.txt");
+        crate::iran_routes::write_combined_routes_file(
+            &generated,
+            profile.routes_file.as_deref().map(Path::new),
+        )?;
+        effective_profile.routes_file = Some(generated.to_string_lossy().into_owned());
+    }
+
     let mut command = Command::new(&core_path);
     command
-        .args(profile.args(&identity_path))
+        .args(effective_profile.args(&identity_path))
         .current_dir(&config_dir)
         .env_remove("RUST_LOG")
         .stdin(Stdio::null())
@@ -702,6 +794,27 @@ fn launch(
         "AETHER_ACCESS_TOKEN",
         profile.access_token.as_deref(),
     );
+
+    // In the environment rather than on the command line: this one can carry a
+    // password in the URL, and a command line is readable by anything that can
+    // list processes.
+    set_optional_env(
+        &mut command,
+        "AETHER_UPSTREAM",
+        non_empty(Some(profile.upstream_proxy.as_str())),
+    );
+
+    // Both of these are on in the engine and are switched off by the literal
+    // "0", so the variable is worth setting only to turn one off. Leaving it
+    // unset keeps the single default where it belongs -- in the engine --
+    // instead of copying it here where the two could drift apart.
+    if !profile.route_sniff {
+        command.env("AETHER_ROUTE_SNIFF", "0");
+    }
+    if !profile.auto_reprovision {
+        command.env("AETHER_REPROVISION", "0");
+    }
+
     hide_console_window(&mut command);
 
     let mut child = command
@@ -904,6 +1017,154 @@ fn carrier_address(inner: &SupervisorInner, chain: &Chain) -> Option<SocketAddr>
     snapshot.socks_address.parse().ok()
 }
 
+/// Whether a full-tunnel wish can actually be carried out right now.
+///
+/// The wish lives in the profile and outlives any one launch, so it is
+/// routinely on in a copy that has no permission to honour it -- after a
+/// restart that was never elevated, or an update, or simply the next morning.
+/// That must cost the person nothing: the engine still starts, the exit chain
+/// still runs, and only the device is left out. Reporting the refusal as a
+/// failure of the whole chain is what turned a missing permission into a
+/// connection that would not come up at all.
+fn tun_is_possible(inner: &SupervisorInner, wanted: bool) -> bool {
+    if !wanted {
+        return false;
+    }
+    if crate::elevation::is_elevated() {
+        return true;
+    }
+    supervisor_log(
+        inner,
+        "warn",
+        "full tunnel is switched on but this copy cannot create a network device; \
+         running without it. Switch Full tunnel on again to be offered a restart."
+            .into(),
+    );
+    false
+}
+
+/// Returned by [`set_full_tunnel`] when the device cannot be created without
+/// more permission than this process has. Matched by the screen, so it is a
+/// constant rather than a sentence someone might reword.
+pub const NEEDS_ADMINISTRATOR: &str = "needs-administrator";
+
+/// Whether this copy was restarted to finish switching full tunnel on.
+///
+/// The screen uses it to reconnect by itself, so the restart looks like the app
+/// carrying on rather than like something the person has to redo.
+#[tauri::command]
+pub fn resuming_full_tunnel() -> bool {
+    crate::elevation::started_to_resume_full_tunnel()
+}
+
+/// Whether full tunnel can be started without asking for anything first.
+///
+/// Read by the screen before it offers the switch, so the choice can say what
+/// it will cost rather than failing after the fact.
+#[tauri::command]
+pub fn full_tunnel_is_permitted() -> bool {
+    crate::elevation::is_elevated()
+}
+
+/// Restarts the app with the permission a network device needs, and ends this
+/// copy once the new one is on its way.
+///
+/// Everything the session held is rebuilt on the other side: the profile is on
+/// disk, and the elevated copy is told to switch full tunnel on once it has
+/// connected. Nothing is torn down until the prompt has actually been accepted,
+/// so refusing it leaves a working connection exactly as it was.
+#[tauri::command]
+pub fn restart_as_administrator(app: AppHandle, supervisor: State<'_, CoreSupervisor>) -> Result<(), String> {
+    crate::elevation::relaunch_elevated()?;
+    // Only now: the tunnel and the proxy have to be put back before this
+    // process goes, or the machine is left pointing at listeners that are
+    // about to disappear.
+    supervisor.shutdown(&app);
+    app.exit(0);
+    Ok(())
+}
+
+/// Turns full tunnel on or off on a connection that is already up.
+///
+/// Separate from [`set_system_proxy`] because they are different mechanisms
+/// with different failure modes, even though the screen offers them as one
+/// choice: the system proxy is a setting other programs may consult, and this
+/// is a network device they cannot avoid.
+#[tauri::command]
+pub async fn set_full_tunnel(
+    app: AppHandle,
+    supervisor: State<'_, CoreSupervisor>,
+    chain: State<'_, Chain>,
+    enabled: bool,
+) -> Result<bool, String> {
+    let inner = &supervisor.inner;
+
+    let settings = {
+        let mut guard = lock(&inner.session);
+        match guard.as_mut() {
+            Some(session) => {
+                session.profile.full_tunnel = enabled;
+                Some((session.profile.chain.clone(), session.profile.bypass_iran_sites))
+            }
+            None => None,
+        }
+    };
+    // Nothing is running, so there is nothing to rebuild; the choice is
+    // remembered in the profile and applied at the next connect.
+    let Some((chain_settings, bypass_iran_sites)) = settings else {
+        return Ok(false);
+    };
+
+    // Refused before anything is torn down, and named precisely: the screen
+    // turns this one into an offer to restart rather than an error, so it has
+    // to be distinguishable from a device that failed for any other reason.
+    if enabled && !crate::elevation::is_elevated() {
+        return Err(NEEDS_ADMINISTRATOR.into());
+    }
+
+    let Some(socks) = supervisor.connected_socks() else {
+        return Ok(false);
+    };
+    let tunnel = socks
+        .parse::<SocketAddr>()
+        .map_err(|_| format!("the proxy address {socks} cannot be parsed"))?;
+
+    if !enabled && !chain_settings.enabled {
+        // The engine was only running to hold the device up.
+        chain.stop();
+        supervisor_log(inner, "info", "full tunnel stopped".into());
+        return Ok(false);
+    }
+
+    let address = chain.start(
+        &app,
+        &ChainRequest {
+            tunnel: Some(tunnel),
+            settings: &chain_settings,
+            bypass_iran_sites,
+            tun: enabled,
+            endpoint: supervisor.endpoint_address(),
+        },
+    )?;
+    supervisor_log(
+        inner,
+        "info",
+        match enabled {
+            true => format!("full tunnel is up; every application is captured, listener on {address}"),
+            false => format!("full tunnel stopped; listener on {address}"),
+        },
+    );
+    // Whatever is pointed at the old listener has to follow the new one.
+    app.state::<LanDoor>().retarget(address);
+    if lock(&inner.session)
+        .as_ref()
+        .is_some_and(|session| session.profile.system_proxy)
+    {
+        apply_proxy_route(&app, inner, ProxyRoute::Chain(address));
+    }
+    Ok(enabled)
+}
+
 /// Turns the chain on or off on a connection that is already up.
 ///
 /// Without this the switch only took effect at the next connect, which is the
@@ -921,9 +1182,18 @@ pub async fn set_chain(
     let inner = &supervisor.inner;
 
     // Remember it for the rest of the session, so a reconnect keeps the choice.
-    if let Some(session) = lock(&inner.session).as_mut() {
-        session.profile.chain = settings.clone();
-    }
+    // Read alongside the write rather than a second lock, so nothing else
+    // changes it in between.
+    let (bypass_iran_sites, full_tunnel) = {
+        let mut guard = lock(&inner.session);
+        match guard.as_mut() {
+            Some(session) => {
+                session.profile.chain = settings.clone();
+                (session.profile.bypass_iran_sites, session.profile.full_tunnel)
+            }
+            None => (false, false),
+        }
+    };
 
     let socks = supervisor.connected_socks();
     let tunnel = match socks.as_deref() {
@@ -943,8 +1213,20 @@ pub async fn set_chain(
         return Ok(false);
     }
 
-    let started = if settings.enabled {
-        let address = chain.start(&app, tunnel, &settings)?;
+    // The engine also runs to hold up a full-tunnel device, so "is a second hop
+    // wanted" is no longer the same question as "should it be running".
+    let tun = tun_is_possible(inner, full_tunnel);
+    let started = if settings.enabled || tun {
+        let address = chain.start(
+            &app,
+            &ChainRequest {
+                tunnel,
+                settings: &settings,
+                bypass_iran_sites,
+                tun,
+                endpoint: supervisor.endpoint_address(),
+            },
+        )?;
         supervisor_log(
             inner,
             "info",
@@ -1033,10 +1315,31 @@ fn load_profile_blocking(app: AppHandle) -> Result<CoreProfile, String> {
     let mut stored: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("profile is invalid: {error}"))?;
     migrate_endpoint_mode(&mut stored);
+    migrate_keepalive(&mut stored);
     let profile: CoreProfile =
         serde_json::from_value(stored).map_err(|error| format!("profile is invalid: {error}"))?;
     profile.validate()?;
     Ok(profile)
+}
+
+/// Moves a profile off the old keepalive default.
+///
+/// The client used to send 5 seconds and every saved profile carries that
+/// number, whether or not anyone chose it -- so leaving them alone would mean
+/// only fresh installs got the new interval, and the two clients would sit five
+/// seconds apart forever. 5 was never a choice anyone made on purpose here, and
+/// it is five times noisier on the wire than it needs to be.
+///
+/// Only the exact old default moves. Any other number was typed by someone, and
+/// overriding that would be a worse trade than the one this fixes.
+fn migrate_keepalive(stored: &mut serde_json::Value) {
+    const OLD_DEFAULT: u64 = 5;
+    let Some(object) = stored.as_object_mut() else {
+        return;
+    };
+    if object.get("keepaliveSecs").and_then(serde_json::Value::as_u64) == Some(OLD_DEFAULT) {
+        object.insert("keepaliveSecs".into(), serde_json::json!(25));
+    }
 }
 
 /// Keeps a profile saved before endpoint modes existed behaving as it did.
@@ -1717,7 +2020,7 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
     // fresh problem and gets the full retry budget again. Kept out of the
     // snapshot lock above so the two are never held at once.
     if connected {
-        let (wanted, chain_settings, lan) = {
+        let (wanted, chain_settings, lan, bypass_iran_sites, full_tunnel) = {
             let mut guard = lock(&inner.session);
             match guard.as_mut() {
                 Some(session) => {
@@ -1726,9 +2029,17 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
                         session.profile.system_proxy,
                         session.profile.chain.clone(),
                         session.profile.lan_share.clone(),
+                        session.profile.bypass_iran_sites,
+                        session.profile.full_tunnel,
                     )
                 }
-                None => (false, ChainSettings::default(), LanSettings::default()),
+                None => (
+                    false,
+                    ChainSettings::default(),
+                    LanSettings::default(),
+                    false,
+                    false,
+                ),
             }
         };
 
@@ -1746,9 +2057,27 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
         // The log showed two starts a second apart, on different ports, leaving
         // the screen watching a listener that had already been replaced.
         let chain = app.state::<Chain>();
-        let carrier = if chain_settings.enabled && !chain.is_running() {
+        // Full tunnel needs the engine running whether or not a second hop was
+        // asked for, because the device it holds up is the engine's.
+        let full_tunnel = tun_is_possible(inner, full_tunnel);
+        let engine_wanted = chain_settings.enabled || full_tunnel;
+        let carrier = if engine_wanted && !chain.is_running() {
+            let endpoint = lock(&inner.snapshot)
+                .endpoint
+                .as_deref()
+                .and_then(|value| value.parse::<SocketAddr>().ok())
+                .map(|address| address.ip());
             match socks.parse::<SocketAddr>() {
-                Ok(tunnel) => match chain.start(app, Some(tunnel), &chain_settings) {
+                Ok(tunnel) => match chain.start(
+                    app,
+                    &ChainRequest {
+                        tunnel: Some(tunnel),
+                        settings: &chain_settings,
+                        bypass_iran_sites,
+                        tun: full_tunnel,
+                        endpoint,
+                    },
+                ) {
                     Ok(address) => {
                         supervisor_log(
                             inner,
@@ -2978,6 +3307,121 @@ mod tests {
         let chain = ProxyRoute::Chain("127.0.0.1:1820".parse().unwrap());
         assert!(proxy_route_needs_update(Some(tunnel), chain));
         assert!(!proxy_route_needs_update(Some(chain), chain));
+    }
+
+    #[test]
+    fn keepalive_matches_the_other_client_rather_than_the_engine_floor() {
+        // The engine falls back to 5, which is five times noisier on the wire
+        // than it needs to be, and the Android client settled on 25. Two
+        // clients of the same engine holding the same mapping open at
+        // different rates is a difference nobody chose.
+        assert_eq!(CoreProfile::default().keepalive_secs, 25);
+    }
+
+    #[test]
+    fn a_profile_still_on_the_old_keepalive_default_is_moved_up() {
+        // Every profile written by an older build carries 5 whether or not
+        // anyone chose it, so without this only fresh installs would ever see
+        // the new interval.
+        let mut stored = serde_json::json!({"keepaliveSecs": 5});
+        migrate_keepalive(&mut stored);
+        assert_eq!(stored["keepaliveSecs"], 25);
+    }
+
+    #[test]
+    fn a_keepalive_someone_actually_typed_is_left_alone() {
+        // Only the exact old default moves. Any other number was a decision,
+        // and overriding a decision is worse than the drift this fixes.
+        for chosen in [1, 4, 6, 25, 60, 300] {
+            let mut stored = serde_json::json!({"keepaliveSecs": chosen});
+            migrate_keepalive(&mut stored);
+            assert_eq!(stored["keepaliveSecs"], chosen, "{chosen} was chosen and must stand");
+        }
+        // And a profile that never had the key keeps not having it, so the
+        // struct default applies rather than a number invented here.
+        let mut absent = serde_json::json!({"protocol": "masque"});
+        migrate_keepalive(&mut absent);
+        assert!(absent.get("keepaliveSecs").is_none());
+    }
+
+    #[test]
+    fn zero_keepalive_leaves_the_engine_to_choose() {
+        // Same contract as the Android client: saying nothing is how the one
+        // default is kept in the engine instead of copied out here.
+        let mut profile = CoreProfile { keepalive_secs: 0, ..CoreProfile::default() };
+        assert!(profile.validate().is_ok(), "zero is a valid choice, not a typo");
+        let args = profile.args(Path::new("identity.toml"));
+        assert!(!args.contains(&"--keepalive".to_string()), "{args:?}");
+
+        profile.keepalive_secs = 25;
+        let args = profile.args(Path::new("identity.toml"));
+        assert!(args.windows(2).any(|pair| pair == ["--keepalive", "25"]), "{args:?}");
+    }
+
+    #[test]
+    fn the_two_engine_defaults_are_only_written_to_turn_them_off() {
+        // Both are on in the engine and switched off by the literal "0". A
+        // profile written before they existed has to read as on, or upgrading
+        // would quietly change how traffic is routed.
+        let fresh = CoreProfile::default();
+        assert!(fresh.route_sniff);
+        assert!(fresh.auto_reprovision);
+
+        let older: CoreProfile = serde_json::from_str(r#"{"protocol":"masque"}"#)
+            .expect("a profile from before these existed must load");
+        assert!(older.route_sniff, "sniffing is on unless someone turned it off");
+        assert!(older.auto_reprovision, "reprovisioning is on unless someone turned it off");
+    }
+
+    #[test]
+    fn an_upstream_proxy_never_reaches_the_command_line() {
+        // The URL can carry a password, and a command line is readable by
+        // anything that can list processes. It goes in the environment for the
+        // same reason the Zero Trust secret does.
+        let profile = CoreProfile {
+            upstream_proxy: "socks5://someone:hunter2@127.0.0.1:1080".into(),
+            ..CoreProfile::default()
+        };
+        let args = profile.args(Path::new("identity.toml"));
+        let rendered = args.join(" ");
+        assert!(!rendered.contains("hunter2"), "a password must not be an argument: {rendered}");
+        assert!(!rendered.contains("--upstream"), "{rendered}");
+        assert!(!rendered.contains("127.0.0.1:1080"), "{rendered}");
+    }
+
+    #[test]
+    fn a_full_tunnel_wish_that_cannot_be_honoured_is_not_a_failure() {
+        // The wish outlives any one launch, so it is routinely on in a copy
+        // with no permission to honour it. That must cost nothing: the engine
+        // still starts and the exit chain still runs. Treating it as a failure
+        // is what turned a missing permission into a connection that would not
+        // come up at all.
+        let inner = CoreSupervisor::new().inner;
+        assert!(!tun_is_possible(&inner, false), "not wanted is not possible");
+        // Wanted and permitted is the only true case, and whether this test
+        // process is elevated is not something it may assume either way -- so
+        // assert the part that holds regardless: it answers rather than panics,
+        // and it never says yes when the wish was never made.
+        let _ = tun_is_possible(&inner, true);
+    }
+
+    #[test]
+    fn a_profile_saved_before_the_iran_bypass_existed_still_loads_with_it_off() {
+        // Upgrading must not change how anyone's traffic is routed. A profile
+        // written by an older build has no such key, and the absence has to
+        // read as "off" rather than as a parse failure that resets everything
+        // else the user had configured.
+        let saved = serde_json::json!({
+            "name": "Adaptive",
+            "protocol": "masque",
+            "socksAddress": "127.0.0.1:1819",
+            "routeDirect": "example.com"
+        })
+        .to_string();
+        let profile: CoreProfile = serde_json::from_str(&saved).expect("an older profile must load");
+        assert!(!profile.bypass_iran_sites, "the new setting must default to off");
+        assert_eq!(profile.route_direct, "example.com", "existing rules must survive");
+        assert_eq!(profile.socks_address, "127.0.0.1:1819");
     }
 
     #[test]

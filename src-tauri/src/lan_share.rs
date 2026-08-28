@@ -807,3 +807,46 @@ mod tests {
         share.stop();
     }
 }
+
+#[cfg(test)]
+mod live_door {
+    use super::*;
+
+    /// Opens a real LAN door against a real carrier and holds it, so the whole
+    /// path can be exercised from another machine (or another shell) with an
+    /// ordinary client. The unit tests above prove the protocol handling
+    /// against a stub; this is what proves the socket is reachable from off
+    /// this host at all. Not part of the suite.
+    #[test]
+    #[ignore = "opens a port on every interface and holds it"]
+    fn hold_a_live_door() {
+        let carrier: SocketAddr = std::env::var("WHITEAESTHER_LAN_CARRIER")
+            .expect("set WHITEAESTHER_LAN_CARRIER to a live SOCKS5 address")
+            .parse()
+            .expect("carrier must be host:port");
+        let port: u16 = std::env::var("WHITEAESTHER_LAN_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1080);
+        let settings = LanSettings {
+            enabled: true,
+            port,
+            username: std::env::var("WHITEAESTHER_LAN_USER").unwrap_or_default(),
+            password: std::env::var("WHITEAESTHER_LAN_PASS").unwrap_or_default(),
+        };
+        let share = start(carrier, &settings).expect("the door should open");
+        let status = share.status();
+        println!(
+            "door open at {} (sign-in required: {})",
+            status.address.unwrap_or_default(),
+            !status.open
+        );
+        std::thread::sleep(Duration::from_secs(
+            std::env::var("WHITEAESTHER_LAN_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+        ));
+        share.stop();
+    }
+}

@@ -1,7 +1,7 @@
 {
   "name": "whiteaesther",
   "private": true,
-  "version": "1.5.4",
+  "version": "1.6.0",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "stage:core": "node scripts/stage-core.mjs",
     "stage:chain": "node scripts/stage-chain.mjs",
+    "update:iran-routes": "node scripts/update-iran-routes.mjs",
     "desktop:dev": "pnpm stage:core && pnpm stage:chain && tauri dev",
     "desktop:build": "pnpm stage:core && pnpm stage:chain && tauri build",
     "tauri": "tauri"
