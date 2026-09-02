@@ -25,7 +25,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -1044,12 +1044,22 @@ fn free_port() -> Result<u16, String> {
     Ok(port)
 }
 
+/// The password for the chain's control API.
+///
+/// Anything holding this can retarget every rule the engine routes by, so it
+/// comes from the operating system rather than from the clock. The previous
+/// version was the current nanosecond and this process id, which is guessable
+/// by anything that can see when the app started -- and on a platform whose
+/// clock is coarser than a nanosecond, two calls in succession returned the
+/// same string, which is how this was noticed.
 fn secret() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_nanos())
-        .unwrap_or_default();
-    format!("{:x}{:x}", nanos, std::process::id())
+    let mut bytes = [0_u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        // No entropy source is not a reason to run with a known password, and
+        // it is not a condition this can recover from.
+        panic!("the system refused to provide random bytes for the chain secret");
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Waits for mihomo to answer, which is the only proof it actually came up.
@@ -1723,8 +1733,16 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_differs_between_runs() {
-        assert_ne!(secret(), secret());
+    fn a_secret_is_random_and_long_enough_to_be_worth_having() {
+        // This used to be the clock plus the process id, which two calls on a
+        // coarse-clock platform returned identically -- and which anything that
+        // knew roughly when the app started could guess. 128 bits from the OS
+        // cannot be guessed, and cannot repeat.
+        let one = secret();
+        let two = secret();
+        assert_ne!(one, two);
+        assert_eq!(one.len(), 32, "128 bits, hex encoded: {one}");
+        assert!(one.chars().all(|c| c.is_ascii_hexdigit()), "{one}");
     }
 
     #[test]

@@ -188,7 +188,7 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
                         onToast("Endpoint pinned", `${candidate.peer} — set Endpoint mode to use it.`);
                       }}
                       className={[
-                        "flex w-full items-center justify-between gap-3 border-b px-3.5 py-2.5 text-left transition-colors last:border-b-0",
+                        "flex w-full items-center justify-between gap-3 border-b px-3.5 py-2.5 text-start transition-colors last:border-b-0",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                         chosen ? "bg-primary/10" : "hover:bg-accent",
                       ].join(" ")}
@@ -202,7 +202,7 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
                       </div>
                       <div className="flex shrink-0 items-center gap-2.5">
                         <Latency ms={candidate.rttMs} best={candidates[0].rttMs} />
-                        <span className="tabular w-16 text-right font-mono text-[13px]">
+                        <span className="tabular w-16 text-end font-mono text-[13px]">
                           {candidate.rttMs} ms
                         </span>
                       </div>

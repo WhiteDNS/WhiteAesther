@@ -4259,8 +4259,9 @@ dependencies = [
 
 [[package]]
 name = "whiteaesther"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "tauri",

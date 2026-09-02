@@ -116,7 +116,7 @@ export function NumberField({
           type="number"
           min={min}
           max={max}
-          className="tabular pr-12 font-mono"
+          className="tabular pe-12 font-mono"
           value={value}
           onChange={(event) => {
             const next = Number(event.target.value);
@@ -124,7 +124,7 @@ export function NumberField({
           }}
         />
         {unit ? (
-          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+          <span className="pointer-events-none absolute end-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
             {unit}
           </span>
         ) : null}

@@ -8,8 +8,8 @@ licence, and those licences are not superseded by WhiteAesther's.
 The connection engine. WhiteAesther ships the `aether` executable inside its installers and runs it
 to connect, and in a reporting mode to populate the endpoint picker.
 
-- Upstream: <https://github.com/CluvexStudio/Aether> — version 1.7.0
-- The build used here: <https://github.com/WhiteDNS/Aether> at tag `v1.7.0-whiteaesther.1` — a fork
+- Upstream: <https://github.com/CluvexStudio/Aether> — version 1.8.0
+- The build used here: <https://github.com/WhiteDNS/Aether> at tag `v1.8.0-whiteaesther.1` — a fork
   adding the two reporting modes the endpoint picker needs, with upstream history preserved and
   every change reviewable as a diff against it
 - Licence: GNU Affero General Public License v3.0 — see `LICENSE`, also installed as

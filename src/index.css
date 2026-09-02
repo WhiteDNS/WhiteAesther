@@ -81,6 +81,14 @@
     font-feature-settings: "cv11", "ss01";
   }
 
+  /* Persian in the default UI font is legible but poorly shaped. These are the
+     faces an Iranian machine is likely to already have, in the order a Persian
+     reader would prefer them; the system font stays as the last resort, so
+     nothing is downloaded and nothing breaks where none are installed. */
+  :root[lang="fa"] body {
+    font-family: Vazirmatn, "IRANSans", "IRANYekan", Tahoma, system-ui, sans-serif;
+  }
+
   /* The window is a fixed-size desktop shell, not a scrolling document. */
   html,
   body,

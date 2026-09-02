@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useT } from "@/core/useT";
 import { CornerDownLeft, Search } from "lucide-react";
 import { SETTINGS, type SectionId, searchSettings } from "./settingsIndex";
 
@@ -18,6 +19,7 @@ export function CommandPalette({
   onClose: () => void;
   onPick: (section: SectionId) => void;
 }) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -80,7 +82,7 @@ export function CommandPalette({
                 choose(active);
               }
             }}
-            placeholder="Search settings — try dns, kill switch, scan…"
+            placeholder={t("Search settings — try dns, kill switch, scan…")}
             className="h-12 w-full bg-transparent text-[14px] outline-none placeholder:text-muted-foreground"
           />
         </div>
@@ -94,7 +96,7 @@ export function CommandPalette({
                   onMouseEnter={() => setActive(index)}
                   onClick={() => choose(index)}
                   className={[
-                    "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left",
+                    "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-start",
                     index === active ? "bg-primary/[0.11] text-foreground" : "text-muted-foreground",
                   ].join(" ")}
                 >
@@ -115,7 +117,7 @@ export function CommandPalette({
           </ul>
         ) : (
           <p className="px-4 py-6 text-center text-[13px] text-muted-foreground">
-            Nothing matches “{query}”.
+            {t("Nothing matches")} “{query}”.
           </p>
         )}
 

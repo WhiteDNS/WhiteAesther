@@ -1,6 +1,6 @@
 [package]
 name = "whiteaesther"
-version = "1.6.0"
+version = "1.7.0"
 description = "Cross-platform desktop client for the Aether connection core"
 authors = ["WhiteDNS"]
 # WhiteAesther links the Aether engine, which is AGPL-3.0, so it is a derivative
@@ -23,6 +23,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+# The chain's control-API password. Guessing it means being able to
+# reconfigure routing, so it comes from the OS rather than from the clock.
+getrandom = "0.3"
 # A second copy knows nothing about the first: it reports "Not connected" over a
 # live tunnel, and its startup recovery reverts the system proxy the first one
 # applied -- taking the running session off the network from the outside.

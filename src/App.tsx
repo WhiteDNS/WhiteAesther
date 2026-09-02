@@ -10,6 +10,8 @@ import { CommandPalette } from "@/features/CommandPalette";
 import type { SectionId } from "@/features/settingsIndex";
 import logo from "@/assets/logo.png";
 import { type Release, checkForUpdate, dismiss as dismissUpdate } from "@/core/updates";
+import { applyLanguage, getLanguage, setLanguage } from "@/core/i18n";
+import { useLanguage, useT } from "@/core/useT";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getCoreLogs, getCoreStatus, isDesktopRuntime, loadProfile, probeCore, probeLatency, runtimeInfo,
@@ -51,15 +53,23 @@ export default function App() {
   /** A published release newer than this build, once one has been noticed. */
   const [update, setUpdate] = useState<Release | null>(null);
 
+  const t = useT();
+  const language = useLanguage();
   const desktop = isDesktopRuntime();
+
+  // The stored preference has to reach the document as well as the components:
+  // direction is a document property, and nothing below can set it.
+  useEffect(() => {
+    applyLanguage(language);
+  }, [language]);
   const effective = useMemo(() => withNormalizedEndpoint(profile), [profile]);
 
   const notify = useCallback((title: string, message: string, error?: boolean) => {
     setToast({ title, message, error });
   }, []);
   const showError = useCallback(
-    (error: unknown) => notify("Action failed", error instanceof Error ? error.message : String(error), true),
-    [notify],
+    (error: unknown) => notify(t("Action failed"), error instanceof Error ? error.message : String(error), true),
+    [notify, t],
   );
 
   useEffect(() => {
@@ -146,8 +156,8 @@ export default function App() {
       if (!resuming || resumedRef.current) return;
       resumedRef.current = true;
       notify(
-        "Restarted with permission",
-        "Full tunnel is ready. Press Connect when you want it.",
+        t("Restarted with permission"),
+        t("Full tunnel is ready. Press Connect when you want it."),
       );
     });
   }, [desktop, notify]);
@@ -367,19 +377,30 @@ export default function App() {
               focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Search className="size-[13px]" />
-            <span>Search settings</span>
+            <span>{t("Search settings")}</span>
             <kbd className="rounded border bg-secondary px-1.5 py-0.5 text-[10px] font-semibold text-foreground">
               Ctrl K
             </kbd>
           </button>
           <Tabs value={mode} onValueChange={(value) => setMode(value as Mode)}>
             <TabsList className="h-8">
-              <TabsTrigger value="simple" className="px-3 py-1 text-[13px]">Simple</TabsTrigger>
-              <TabsTrigger value="advanced" className="px-3 py-1 text-[13px]">Advanced</TabsTrigger>
+              <TabsTrigger value="simple" className="px-3 py-1 text-[13px]">{t("Simple")}</TabsTrigger>
+              <TabsTrigger value="advanced" className="px-3 py-1 text-[13px]">{t("Advanced")}</TabsTrigger>
             </TabsList>
           </Tabs>
-          <Button variant="ghost" size="icon" aria-label="Advanced settings" onClick={() => setMode("advanced")}>
+          <Button variant="ghost" size="icon" aria-label={t("Advanced settings")} onClick={() => setMode("advanced")}>
             <Settings2 />
+          </Button>
+          {/* Two languages, so a toggle rather than a menu: one press, and the
+              label is always the language you would get, not the one you have. */}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={t("Language")}
+            className="h-8 px-2.5 text-[12px] font-semibold"
+            onClick={() => setLanguage(getLanguage() === "fa" ? "en" : "fa")}
+          >
+            {language === "fa" ? "EN" : "\u0641\u0627"}
           </Button>
         </div>
       </header>
@@ -389,10 +410,10 @@ export default function App() {
           <ArrowUpCircle className="size-4 shrink-0 text-primary" />
           <div className="min-w-0 flex-1">
             <div className="text-[12.5px] font-semibold text-primary">
-              WhiteAesther {update.version} is available
+              WhiteAesther {update.version} {t("is available")}
             </div>
             <div className="truncate text-[11.5px] text-muted-foreground">
-              You are running {appVersion}. Opening this takes you to the download page.
+              {t("You are running")} {appVersion}. {t("Opening this takes you to the download page.")}
             </div>
           </div>
           <Button
@@ -404,12 +425,12 @@ export default function App() {
               void openUrl(update.url).catch(showError);
             }}
           >
-            Get it
+            {t("Get it")}
           </Button>
           <Button
             variant="ghost"
             size="icon"
-            aria-label="Dismiss this update"
+            aria-label={t("Dismiss this update")}
             onClick={() => {
               // Remembered against this version only, so waving one away does
               // not silence the next.
@@ -426,10 +447,10 @@ export default function App() {
         <div className="flex shrink-0 items-center gap-3 border-b border-warning/30 bg-warning/[0.09] px-[18px] py-2.5">
           <ShieldAlert className="size-4 shrink-0 text-warning" />
           <div className="min-w-0 flex-1">
-            <div className="text-[12.5px] font-semibold text-warning">Traffic is blocked, not broken</div>
+            <div className="text-[12.5px] font-semibold text-warning">{t("Traffic is blocked, not broken")}</div>
             <div className="truncate text-[11.5px] text-muted-foreground">
               {snapshot.statusMessage ??
-                "The tunnel is down and your system proxy still points at it, so nothing leaves in the clear."}
+                t("The tunnel is down and your system proxy still points at it, so nothing leaves in the clear.")}
             </div>
           </div>
           <Button
@@ -439,13 +460,13 @@ export default function App() {
             onClick={async () => {
               try {
                 setSnapshot(await stopCore());
-                notify("Connection restored", "Your system proxy has been put back.");
+                notify(t("Connection restored"), t("Your system proxy has been put back."));
               } catch (error) {
                 showError(error);
               }
             }}
           >
-            Restore my connection
+            {t("Restore my connection")}
           </Button>
         </div>
       ) : null}
@@ -551,7 +572,7 @@ export default function App() {
         <div
           role="status"
           className={[
-            "fixed bottom-5 right-5 z-50 flex max-w-[420px] items-start gap-2.5 rounded-lg border bg-popover p-3.5 shadow-lg",
+            "fixed bottom-5 end-5 z-50 flex max-w-[420px] items-start gap-2.5 rounded-lg border bg-popover p-3.5 shadow-lg",
             toast.error ? "border-destructive/50" : "border-border",
           ].join(" ")}
         >
@@ -569,27 +590,27 @@ export default function App() {
 function StateChip({ snapshot }: { snapshot: CoreSnapshot }) {
   if (snapshot.state === "connected")
     return (
-      <span className="ml-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-primary/30 bg-primary/[0.13] px-2.5 text-[11.5px] font-semibold text-primary">
+      <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-primary/30 bg-primary/[0.13] px-2.5 text-[11.5px] font-semibold text-primary">
         <span className="size-1.5 rounded-full bg-current" />
         Connected
       </span>
     );
   if (snapshot.state === "error")
     return (
-      <span className="ml-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 text-[11.5px] font-semibold text-destructive">
+      <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 text-[11.5px] font-semibold text-destructive">
         <span className="size-1.5 rounded-full bg-current" />
         Stopped
       </span>
     );
   if (!ACTIVE.has(snapshot.state))
     return (
-      <span className="ml-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border bg-muted px-2.5 text-[11.5px] font-semibold text-muted-foreground">
+      <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border bg-muted px-2.5 text-[11.5px] font-semibold text-muted-foreground">
         <span className="size-1.5 rounded-full bg-current" />
         Not connected
       </span>
     );
   return (
-    <span className="ml-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-warning/30 bg-warning/[0.13] px-2.5 text-[11.5px] font-semibold text-warning">
+    <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-warning/30 bg-warning/[0.13] px-2.5 text-[11.5px] font-semibold text-warning">
       <span className="size-1.5 animate-pulse rounded-full bg-current" />
       {snapshot.attempt > 0 ? `Searching · ${snapshot.attempt} of ${snapshot.maxAttempts}` : "Searching"}
     </span>
