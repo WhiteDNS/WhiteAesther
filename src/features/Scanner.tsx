@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useT } from "@/core/useT";
 import { CheckCircle2, Loader2, Radar, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,6 +25,7 @@ interface ScannerProps {
 }
 
 export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
+  const t = useT();
   const [phase, setPhase] = useState<Phase>("idle");
   const [candidates, setCandidates] = useState<ScanCandidate[]>([]);
   const [note, setNote] = useState<string | null>(null);
@@ -53,7 +55,7 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
       if (!live.current) return;
       setCandidates(outcome.candidates);
       if (outcome.candidates.length === 0) {
-        setNote("Nothing answered on either transport. This network is filtering hard.");
+        setNote(t("Nothing answered on either transport. This network is filtering hard."));
       } else {
         setNote(
           outcome.fellBack
@@ -84,7 +86,7 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
   const test = useCallback(async () => {
     const address = normalizeEndpoint(profile.peer ?? "");
     if (!address) {
-      setError("Enter a numeric address and port first.");
+      setError(t("Enter a numeric address and port first."));
       return;
     }
     setPhase("testing");
@@ -106,22 +108,24 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
     <Card>
       <CardHeader className="flex-row items-start justify-between gap-4 space-y-0 pb-3">
         <div className="flex flex-col gap-1.5">
-          <CardTitle className="text-[15px]">Find a gateway</CardTitle>
+          <CardTitle className="text-[15px]">{t("Find a gateway")}</CardTitle>
           <CardDescription>
-            Tests real MASQUE gateways over {label(profile.masqueTransport)} and ranks them by round-trip
-            time. Nothing is connected until you pick one.
+            {/* Split around the transport name so the two halves can be ordered
+                the way each language orders them. */}
+            {t("Tests real MASQUE gateways over")} {label(profile.masqueTransport)}{" "}
+            {t("and ranks them by round-trip time. Nothing is connected until you pick one.")}
           </CardDescription>
         </div>
         <div className="flex shrink-0 gap-2">
           {phase === "scanning" ? (
             <Button variant="outline" size="sm" onClick={() => void stop()}>
               <X />
-              Stop
+              {t("Stop")}
             </Button>
           ) : (
             <Button size="sm" disabled={connected || busy || phase === "cancelling"} onClick={() => void scan()}>
               {phase === "cancelling" ? <Loader2 className="animate-spin" /> : <Radar />}
-              Scan
+              {t("Scan")}
             </Button>
           )}
           <Button
@@ -131,7 +135,7 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
             onClick={() => void test()}
           >
             {phase === "testing" ? <Loader2 className="animate-spin" /> : <Search />}
-            Test pinned
+            {t("Test pinned")}
           </Button>
         </div>
       </CardHeader>

@@ -46,14 +46,38 @@ test("every string marked for translation has one", () => {
   const missing = new Set<string>();
   for (const path of sourceFiles(join(import.meta.dirname, ".."))) {
     const source = readFileSync(path, "utf8");
-    for (const [, key] of source.matchAll(/\bt\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g)) {
+    // The trailing comma matters: a string long enough to be split across lines
+    // is formatted as t(\n "…",\n), and a pattern without it silently skips
+    // exactly the longest sentences — which is how five of them reached a
+    // screenshot still in English.
+    for (const [, key] of source.matchAll(/\bt\(\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)/g)) {
       // Skip the ones fed a variable at runtime, like t(option.title): those
       // are checked by the entries they resolve to, which are in the dictionary
       // as plain strings.
       if (translate("fa", key) === key) missing.add(key);
     }
   }
-  assert.deepEqual([...missing], [], `marked for translation but not translated: ${[...missing].join(" | ")}`);
+  assert.deepEqual(
+    [...missing],
+    [],
+    "marked for translation but not translated. A proper noun that reads the same " +
+      `in both languages should not be wrapped at all: ${[...missing].join(" | ")}`,
+  );
+});
+
+test("every setting the search can find is findable in Persian", () => {
+  // These reach t() as a variable -- t(entry.label) -- so the check above
+  // cannot see them, and a label added to the index without a translation
+  // would silently be searchable only in English.
+  const source = readFileSync(join(import.meta.dirname, "../features/settingsIndex.ts"), "utf8");
+  const labels = [...source.matchAll(/label: "((?:[^"\\]|\\.)*)"/g)].map(([, value]) => value);
+  assert.ok(labels.length > 20, `the index looks empty: ${labels.length}`);
+
+  // Proper nouns read the same in both languages and are deliberately absent
+  // from the dictionary, so they fall through to themselves.
+  const unchanged = new Set(["Encrypted Client Hello", "Cloudflare Zero Trust"]);
+  const missing = labels.filter((label) => !unchanged.has(label) && translate("fa", label) === label);
+  assert.deepEqual(missing, [], `settings searchable only in English: ${missing.join(" | ")}`);
 });
 
 test("every Persian entry still matches a string in the source", () => {

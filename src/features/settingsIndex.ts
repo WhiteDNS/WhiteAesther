@@ -97,16 +97,26 @@ export const SETTINGS: SettingEntry[] = [
  * outranks one in the middle -- typing "dns" should reach "DNS resolvers"
  * before "Send web traffic to Gateway", which only mentions it in passing.
  */
-export function searchSettings(query: string, limit = 8): SettingEntry[] {
+export function searchSettings(
+  query: string,
+  t: (key: string) => string = (key) => key,
+  limit = 8,
+): SettingEntry[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return SETTINGS.slice(0, limit);
 
   const scored = SETTINGS.map((entry, order) => {
     const label = entry.label.toLowerCase();
+    // Matched in the reader's language and in English both. Someone reading a
+    // Persian interface types Persian; someone who learned these settings by
+    // their English names, or who is reading a forum post, types English. Only
+    // checking one of the two makes half the search useless.
+    const translated = t(entry.label).toLowerCase();
+    const translatedWhere = t(entry.where).toLowerCase();
     let score = 0;
-    if (label.startsWith(needle)) score = 100;
-    else if (label.includes(needle)) score = 70;
-    else if (entry.where.toLowerCase().includes(needle)) score = 40;
+    if (label.startsWith(needle) || translated.startsWith(needle)) score = 100;
+    else if (label.includes(needle) || translated.includes(needle)) score = 70;
+    else if (entry.where.toLowerCase().includes(needle) || translatedWhere.includes(needle)) score = 40;
     else if (entry.keywords.includes(needle)) score = 30;
     return { entry, score, order };
   }).filter((candidate) => candidate.score > 0);
