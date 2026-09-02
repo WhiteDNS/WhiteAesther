@@ -62,15 +62,26 @@ export function carryFromProfile(systemProxy: boolean, fullTunnel = false): Carr
  * tunnel's otherwise — never the configured SOCKS port on its own, which stops
  * being the right answer the moment a hop is added in front of it.
  */
-export function describeCarry(mode: CarryMode, carryAddress: string): string {
-  if (mode === "system") return "Your system proxy is set, and will be put back when you disconnect.";
+export function describeCarry(
+  mode: CarryMode,
+  carryAddress: string,
+  t: (key: string) => string = (key) => key,
+): string {
+  if (mode === "system") return t("Your system proxy is set, and will be put back when you disconnect.");
   if (mode === "tun") {
-    return "Every app is captured through a network device, including the ones that ignore proxy settings.";
+    return t("Every app is captured through a network device, including the ones that ignore proxy settings.");
   }
-  return `Point apps at ${carryAddress} to use it.`;
+  // The address is the sentence's object, so the two halves are translated
+  // around it rather than as one string with a placeholder -- Persian puts the
+  // verb last, and a single template would have pinned English word order.
+  return `${t("Point apps at")} ${carryAddress} ${t("to use it.")}`;
 }
 
 /** Fills the option's address placeholder, if it has one. */
-export function carryDetail(option: CarryOption, carryAddress: string): string {
-  return option.detail.replace("{address}", carryAddress);
+export function carryDetail(
+  option: CarryOption,
+  carryAddress: string,
+  t: (key: string) => string = (key) => key,
+): string {
+  return t(option.detail).replace("{address}", carryAddress);
 }

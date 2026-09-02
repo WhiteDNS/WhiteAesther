@@ -394,7 +394,7 @@ function Nodes({
                   <span
                     title={node.unusable ?? undefined}
                     className={[
-                      "tabular shrink-0 text-right font-mono text-[12.5px]",
+                      "tabular shrink-0 text-end font-mono text-[12.5px]",
                       node.unusable ? "w-[132px] text-amber-500/90" : "w-[68px]",
                       node.delay == null ? "text-muted-foreground" : "text-primary",
                       node.unusable ? "text-amber-500/90" : "",

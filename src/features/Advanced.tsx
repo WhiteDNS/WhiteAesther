@@ -103,7 +103,7 @@ export function Advanced(props: AdvancedProps) {
                 aria-current={section === id}
                 onClick={() => setSection(id)}
                 className={[
-                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13.5px] transition-colors",
+                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-start text-[13.5px] transition-colors",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   section === id
                     ? "bg-primary/10 font-semibold text-primary"
@@ -264,7 +264,7 @@ function Licences() {
             <span className="font-mono text-[12.5px] text-muted-foreground">AGPL-3.0</span>
           </Row>
           <Separator />
-          <Row title="Aether" help="The connection engine, shipped as a binary and run by this app. Aether 1.7.0">
+          <Row title="Aether" help="The connection engine, shipped as a binary and run by this app. Aether 1.8.0">
             <span className="font-mono text-[12.5px] text-muted-foreground">AGPL-3.0</span>
           </Row>
           <Separator />
@@ -336,7 +336,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
                   set({ protocol: option.protocol, ...(option.transport ? { masqueTransport: option.transport } : {}) })
                 }
                 className={[
-                  "flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors",
+                  "flex flex-col gap-1 rounded-lg border p-3 text-start transition-colors",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:bg-accent",
                 ].join(" ")}

@@ -1,6 +1,6 @@
 [package]
 name = "whiteaesther"
-version = "1.6.0"
+version = "1.7.0"
 description = "Cross-platform desktop client for the Aether connection core"
 authors = ["WhiteDNS"]
 # WhiteAesther links the Aether engine, which is AGPL-3.0, so it is a derivative

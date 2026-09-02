@@ -25,7 +25,7 @@ concurrency:
 env:
   # The fork adds the reporting modes the endpoint scanner needs. Pinned to a
   # tag rather than a branch so a release is reproducible.
-  AETHER_REVISION: v1.7.0-whiteaesther.2
+  AETHER_REVISION: v1.8.0-whiteaesther.1
 
 jobs:
   gate:

@@ -10,7 +10,7 @@ function event(message: string, timestamp = 0): CoreLogEvent {
 function report(overrides: Partial<Parameters<typeof buildReport>[0]> = {}): string {
   return buildReport({
     appVersion: "1.0.0",
-    engineVersion: "aether 1.7.0",
+    engineVersion: "aether 1.8.0",
     system: "windows · x86_64",
     snapshot: IDLE_SNAPSHOT,
     profile: DEFAULT_PROFILE,
@@ -56,9 +56,9 @@ test("redaction leaves lines that only look like addresses alone", () => {
 });
 
 test("the version header is never redacted", () => {
-  const text = report({ appVersion: "1.0.0.0", engineVersion: "aether 1.7.0" });
+  const text = report({ appVersion: "1.0.0.0", engineVersion: "aether 1.8.0" });
   assert.ok(text.includes("app 1.0.0.0"), text);
-  assert.ok(text.includes("engine aether 1.7.0"), text);
+  assert.ok(text.includes("engine aether 1.8.0"), text);
 });
 
 test("Zero Trust credentials and the pinned endpoint never reach the report", () => {
