@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useT } from "@/core/useT";
 import {
   Activity, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
 } from "lucide-react";
@@ -80,6 +81,7 @@ export interface AdvancedProps {
 }
 
 export function Advanced(props: AdvancedProps) {
+  const t = useT();
   const [section, setSection] = useState<SectionId>("status");
 
   const { jumpTo } = props;
@@ -90,11 +92,11 @@ export function Advanced(props: AdvancedProps) {
 
   return (
     <div className="grid h-full grid-cols-[196px_minmax(0,1fr)] overflow-hidden">
-      <nav className="flex flex-col gap-0.5 overflow-y-auto border-r bg-card p-2" aria-label="Settings sections">
+      <nav className="flex flex-col gap-0.5 overflow-y-auto border-r bg-card p-2" aria-label={t("Settings sections")}>
         {SECTIONS.map((group) => (
           <div key={group.group} className="flex flex-col gap-0.5">
             <span className="px-2.5 pb-1 pt-3.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {group.group}
+              {t(group.group)}
             </span>
             {group.items.map(({ id, label, icon: Icon }) => (
               <button
@@ -111,7 +113,7 @@ export function Advanced(props: AdvancedProps) {
                 ].join(" ")}
               >
                 <Icon className="size-[15px]" />
-                {label}
+                {t(label)}
               </button>
             ))}
           </div>
@@ -121,13 +123,13 @@ export function Advanced(props: AdvancedProps) {
       <div className="flex flex-col gap-4 overflow-y-auto p-6">
         <div className="flex items-start justify-between gap-4">
           <div className="flex flex-col gap-1">
-            <h2 className="text-[19px] font-semibold tracking-tight">{heading?.label}</h2>
-            <p className="text-sm text-muted-foreground">{BLURB[section]}</p>
+            <h2 className="text-[19px] font-semibold tracking-tight">{heading ? t(heading.label) : null}</h2>
+            <p className="text-sm text-muted-foreground">{t(BLURB[section])}</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <StateBadge snapshot={props.snapshot} />
             <Button variant="outline" size="sm" onClick={props.onSave}>
-              Save profile
+              {t("Save profile")}
             </Button>
           </div>
         </div>
@@ -153,15 +155,16 @@ export function Advanced(props: AdvancedProps) {
 }
 
 function StateBadge({ snapshot }: { snapshot: CoreSnapshot }) {
+  const t = useT();
   if (snapshot.state === "connected")
-    return <Badge variant="ok" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />Connected</Badge>;
+    return <Badge variant="ok" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />{t("Connected")}</Badge>;
   if (snapshot.state === "error")
-    return <Badge variant="bad" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />Stopped</Badge>;
-  if (snapshot.state === "idle") return <Badge variant="outline">Idle</Badge>;
+    return <Badge variant="bad" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />{t("Stopped")}</Badge>;
+  if (snapshot.state === "idle") return <Badge variant="outline">{t("Idle")}</Badge>;
   return (
     <Badge variant="warn" className="gap-1.5">
       <span className="size-1.5 animate-pulse rounded-full bg-current" />
-      {snapshot.attempt > 0 ? `Attempt ${snapshot.attempt}/${snapshot.maxAttempts}` : "Working"}
+      {snapshot.attempt > 0 ? `${t("Attempt")} ${snapshot.attempt}/${snapshot.maxAttempts}` : t("Working")}
     </Badge>
   );
 }
@@ -169,26 +172,28 @@ function StateBadge({ snapshot }: { snapshot: CoreSnapshot }) {
 // ---------------------------------------------------------------------- status
 
 function Status({ snapshot, probe, logs, profile }: AdvancedProps) {
+  const t = useT();
   return (
     <>
       <div className="grid grid-cols-4 gap-3">
-        <Metric label="Core" value={probe.available ? "Ready" : "Missing"} />
+        <Metric label="Core" value={probe.available ? "Ready" : t("Missing")} />
         <Metric label="Transport" value={snapshot.transport ? transportName(snapshot.transport) : "—"} />
         <Metric label="Edge" value={snapshot.endpoint ?? "—"} mono />
         <Metric label="Latency" value={snapshot.latencyMs == null ? "—" : `${snapshot.latencyMs.toFixed(1)} ms`} mono />
       </div>
 
       <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-[15px]">Live</CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle className="text-[15px]">{t("Live")}</CardTitle></CardHeader>
         <CardContent><LogList logs={logs} /></CardContent>
       </Card>
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-[15px]">What will run</CardTitle>
+          <CardTitle className="text-[15px]">{t("What will run")}</CardTitle>
           <CardDescription>
-            The core is launched with these arguments. Zero Trust secrets go through the environment and are not
-            shown here.
+            {t(
+              "The core is launched with these arguments. Zero Trust secrets go through the environment and are not shown here.",
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -202,10 +207,11 @@ function Status({ snapshot, probe, logs, profile }: AdvancedProps) {
 }
 
 function Metric({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  const t = useT();
   return (
     <Card className="p-3.5">
       <div className="flex flex-col gap-1">
-        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</span>
+        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">{t(label)}</span>
         <span className={`truncate text-[15px] font-medium ${mono ? "tabular font-mono" : ""}`}>{value}</span>
       </div>
     </Card>
@@ -221,8 +227,9 @@ const LEVEL: Record<string, string> = {
 };
 
 function LogList({ logs }: { logs: CoreLogEvent[] }) {
+  const t = useT();
   if (!logs.length)
-    return <p className="py-6 text-center text-[13px] text-muted-foreground">No events yet. Connect to populate this.</p>;
+    return <p className="py-6 text-center text-[13px] text-muted-foreground">{t("No events yet. Connect to populate this.")}</p>;
   return (
     <div className="flex max-h-[260px] flex-col gap-1 overflow-y-auto rounded-md bg-muted/50 p-3 font-mono text-[11.5px]">
       {logs.slice(-200).map((entry, index) => (
@@ -248,11 +255,12 @@ function LogList({ logs }: { logs: CoreLogEvent[] }) {
  * repository nobody opens, so the text ships in the app and beside the binary.
  */
 function Licences() {
+  const t = useT();
   return (
     <div className="space-y-3.5">
       <Card>
         <CardHeader>
-          <CardTitle>What this is built on</CardTitle>
+          <CardTitle>{t("What this is built on")}</CardTitle>
           <CardDescription>
             Each component below keeps its own licence. WhiteAesther&apos;s own source is public, and
             the full licence texts are installed next to the application under{" "}
@@ -286,7 +294,7 @@ function Licences() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Full notices</CardTitle>
+          <CardTitle>{t("Full notices")}</CardTitle>
           <CardDescription>
             The same text that ships with the installer, including trademark terms and where each
             component&apos;s corresponding source lives.
@@ -311,6 +319,7 @@ const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: Co
 ];
 
 function Routes({ profile, onChange }: AdvancedProps) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   const active =
     profile.protocol === "masque" ? profile.masqueTransport : profile.protocol === "wg" ? "wg" : "gool";
@@ -321,8 +330,8 @@ function Routes({ profile, onChange }: AdvancedProps) {
     <>
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-[15px]">Protocol</CardTitle>
-          <CardDescription>Retries alternate the two MASQUE transports automatically.</CardDescription>
+          <CardTitle className="text-[15px]">{t("Protocol")}</CardTitle>
+          <CardDescription>{t("Retries alternate the two MASQUE transports automatically.")}</CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-2.5 pt-0">
           {PROTOCOLS.map((option) => {
@@ -341,8 +350,10 @@ function Routes({ profile, onChange }: AdvancedProps) {
                   on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:bg-accent",
                 ].join(" ")}
               >
+                {/* The label is a protocol name and stays as it is; only the
+                    sentence under it is ours to translate. */}
                 <span className="text-[13.5px] font-semibold">{option.label}</span>
-                <span className="text-xs leading-snug text-muted-foreground">{option.detail}</span>
+                <span className="text-xs leading-snug text-muted-foreground">{t(option.detail)}</span>
               </button>
             );
           })}
@@ -350,7 +361,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
       </Card>
 
       <Card>
-        <CardHeader className="pb-1"><CardTitle className="text-[15px]">Search</CardTitle></CardHeader>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Search")}</CardTitle></CardHeader>
         <CardContent className="pt-0">
           <Row first title="Search depth" help="Deeper searches take longer but survive stricter filtering.">
             <Seg
@@ -399,18 +410,18 @@ function Routes({ profile, onChange }: AdvancedProps) {
 
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-[15px]">Anti-blocking</CardTitle>
+          <CardTitle className="text-[15px]">{t("Anti-blocking")}</CardTitle>
           <CardDescription>
             {isMasque
-              ? "Both cost a little on a healthy network and only matter on a filtered one."
-              : "Obfuscation applies to WireGuard; the TLS options are MASQUE H2 only."}
+              ? t("Both cost a little on a healthy network and only matter on a filtered one.")
+              : t("Obfuscation applies to WireGuard; the TLS options are MASQUE H2 only.")}
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <Row
             first
             title="Split the TLS opening"
-            help={isH2 ? "Defeats filtering that reads only the first packet." : "MASQUE H2 only — has no effect on the selected protocol."}
+            help={isH2 ? t("Defeats filtering that reads only the first packet.") : t("MASQUE H2 only — has no effect on the selected protocol.")}
           >
             <Switch
               disabled={!isH2}
@@ -498,6 +509,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
 // -------------------------------------------------------------------- endpoint
 
 function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   const error = endpointError(profile.endpointMode, profile.peer ?? "");
   const canonical = normalizeEndpoint(profile.peer ?? "");
@@ -514,7 +526,7 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
         }
       />
       <Card>
-        <CardHeader className="pb-1"><CardTitle className="text-[15px]">Pinned endpoint</CardTitle></CardHeader>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Pinned endpoint")}</CardTitle></CardHeader>
         <CardContent className="pt-0">
           <Row first title="How the gateway is chosen" help="Custom first spends one attempt on your address before searching. Custom only never searches.">
             <Seg
@@ -534,8 +546,8 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
                   error={error}
                   help={`${canonical && canonical !== profile.peer?.trim() ? `Reads as ${canonical}. ` : ""}${
                     profile.endpointMode === "custom-first"
-                      ? "One attempt goes here; if it fails the core searches instead and says so."
-                      : "Every attempt goes here. Nothing else is tried."
+                      ? t("One attempt goes here; if it fails the core searches instead and says so.")
+                      : t("Every attempt goes here. Nothing else is tried.")
                   }`}
                 />
               </div>
@@ -544,7 +556,7 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
             <>
               <Separator />
               <p className="py-3.5 text-[13px] text-muted-foreground">
-                A saved address is kept but not used while this is Automatic.
+                {t("A saved address is kept but not used while this is Automatic.")}
               </p>
             </>
           ) : null}
@@ -553,8 +565,8 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
 
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-[15px]">Per-protocol overrides</CardTitle>
-          <CardDescription>Left empty, each protocol uses the pinned endpoint above or its own search.</CardDescription>
+          <CardTitle className="text-[15px]">{t("Per-protocol overrides")}</CardTitle>
+          <CardDescription>{t("Left empty, each protocol uses the pinned endpoint above or its own search.")}</CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 pt-2">
           <TextField
@@ -576,11 +588,12 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
 // --------------------------------------------------------------------- traffic
 
 function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProps) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   return (
     <>
       <Card>
-        <CardHeader className="pb-1"><CardTitle className="text-[15px]">Reach</CardTitle></CardHeader>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Reach")}</CardTitle></CardHeader>
         <CardContent className="pt-0">
           <Row first title="Set the system proxy while connected" help={systemProxyHelp(runtime)}>
             <Switch checked={profile.systemProxy} onCheckedChange={(systemProxy) => set({ systemProxy })} />
@@ -601,13 +614,13 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProp
             <Switch checked={profile.killSwitch} onCheckedChange={(killSwitch) => set({ killSwitch })} />
           </Row>
           <p className="pb-1 text-[13px] text-muted-foreground">
-            Put back on disconnect. If the app is killed rather than closed, the next launch restores it.
+            {t("Put back on disconnect. If the app is killed rather than closed, the next launch restores it.")}
           </p>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader className="pb-1"><CardTitle className="text-[15px]">Local proxy and DNS</CardTitle></CardHeader>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Local proxy and DNS")}</CardTitle></CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 pt-2">
           <TextField
             label="Proxy address" mono value={profile.socksAddress}
@@ -631,9 +644,9 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProp
 
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-[15px]">Routing rules</CardTitle>
+          <CardTitle className="text-[15px]">{t("Routing rules")}</CardTitle>
           <CardDescription>
-            Blocked first, then direct; everything left over enters the tunnel. One rule per line.
+            {t("Blocked first, then direct; everything left over enters the tunnel. One rule per line.")}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4 pt-2">
@@ -691,6 +704,7 @@ function LanSharing({
   connected: boolean;
   onToast: (title: string, message: string, error?: boolean) => void;
 }) {
+  const t = useT();
   const share = profile.lanShare;
   const [status, setStatus] = useState<LanStatus>({ running: false, address: null, open: false });
   const [busy, setBusy] = useState(false);
@@ -724,11 +738,11 @@ function LanSharing({
   return (
     <Card>
       <CardHeader className="pb-1">
-        <CardTitle className="text-[15px]">Share with other devices</CardTitle>
+        <CardTitle className="text-[15px]">{t("Share with other devices")}</CardTitle>
         <CardDescription>
-          Opens a proxy on this machine that phones, televisions and anything else on the same
-          network can point at. They go out through whatever is carrying traffic here — the second
-          hop when one is running, the tunnel when it is not.
+          {t(
+            "Opens a proxy on this machine that phones, televisions and anything else on the same network can point at. They go out through whatever is carrying traffic here — the second hop when one is running, the tunnel when it is not.",
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
@@ -737,8 +751,8 @@ function LanSharing({
           title="Share this connection on my network"
           help={
             connected
-              ? "The port is opened while connected and closed when you disconnect."
-              : "Connect first — there is nothing to share until the tunnel is carrying traffic."
+              ? t("The port is opened while connected and closed when you disconnect.")
+              : t("Connect first — there is nothing to share until the tunnel is carrying traffic.")
           }
         >
           <Switch
@@ -781,7 +795,7 @@ function LanSharing({
             {!share.username.trim() || !share.password.trim() ? (
               <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/[0.08] p-3">
                 <div className="text-[12.5px] font-semibold text-amber-500">
-                  No sign-in: anyone on this network can use your tunnel
+                  {t("No sign-in: anyone on this network can use your tunnel")}
                 </div>
                 <div className="mt-1 text-[12px] text-muted-foreground">
                   Every device that can reach this machine — including guests and anything else on a
@@ -795,12 +809,12 @@ function LanSharing({
             <div className="flex items-center justify-between gap-4 border-t pt-3">
               <div className="min-w-0">
                 <div className="text-[13px] font-medium">
-                  {status.running ? "Open" : "Not open"}
+                  {status.running ? t("Open") : t("Not open")}
                 </div>
                 <div className="truncate font-mono text-[11.5px] text-muted-foreground">
                   {status.running && status.address
                     ? `Point devices at ${status.address} — HTTP or SOCKS5, same port`
-                    : "Apply to open the port."}
+                    : t("Apply to open the port.")}
                 </div>
               </div>
               <Button
@@ -809,7 +823,7 @@ function LanSharing({
                 disabled={busy || !connected}
                 onClick={() => void apply({})}
               >
-                Apply
+                {t("Apply")}
               </Button>
             </div>
 
@@ -825,22 +839,24 @@ function LanSharing({
 }
 
 function systemProxyHelp(runtime: string): string {
+  const t = useT();
   const os = runtime.split(" · ")[0]?.toLowerCase();
   if (os === "windows") return "Sets the WinINET proxy. Most apps follow it; some bring their own settings.";
   if (os === "macos") return "Sets the SOCKS proxy on every active network service.";
   if (os === "linux") return "Sets the GNOME proxy. Desktops that ignore gsettings are unaffected.";
-  return "Sets the operating system's proxy settings.";
+  return t("Sets the operating system's proxy settings.");
 }
 
 // -------------------------------------------------------------------- identity
 
 function Identity({ profile, onChange }: AdvancedProps) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   return (
     <Card>
       <CardHeader className="pb-1">
         <CardTitle className="text-[15px]">Cloudflare Zero Trust</CardTitle>
-        <CardDescription>Leave empty to stay on a personal WARP identity.</CardDescription>
+        <CardDescription>{t("Leave empty to stay on a personal WARP identity.")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4 pt-2">
         <div className="grid grid-cols-2 gap-4">
@@ -857,10 +873,9 @@ function Identity({ profile, onChange }: AdvancedProps) {
             help="Skips sign-in when you already hold one." />
         </div>
         <p className="text-[13px] text-muted-foreground">
-          The client secret and the token are held in memory and passed to the core through its environment.
-          Neither is written to the profile on disk, and neither appears in a diagnostics report. The team,
-          client ID and email <b className="font-medium text-foreground">are</b> saved with the profile on this
-          device.
+          {t(
+            "The client secret and the token are held in memory and passed to the core through its environment. Neither is written to the profile on disk, and neither appears in a diagnostics report. The team, client ID and email are saved with the profile on this device.",
+          )}
         </p>
         <Separator />
         <Row first title="Send web traffic to Gateway" help="Applies the enrolled organisation's policy. Adds a hop, and permits its logging.">
@@ -874,6 +889,7 @@ function Identity({ profile, onChange }: AdvancedProps) {
 // ----------------------------------------------------------------- diagnostics
 
 function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVersion, onToast }: AdvancedProps) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   const [includeSystem, setIncludeSystem] = useState(true);
   const [includeSettings, setIncludeSettings] = useState(true);
@@ -897,7 +913,7 @@ function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVer
   return (
     <>
       <Card>
-        <CardHeader className="pb-1"><CardTitle className="text-[15px]">Core and profile</CardTitle></CardHeader>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Core and profile")}</CardTitle></CardHeader>
         <CardContent className="flex flex-col gap-4 pt-2">
           <div className="grid grid-cols-2 gap-4">
             <TextField
@@ -925,8 +941,8 @@ function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVer
 
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-[15px]">Report</CardTitle>
-          <CardDescription>Raise the log detail, reproduce the problem, then build this.</CardDescription>
+          <CardTitle className="text-[15px]">{t("Report")}</CardTitle>
+          <CardDescription>{t("Raise the log detail, reproduce the problem, then build this.")}</CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <Row first title="App and engine version" help="Always included — a report without it cannot be read.">
@@ -938,7 +954,7 @@ function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVer
           <Row title="Connection settings" help="No Zero Trust credentials and no pinned address — only whether one is set.">
             <Switch checked={includeSettings} onCheckedChange={setIncludeSettings} />
           </Row>
-          <Row title={`Recent events (up to ${REPORT_EVENT_LIMIT})`} help="What the core and the supervisor did.">
+          <Row title={`${t("Recent events (up to")} ${REPORT_EVENT_LIMIT})`} help="What the core and the supervisor did.">
             <Switch checked={includeEvents} onCheckedChange={setIncludeEvents} />
           </Row>
           <Row title="Replace IP addresses" help="Swaps them for placeholders. Most problems can still be diagnosed.">
@@ -964,7 +980,7 @@ function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVer
                 }
               }}
             >
-              Copy
+              {t("Copy")}
             </Button>
             <Button
               onClick={async () => {
@@ -975,7 +991,7 @@ function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVer
                 }
               }}
             >
-              Save report
+              {t("Save report")}
             </Button>
           </div>
         </CardContent>

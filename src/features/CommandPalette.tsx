@@ -23,7 +23,7 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
-  const results = useMemo(() => searchSettings(query), [query]);
+  const results = useMemo(() => searchSettings(query, t), [query, t]);
 
   useEffect(() => {
     if (!open) return;
@@ -102,10 +102,10 @@ export function CommandPalette({
                 >
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13.5px] font-medium text-foreground">
-                      {entry.label}
+                      {t(entry.label)}
                     </span>
                     <span className="block truncate text-[11.5px] text-muted-foreground">
-                      {entry.where}
+                      {t(entry.where)}
                     </span>
                   </span>
                   {index === active ? (
@@ -122,7 +122,7 @@ export function CommandPalette({
         )}
 
         <div className="flex items-center justify-between border-t px-3.5 py-2 text-[11px] text-muted-foreground">
-          <span>Enter opens · ↑↓ moves · Esc closes</span>
+          <span>{t("Enter opens · ↑↓ moves · Esc closes")}</span>
           <span>{results.length} of {SETTINGS.length} settings</span>
         </div>
       </div>

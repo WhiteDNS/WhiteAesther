@@ -1,3 +1,4 @@
+import { useT } from "@/core/useT";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -16,13 +17,16 @@ export function Row({
   children: React.ReactNode;
   first?: boolean;
 }) {
+  const t = useT();
   return (
     <>
       {first ? null : <Separator />}
       <div className="flex items-center justify-between gap-6 py-3.5">
         <div className="flex max-w-[60%] flex-col gap-1">
-          <Label className="text-[13.5px]">{title}</Label>
-          {help ? <span className="text-[13px] leading-snug text-muted-foreground">{help}</span> : null}
+          <Label className="text-[13.5px]">{t(title)}</Label>
+          {help ? (
+            <span className="text-[13px] leading-snug text-muted-foreground">{t(help)}</span>
+          ) : null}
         </div>
         <div className="shrink-0">{children}</div>
       </div>
@@ -39,12 +43,13 @@ export function Seg<T extends string>({
   options: Array<[T, string]>;
   onChange: (value: T) => void;
 }) {
+  const t = useT();
   return (
     <Tabs value={value} onValueChange={(next) => onChange(next as T)}>
       <TabsList className="h-9">
         {options.map(([id, label]) => (
           <TabsTrigger key={id} value={id} className="px-3 py-1 text-[13px]">
-            {label}
+            {t(label)}
           </TabsTrigger>
         ))}
       </TabsList>
@@ -71,20 +76,23 @@ export function TextField({
   help?: string;
   error?: string | null;
 }) {
+  const t = useT();
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-[13.5px]">{label}</Label>
+      <Label className="text-[13.5px]">{t(label)}</Label>
       <Input
         type={type}
         className={mono ? "font-mono" : undefined}
         value={value}
-        placeholder={placeholder}
+        placeholder={placeholder ? t(placeholder) : undefined}
         onChange={(event) => onChange(event.target.value)}
       />
+      {/* An error comes from the engine and is already in its own language;
+          only the help text we wrote is ours to translate. */}
       {error ? (
-        <span className="text-[13px] leading-snug text-destructive">{error}</span>
+        <span dir="auto" className="text-[13px] leading-snug text-destructive">{error}</span>
       ) : help ? (
-        <span className="text-[13px] leading-snug text-muted-foreground">{help}</span>
+        <span className="text-[13px] leading-snug text-muted-foreground">{t(help)}</span>
       ) : null}
     </div>
   );
@@ -108,9 +116,10 @@ export function NumberField({
   unit?: string;
   help?: string;
 }) {
+  const t = useT();
   return (
     <div className="flex flex-col gap-2">
-      {label ? <Label className="text-[13.5px]">{label}</Label> : null}
+      {label ? <Label className="text-[13.5px]">{t(label)}</Label> : null}
       <div className="relative">
         <Input
           type="number"
@@ -125,11 +134,13 @@ export function NumberField({
         />
         {unit ? (
           <span className="pointer-events-none absolute end-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-            {unit}
+            {t(unit)}
           </span>
         ) : null}
       </div>
-      {help ? <span className="text-[13px] leading-snug text-muted-foreground">{help}</span> : null}
+      {help ? (
+        <span className="text-[13px] leading-snug text-muted-foreground">{t(help)}</span>
+      ) : null}
     </div>
   );
 }
@@ -147,17 +158,20 @@ export function RulesField({
   placeholder?: string;
   help?: string;
 }) {
+  const t = useT();
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-[13.5px]">{label}</Label>
+      <Label className="text-[13.5px]">{t(label)}</Label>
       <Textarea
         rows={5}
         className="font-mono text-[12.5px]"
         value={value}
-        placeholder={placeholder}
+        placeholder={placeholder ? t(placeholder) : undefined}
         onChange={(event) => onChange(event.target.value)}
       />
-      {help ? <span className="text-[13px] leading-snug text-muted-foreground">{help}</span> : null}
+      {help ? (
+        <span className="text-[13px] leading-snug text-muted-foreground">{t(help)}</span>
+      ) : null}
     </div>
   );
 }

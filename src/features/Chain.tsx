@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useT } from "@/core/useT";
 import { Link2, Plus, RefreshCw, Trash2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,6 +22,7 @@ interface ChainProps {
 }
 
 export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
+  const t = useT();
   const chain = profile.chain;
 
   const [running, setRunning] = useState(false);
@@ -83,10 +85,11 @@ export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
     <>
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-[15px]">Change the address you appear from</CardTitle>
+          <CardTitle className="text-[15px]">{t("Change the address you appear from")}</CardTitle>
           <CardDescription>
-            The tunnel hides your traffic but keeps your country — Cloudflare places you near where
-            you already are. Sending it on through a node of your own is what changes that.
+            {t(
+              "The tunnel hides your traffic but keeps your country — Cloudflare places you near where you already are. Sending it on through a node of your own is what changes that.",
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
@@ -103,7 +106,7 @@ export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
                 title="Dial nodes through the tunnel"
                 help={
                   chain.throughTunnel
-                    ? "This network sees only Cloudflare, never your node's address. Needs the tunnel connected."
+                    ? t("This network sees only Cloudflare, never your node's address. Needs the tunnel connected.")
                     : "Your node is reached directly, so this network can see its address. Use when the tunnel will not connect."
                 }
               >
@@ -123,27 +126,27 @@ export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
                   />
                   <span className="text-[13px] text-muted-foreground">
                     {applying
-                      ? "Starting…"
+                      ? t("Starting…")
                       : running
                         ? `Carrying traffic on ${address}`
                         : connected
-                          ? "Switched on, but not running."
+                          ? t("Switched on, but not running.")
                           : chain.throughTunnel
-                            ? "Waiting for the tunnel. Turn off the switch above to run without it."
-                            : "Switched on, but not running."}
+                            ? t("Waiting for the tunnel. Turn off the switch above to run without it.")
+                            : t("Switched on, but not running.")}
                   </span>
                 </div>
                 {(connected || !chain.throughTunnel) && !running && !applying ? (
                   <Button variant="outline" size="sm" className="shrink-0" onClick={() => set({})}>
                     <RefreshCw />
-                    Start now
+                    {t("Start now")}
                   </Button>
                 ) : null}
               </div>
               {failure ? (
                 <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/[0.08] p-3">
                   <div className="text-[12.5px] font-semibold text-destructive">
-                    The chain did not start
+                    {t("The chain did not start")}
                   </div>
                   <div className="mt-1 break-words text-[12px] text-muted-foreground">{failure}</div>
                 </div>
@@ -157,10 +160,11 @@ export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
 
       <Card>
         <CardHeader className="pb-1">
-          <CardTitle className="text-[15px]">Configs pasted by hand</CardTitle>
+          <CardTitle className="text-[15px]">{t("Configs pasted by hand")}</CardTitle>
           <CardDescription>
-            One per line. vless, vmess, trojan, ss, hysteria2 and tuic are all understood as they
-            are — nothing needs converting first.
+            {t(
+              "One per line. vless, vmess, trojan, ss, hysteria2 and tuic are all understood as they are — nothing needs converting first.",
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-2">
@@ -178,10 +182,10 @@ export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
           />
           <div className="mt-3 flex items-center justify-between gap-4">
             <p className="text-[12px] text-muted-foreground">
-              Read when the chain starts, so they take effect once applied.
+              {t("Read when the chain starts, so they take effect once applied.")}
             </p>
             <Button variant="outline" size="sm" disabled={applying} onClick={() => set({})}>
-              Apply
+              {t("Apply")}
             </Button>
           </div>
         </CardContent>
@@ -192,10 +196,10 @@ export function Chain({ profile, onChange, connected, onToast }: ChainProps) {
         running={running}
         blocked={
           !chain.enabled
-            ? "Turn on “Route through a second hop” above to load nodes."
+            ? t("Turn on “Route through a second hop” above to load nodes.")
             : chain.throughTunnel && !connected
-              ? "Connect first, or turn off “Dial nodes through the tunnel”."
-              : "The chain did not start. The reason is shown above."
+              ? t("Connect first, or turn off “Dial nodes through the tunnel”.")
+              : t("The chain did not start. The reason is shown above.")
         }
         selected={chain.node}
         busy={busy}
@@ -251,15 +255,17 @@ function Sources({
   sources: ChainSource[];
   onChange: (sources: ChainSource[]) => void;
 }) {
+  const t = useT();
   const [url, setUrl] = useState("");
 
   return (
     <Card>
       <CardHeader className="pb-1">
-        <CardTitle className="text-[15px]">Subscriptions</CardTitle>
+        <CardTitle className="text-[15px]">{t("Subscriptions")}</CardTitle>
         <CardDescription>
-          Kept up to date automatically. A subscription link is a credential — anyone holding it can
-          use your nodes.
+          {t(
+            "Kept up to date automatically. A subscription link is a credential — anyone holding it can use your nodes.",
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 pt-2">
@@ -291,12 +297,12 @@ function Sources({
             ))}
           </div>
         ) : (
-          <p className="text-[13px] text-muted-foreground">No subscriptions yet.</p>
+          <p className="text-[13px] text-muted-foreground">{t("No subscriptions yet.")}</p>
         )}
 
         <div className="flex items-end gap-2">
           <div className="flex flex-1 flex-col gap-2">
-            <Label className="text-[13.5px]">Add a subscription</Label>
+            <Label className="text-[13.5px]">{t("Add a subscription")}</Label>
             <Input
               className="font-mono"
               value={url}
@@ -309,7 +315,7 @@ function Sources({
           </div>
           <Button variant="outline" onClick={add} disabled={!url.trim()}>
             <Plus />
-            Add
+            {t("Add")}
           </Button>
         </div>
       </CardContent>
@@ -344,20 +350,21 @@ function Nodes({
   onTest: (node: ChainNode) => void;
   onSelect: (node: ChainNode) => void;
 }) {
+  const t = useT();
   return (
     <Card>
       <CardHeader className="flex-row items-start justify-between gap-4 pb-1 space-y-0">
         <div>
-          <CardTitle className="text-[15px]">Nodes</CardTitle>
+          <CardTitle className="text-[15px]">{t("Nodes")}</CardTitle>
           <CardDescription>
-            Every measurement here travels the tunnel, so a figure means the node works from behind
-            it — and a failure means it does not. A node marked in amber is not broken and was not
-            measured: hover it to read why this build cannot use it, and what to change.
+            {t(
+              "Every measurement here travels the tunnel, so a figure means the node works from behind it — and a failure means it does not. A node marked in amber is not broken and was not measured: hover it to read why this build cannot use it, and what to change.",
+            )}
           </CardDescription>
         </div>
         <Button variant="outline" size="sm" className="shrink-0" onClick={onRefresh}>
           <RefreshCw />
-          Refresh
+          {t("Refresh")}
         </Button>
       </CardHeader>
       <CardContent className="pt-2">
@@ -413,7 +420,7 @@ function Nodes({
                     disabled={busy === node.name || node.unusable != null}
                     onClick={() => onTest(node)}
                   >
-                    Test
+                    {t("Test")}
                   </Button>
                   <Button
                     variant={active ? "secondary" : "outline"}
@@ -423,7 +430,7 @@ function Nodes({
                     disabled={busy === node.name || node.unusable != null}
                     onClick={() => onSelect(node)}
                   >
-                    {active ? "In use" : <><Zap />Use</>}
+                    {active ? t("In use") : <><Zap />{t("Use")}</>}
                   </Button>
                 </div>
               );
