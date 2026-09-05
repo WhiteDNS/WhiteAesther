@@ -51,7 +51,9 @@ const VERSION = "15.0.21";
  *
  * Two desktop targets are missing on purpose: Tor publishes no
  * `windows-aarch64` or `linux-aarch64` expert bundle at this version. They are
- * absent rather than mapped to a near-miss, so staging refuses them loudly.
+ * absent rather than mapped to a near-miss, and staging skips them with a
+ * warning rather than failing -- see below for why the whole build should not
+ * stop over one carrier.
  */
 const BUNDLES = {
   "x86_64-pc-windows-msvc": {
@@ -85,15 +87,32 @@ if (!bundle) {
     `Tor publishes no expert bundle for ${target} at ${VERSION}; ` +
       `building without the Tor carrier. Aether and Psiphon are unaffected.`,
   );
+  // The bundle configuration globs this directory, and a glob that matches
+  // nothing is a packaging error on some targets. A note is written instead of
+  // a placeholder binary: an empty file named `tor` would be found by the very
+  // lookup that decides whether this carrier can run.
+  const supportDir = join(appRoot, "src-tauri", "binaries", "tor");
+  await mkdir(supportDir, { recursive: true });
+  await writeFile(
+    join(supportDir, "UNAVAILABLE.txt"),
+    `The Tor carrier is not part of this build.\n\n` +
+      `Tor publishes no expert bundle for ${target} at ${VERSION}, so there is no tor binary\n` +
+      `to ship. The application asks which carriers are present and offers only those, so\n` +
+      `Tor does not appear as a choice on this build. Aether and Psiphon are unaffected.\n`,
+  );
   process.exit(0);
 }
 
 const extension = target.includes("windows") ? ".exe" : "";
 const binariesDir = join(appRoot, "src-tauri", "binaries");
-const destination = join(binariesDir, `tor-${target}${extension}`);
-// The transports and the data files are resources rather than sidecars: tor
-// launches the transport itself, and nothing renames these per target.
+// Everything travels in one resource directory rather than as a target-triple
+// sidecar. Tor is not shipped for every target -- there is no linux-aarch64
+// expert bundle -- and a declared sidecar that is missing fails the whole
+// bundle, which would mean no arm64 Linux build at all rather than one without
+// this one carrier. It also keeps tor next to the transports it launches and
+// the geoip data it reads.
 const supportDir = join(binariesDir, "tor");
+const destination = join(supportDir, `tor${extension}`);
 await mkdir(supportDir, { recursive: true });
 
 const staged = [

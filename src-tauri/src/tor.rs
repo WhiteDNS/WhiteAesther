@@ -235,8 +235,12 @@ impl Tor {
         let inner = &self.inner;
         let generation = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
-        let binary = locate(app, TOR_FILENAME, &[])?;
         let support = support_dir(app)?;
+        // tor lives in the support directory beside the transports it launches
+        // and the geoip data it reads, rather than as a target-triple sidecar:
+        // it is not shipped for every target, and a declared sidecar that is
+        // missing fails the whole bundle.
+        let binary = locate(app, TOR_FILENAME, &[support.join(TOR_FILENAME)])?;
         let home = app
             .path()
             .app_data_dir()
@@ -866,7 +870,10 @@ mod tests {
 /// rather than offering a carrier that cannot start -- a control that saves and
 /// does nothing is worse than one that is absent.
 pub fn is_available(app: &AppHandle) -> bool {
-    locate(app, TOR_FILENAME, &[]).is_ok() && support_dir(app).is_ok()
+    let Ok(support) = support_dir(app) else {
+        return false;
+    };
+    locate(app, TOR_FILENAME, &[support.join(TOR_FILENAME)]).is_ok()
 }
 
 impl Tor {

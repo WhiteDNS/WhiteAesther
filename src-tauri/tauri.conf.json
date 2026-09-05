@@ -30,8 +30,7 @@
     "externalBin": [
       "binaries/aether",
       "binaries/mihomo",
-      "binaries/psiphon-tunnel-core",
-      "binaries/tor"
+      "binaries/psiphon-tunnel-core"
     ],
     "resources": {
       "../LICENSE": "licenses/whiteaesther-AGPL-3.0.txt",
