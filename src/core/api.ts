@@ -1,6 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ChainSettings, ConnectionProfile, LanSettings, CoreLogEvent, CoreProbe, CoreSnapshot } from "../types";
+import type {
+  CarrierKind,
+  ChainSettings,
+  ConnectionProfile,
+  LanSettings,
+  CoreLogEvent,
+  CoreProbe,
+  CoreSnapshot,
+  PsiphonSnapshot,
+  TorSnapshot,
+} from "../types";
 
 export function isDesktopRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -194,6 +204,61 @@ export async function setChain(settings: ChainSettings): Promise<boolean> {
 export async function chainStatus(): Promise<ChainStatus> {
   requireDesktop();
   return invoke("chain_status");
+}
+
+/**
+ * What the Psiphon carrier is doing, including every exit country it has.
+ *
+ * The country list is Psiphon's own answer, so it is empty until the first
+ * successful connect. The screen offers "best available" until then rather than
+ * naming countries it cannot promise.
+ */
+export async function psiphonStatus(): Promise<PsiphonSnapshot> {
+  requireDesktop();
+  return invoke("psiphon_status");
+}
+
+/** What Tor is doing, including how far bootstrapping has got. */
+export async function torStatus(): Promise<TorSnapshot> {
+  requireDesktop();
+  return invoke("tor_status");
+}
+
+/**
+ * Which carriers this build can actually run.
+ *
+ * Not every build ships every one: Tor publishes no expert bundle for arm64
+ * Windows or Linux. The picker offers only what is here, rather than a control
+ * that saves and cannot start.
+ */
+export async function carriersAvailable(): Promise<CarrierKind[]> {
+  requireDesktop();
+  return invoke("carriers_available");
+}
+
+/**
+ * Asks Tor's circumvention service which bridges work in a given country.
+ *
+ * Goes out through whichever carrier is up, because the service is itself
+ * blocked in most of the places its answer is wanted. The country is the
+ * user's own and is asked for rather than guessed — inferring it from the
+ * current exit would ask about the one country the answer does not apply to.
+ */
+export async function fetchBridges(country: string): Promise<string[]> {
+  requireDesktop();
+  return invoke("fetch_bridges", { country });
+}
+
+/**
+ * Moves a live carrier to a different exit country.
+ *
+ * A restart rather than a setting change: Psiphon picks its egress during the
+ * handshake and cannot be told to move afterwards. The chain and the system
+ * proxy follow the new listener, so this takes as long as a connect does.
+ */
+export async function setPsiphonRegion(region: string): Promise<CoreSnapshot> {
+  requireDesktop();
+  return invoke("set_psiphon_region", { region });
 }
 
 /** Where another device points, and on what terms. */

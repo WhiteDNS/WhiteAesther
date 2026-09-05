@@ -1,3 +1,4 @@
+mod carrier;
 mod chain;
 mod core_supervisor;
 mod elevation;
@@ -5,8 +6,11 @@ mod http_bridge;
 mod iran_routes;
 mod lan_share;
 mod latency;
+mod moat;
+mod psiphon;
 mod scanner;
 mod system_proxy;
+mod tor;
 
 use chain::Chain;
 use core_supervisor::CoreSupervisor;
@@ -48,6 +52,80 @@ async fn chain_status(chain: tauri::State<'_, Chain>) -> Result<ChainStatus, Str
         running: chain.is_running(),
         address: chain.address().map(|value| value.to_string()),
     })
+}
+
+/// What the Psiphon carrier is doing, including the exit countries it has.
+///
+/// The country list is Psiphon's own answer rather than a table of ours, so it
+/// is empty until the first successful connect -- which is honest: we do not
+/// know what it has until it tells us. The screen says "best available" until
+/// then rather than offering countries it cannot promise.
+#[tauri::command]
+fn psiphon_status(psiphon: tauri::State<'_, psiphon::Psiphon>) -> psiphon::PsiphonSnapshot {
+    psiphon.snapshot()
+}
+
+/// The carrier's raw notice stream, for a diagnostics report.
+#[tauri::command]
+fn psiphon_notices(psiphon: tauri::State<'_, psiphon::Psiphon>) -> Vec<String> {
+    psiphon.notices()
+}
+
+/// What Tor is doing, including how far bootstrapping has got.
+///
+/// The progress is worth showing rather than hiding behind a spinner: building
+/// a circuit through a bridge can take tens of seconds, and a percentage that
+/// is visibly moving is the difference between waiting and giving up.
+#[tauri::command]
+fn tor_status(tor: tauri::State<'_, tor::Tor>) -> tor::TorSnapshot {
+    tor.snapshot()
+}
+
+/// Tor's own output, for a diagnostics report.
+#[tauri::command]
+fn tor_log(tor: tauri::State<'_, tor::Tor>) -> Vec<String> {
+    tor.lines()
+}
+
+/// Which carriers this build can actually run.
+///
+/// Not every build ships every carrier: Tor publishes no expert bundle for
+/// arm64 Windows or Linux, so a build for those targets has Aether and Psiphon
+/// and nothing else. The screen reads this rather than offering a way out that
+/// cannot start — a control that saves and does nothing is worse than one that
+/// is absent.
+#[tauri::command]
+fn carriers_available(app: AppHandle) -> Vec<String> {
+    let mut available = vec!["aether".to_string()];
+    if psiphon::is_available(&app) {
+        available.push("psiphon".into());
+    }
+    if tor::is_available(&app) {
+        available.push("tor".into());
+    }
+    available
+}
+
+/// Asks Tor's circumvention service which bridges work in a given country.
+///
+/// Goes out through whichever carrier is up, when one is: the service is itself
+/// blocked in most of the places its answer is wanted, so asking directly there
+/// returns nothing and reads as the service being down.
+///
+/// The country is the user's own, and is asked for rather than inferred. A
+/// desktop has no SIM to read one from, and guessing from the current exit
+/// address would ask about whichever country the carrier is leaving from —
+/// which is the one place the answer does not apply.
+#[tauri::command]
+async fn fetch_bridges(
+    app: AppHandle,
+    supervisor: tauri::State<'_, CoreSupervisor>,
+    country: String,
+) -> Result<Vec<String>, String> {
+    let carrier = supervisor.carrier(&app).map(|carrier| carrier.socks);
+    tauri::async_runtime::spawn_blocking(move || moat::fetch_bridges(&country, carrier))
+        .await
+        .map_err(|error| format!("the bridge request did not finish: {error}"))?
 }
 
 /// Every node the chain knows about, with the delay each last recorded.
@@ -110,6 +188,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(CoreSupervisor::new())
         .manage(Chain::new())
+        .manage(psiphon::Psiphon::new())
+        .manage(tor::Tor::new())
         .manage(lan_share::LanDoor::default())
         .setup(|app| {
             // A previous run that was killed rather than closed may have left
@@ -237,6 +317,7 @@ pub fn run() {
             core_supervisor::resuming_full_tunnel,
             core_supervisor::restart_as_administrator,
             core_supervisor::set_lan_share,
+            core_supervisor::set_psiphon_region,
             core_supervisor::lan_share_status,
             scanner::scan_endpoints,
             scanner::test_endpoint,
@@ -248,6 +329,12 @@ pub fn run() {
             chain_nodes,
             chain_test,
             chain_select,
+            psiphon_status,
+            psiphon_notices,
+            tor_status,
+            tor_log,
+            carriers_available,
+            fetch_bridges,
         ])
         .build(tauri::generate_context!())
         .expect("error while running WhiteAesther")

@@ -292,6 +292,59 @@ const FA: Record<string, string> = {
   "Dial nodes through the tunnel": "شماره‌گیری نودها از داخل تونل",
   "Round-trip through the tunnel over the last eighty seconds": "زمان رفت و برگشت از تونل در هشتاد ثانیهٔ اخیر",
 
+  // -- the way out: which carrier runs, and where it comes out -----------
+  // "حامل" for carrier reads as freight rather than as a route, so the heading
+  // asks the question the screen actually answers instead of naming a concept
+  // the user has no reason to hold.
+  "Way out": "راه خروج",
+  "What carries your traffic off this network. Everything below applies to Aether only.":
+    "چه چیزی ترافیک شما را از این شبکه بیرون می‌برد. هر چه پایین‌تر است فقط به Aether مربوط می‌شود.",
+  "Cloudflare's network. Fast, and exits near you — it does not change your country.":
+    "شبکهٔ کلادفلر. سریع است و نزدیک خودتان خارج می‌شود — کشور شما را عوض نمی‌کند.",
+  "Psiphon": "سایفون",
+  "Finds its own way out and can exit from another country. Slower to connect.":
+    "خودش راه خروج را پیدا می‌کند و می‌تواند از کشوری دیگر خارج شود. کندتر وصل می‌شود.",
+  "Exit country": "کشور خروج",
+  "A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.":
+    "یک ترجیح است، نه تضمین. سایفون به‌جای جایگزینی، تلاش را ادامه می‌دهد؛ پس کشوری که ظرفیت ندارد یعنی اتصال کند.",
+  "Best available": "بهترین گزینهٔ موجود",
+  "Moving the exit. This reconnects, so it takes as long as connecting does.":
+    "در حال جابه‌جایی خروج. این کار دوباره وصل می‌شود، پس به اندازهٔ یک اتصال طول می‌کشد.",
+  "The country list is Psiphon's own and arrives once you have connected at least once.":
+    "فهرست کشورها را خود سایفون می‌دهد و پس از نخستین اتصال می‌رسد.",
+  "Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.":
+    "زیر سایفون، پویشگر نقطهٔ پایانی، نقطهٔ پایانی ثابت‌شده و انتخاب ترابرد هیچ کاری نمی‌کنند — سایفون مسیر خودش را پیدا می‌کند.",
+
+  // -- Tor, and its bridges ----------------------------------------------
+  // "پل" is the settled Persian word for a Tor bridge and is what the Tor
+  // Project's own Persian pages use, so it is what someone who has read them
+  // will be looking for here.
+  "Tor": "تور",
+  "Three relays. The strongest against being identified, and the slowest. No UDP.":
+    "سه بازپخش. قوی‌ترین گزینه در برابر شناسایی، و کندترین. UDP ندارد.",
+  "Bridges": "پل‌ها",
+  "Only needed where Tor itself is blocked. Off is faster and works on an ordinary network.":
+    "فقط جایی لازم است که خود تور مسدود باشد. خاموش سریع‌تر است و روی شبکهٔ معمولی کار می‌کند.",
+  "Off": "خاموش",
+  "Built-in": "همراه برنامه",
+  "Pasted": "چسبانده‌شده",
+  "Bridge transport": "ترابرد پل",
+  "Tor ships these bridges itself, so they are as current as this build. They are also public, which is what a censor blocks first.":
+    "این پل‌ها را خود تور می‌دهد، پس به اندازهٔ همین نسخه به‌روزند. عمومی هم هستند، و سانسورچی اول همین‌ها را می‌بندد.",
+  "Bridge lines": "خط‌های پل",
+  "One per line, from bridges.torproject.org or someone who has one. A leading “Bridge” is fine — it is stripped.":
+    "هر خط یکی، از bridges.torproject.org یا از کسی که دارد. اگر اول خط «Bridge» باشد اشکالی ندارد — حذف می‌شود.",
+  "Tor carries no UDP, so QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.":
+    "تور UDP را حمل نمی‌کند، پس QUIC و DNS ساده رد می‌شوند تا معلق نمانند. صفحه‌ها باز می‌شوند و نام‌ها همچنان ترجمه می‌شوند.",
+  "Ask Tor for bridges": "از تور پل بگیر",
+  "The country you are connecting from, not the one you want to appear in. Sent through your current connection, because this service is itself blocked in most places it is needed.":
+    "کشوری که از آن وصل می‌شوید، نه کشوری که می‌خواهید از آن دیده شوید. از راه اتصال فعلی فرستاده می‌شود، چون خود این سرویس در بیشتر جاهایی که لازم است مسدود است.",
+  "Country you are connecting from": "کشوری که از آن وصل می‌شوید",
+  "Asking…": "در حال پرسیدن…",
+  "Fetch": "دریافت پل",
+  "Under Tor the endpoint scanner, the pinned endpoint and the transport choice do nothing — Tor picks its own relays.":
+    "زیر تور، پویشگر نقطهٔ پایانی، نقطهٔ پایانی ثابت‌شده و انتخاب ترابرد هیچ کاری نمی‌کنند — تور بازپخش‌های خودش را انتخاب می‌کند.",
+
   // -- section headings, buttons and the paragraphs between them ---------
   // Reached through the primitives in panels.tsx rather than by a call at each
   // use site, so a control added later is translated by construction.
