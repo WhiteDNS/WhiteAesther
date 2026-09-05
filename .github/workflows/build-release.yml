@@ -197,6 +197,7 @@ jobs:
           libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
           libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
           cmake ninja-build perl pkg-config clang rpm xdg-utils
+          libevent-2.1-7
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -275,18 +276,18 @@ jobs:
 
       - name: Build the desktop package
         env:
-          # linuxdeploy strips every ELF it finds while assembling an AppImage,
-          # and the Tor carrier puts two it did not build -- tor and lyrebird --
-          # in the resource directory. It failed there with no diagnostic of its
-          # own; the Linux arm64 job, which ships no Tor because upstream
-          # publishes no bundle for it, went green on the same commit.
-          #
-          # Stripping them buys nothing anyway: they arrive already stripped
-          # from a release build we verified by digest, and modifying them would
-          # invalidate exactly the thing that check established.
+          # Not what fixed the AppImage build -- that was libevent, installed
+          # above -- but kept on its own merits. linuxdeploy strips every ELF it
+          # assembles, and tor and lyrebird arrive already stripped from a
+          # release build checked against the digest Tor publishes for it.
+          # Modifying them afterwards invalidates precisely what that check
+          # established, for no gain.
           #
           # Read only by the AppImage bundler; harmless everywhere else.
           NO_STRIP: "true"
+        # --verbose because linuxdeploy failed silently once and cost a round
+        # trip. The line that mattered was one ERROR in four hundred lines of
+        # deployment chatter, and it named the missing library exactly.
         run: pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
 
       - name: Upload desktop packages
