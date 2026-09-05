@@ -1797,7 +1797,15 @@ mod tests {
             exit_chain: true,
             tun: true,
         });
-        let expected = concat!(
+        // The process name is the one line here that differs by platform --
+        // `aether.exe` on Windows and `aether` everywhere else -- so it is
+        // asked for rather than written in. Hardcoded, this test passed on
+        // Windows and failed on macOS and Linux for a reason that had nothing
+        // to do with what it is checking.
+        let expected = format!(
+            "{head}  - PROCESS-NAME,{process},DIRECT\n{tail}",
+            process = CarrierKind::Aether.process_name(),
+            head = concat!(
             "mixed-port: 1820\n",
             "external-controller: 127.0.0.1:1821\n",
             "secret: \"s3cret\"\n",
@@ -1828,7 +1836,8 @@ mod tests {
             "health-check: {enable: true, url: \"http://www.gstatic.com/generate_204\", interval: 300, lazy: true}\n",
             "proxy-groups:\n  - name: exit\n    type: select\n    use: [source0, manual]\n",
             "rules:\n",
-            "  - PROCESS-NAME,aether.exe,DIRECT\n",
+            ),
+            tail = concat!(
             "  - IP-CIDR,162.159.198.2/32,DIRECT,no-resolve\n",
             "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve\n",
             "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve\n",
@@ -1840,6 +1849,7 @@ mod tests {
             "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve\n",
             "  - IP-CIDR6,fe80::/10,DIRECT,no-resolve\n",
             "  - MATCH,exit\n",
+            ),
         );
         assert_eq!(config, expected, "the Aether path must render unchanged");
     }
