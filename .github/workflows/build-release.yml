@@ -197,6 +197,7 @@ jobs:
           libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
           libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
           cmake ninja-build perl pkg-config clang rpm xdg-utils
+          libevent-2.1-7
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -247,11 +248,47 @@ jobs:
       - name: Stage the chain engine
         run: pnpm stage:chain
 
+      # Psiphon is the one carrier that cannot be downloaded: upstream publishes
+      # library archives and no console client, so it is compiled here from a
+      # pinned revision. CGO_ENABLED=0 in the staging script means the toolchain
+      # alone is enough and every target cross-compiles.
+      - name: Install Go for the Psiphon carrier
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          # Keyed on the pinned revision rather than a lockfile: the checkout is
+          # made by the staging script and there is no go.sum in this repo.
+          cache: false
+
+      - name: Stage the Psiphon carrier
+        run: pnpm stage:psiphon
+
+      # Downloaded and checked against the digest Tor publishes for it, so the
+      # check is against their number rather than one computed from whatever
+      # arrived. Skips itself with a warning on the two arm64 targets Tor
+      # publishes no expert bundle for; those builds ship the other carriers and
+      # the app offers only what it actually has.
+      - name: Stage the Tor carrier
+        run: pnpm stage:tor
+
       - name: Test the Tauri backend
         run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Build the desktop package
-        run: pnpm tauri build --bundles "${{ matrix.bundles }}"
+        env:
+          # Not what fixed the AppImage build -- that was libevent, installed
+          # above -- but kept on its own merits. linuxdeploy strips every ELF it
+          # assembles, and tor and lyrebird arrive already stripped from a
+          # release build checked against the digest Tor publishes for it.
+          # Modifying them afterwards invalidates precisely what that check
+          # established, for no gain.
+          #
+          # Read only by the AppImage bundler; harmless everywhere else.
+          NO_STRIP: "true"
+        # --verbose because linuxdeploy failed silently once and cost a round
+        # trip. The line that mattered was one ERROR in four hundred lines of
+        # deployment chatter, and it named the missing library exactly.
+        run: pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
 
       - name: Upload desktop packages
         uses: actions/upload-artifact@v7

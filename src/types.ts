@@ -9,6 +9,81 @@ export const ENDPOINT_MODES: Array<{ id: EndpointMode; label: string; detail: st
   { id: "custom-only", label: "Custom only", detail: "Use the pinned address or fail." },
 ];
 
+/**
+ * What gets us out of the network.
+ *
+ * Each one ends in a SOCKS5 listener on loopback that mihomo routes the
+ * interface into. The strings are a stored format — they are what the backend
+ * serialises into the saved profile.
+ */
+export type CarrierKind = "aether" | "psiphon" | "tor";
+
+export interface PsiphonSettings {
+  /**
+   * A two-letter country to exit from, or empty for whichever Psiphon
+   * considers best.
+   *
+   * A preference and not a guarantee: Psiphon treats an unreachable region as
+   * a reason to keep trying rather than to substitute, so a country with no
+   * capacity is a slow connect rather than a different exit than the one asked
+   * for.
+   */
+  egressRegion: string;
+}
+
+/**
+ * Which bridges Tor should use, if any.
+ *
+ * "built-in" is Tor's own list, shipped inside the expert bundle beside the
+ * binary — not a list of ours, which would rot between releases.
+ */
+export type BridgeMode = "none" | "built-in" | "custom";
+
+export interface TorSettings {
+  bridges: BridgeMode;
+  /** Which transport to take from the built-in list. */
+  transport: string;
+  /** Bridge lines pasted by hand, one per line. */
+  customBridges: string;
+}
+
+/** What Tor is doing, as the backend reports it. */
+export interface TorSnapshot {
+  state: "idle" | "connecting" | "connected" | "error";
+  pid: number | null;
+  socksPort: number | null;
+  /**
+   * How far bootstrapping has got, 0–100.
+   *
+   * Only 100 counts as connected: Tor binds its SOCKS port long before it has
+   * a circuit, and a listener with nothing behind it accepts connections and
+   * then sits on them.
+   */
+  bootstrap: number;
+  /** What Tor says it is doing, in its own words. */
+  bootstrapSummary: string | null;
+  lastError: string | null;
+}
+
+/** What the Psiphon carrier is doing, as the backend reports it. */
+export interface PsiphonSnapshot {
+  state: "idle" | "connecting" | "connected" | "error";
+  pid: number | null;
+  socksPort: number | null;
+  /** The country the connected server is in, as Psiphon reports it. */
+  exitRegion: string | null;
+  /**
+   * Every country Psiphon last said it had.
+   *
+   * Empty until the first successful connect, because this is Psiphon's own
+   * answer rather than a table of ours — which is honest: we do not know what
+   * it has until it tells us.
+   */
+  availableRegions: string[];
+  lastError: string | null;
+  statusMessage: string | null;
+}
+
 /** A subscription or pasted-config source feeding the chain. */
 export interface ChainSource {
   name: string;
@@ -110,6 +185,18 @@ export interface ConnectionProfile {
   systemProxy: boolean;
   /** Keep retrying after a route drops, rather than leaving it dead. */
   autoReconnect: boolean;
+  /**
+   * Which way out of the network to use.
+   *
+   * Everything else in this profile describes the Aether engine and applies
+   * only when this is "aether". A profile saved before carriers existed names
+   * none, which the backend reads as "aether".
+   */
+  carrier: CarrierKind;
+  /** How the Psiphon carrier runs. Ignored unless `carrier` selects it. */
+  psiphon: PsiphonSettings;
+  /** How the Tor carrier runs. Ignored unless `carrier` selects it. */
+  tor: TorSettings;
   /** The second hop that changes the exit address. Off unless configured. */
   chain: ChainSettings;
   /** Whether other devices on this network may use the tunnel. */
@@ -196,6 +283,9 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   gateway: false,
   systemProxy: false,
   autoReconnect: true,
+  carrier: "aether",
+  psiphon: { egressRegion: "" },
+  tor: { bridges: "none", transport: "obfs4", customBridges: "" },
   chain: { enabled: false, throughTunnel: true, sources: [], manual: "", node: null },
   lanShare: { enabled: false, port: 1080, username: "", password: "" },
   killSwitch: false,

@@ -13,9 +13,11 @@
     "stage:core": "node scripts/stage-core.mjs",
     "stage:chain": "node scripts/stage-chain.mjs",
     "update:iran-routes": "node scripts/update-iran-routes.mjs",
-    "desktop:dev": "pnpm stage:core && pnpm stage:chain && tauri dev",
-    "desktop:build": "pnpm stage:core && pnpm stage:chain && tauri build",
-    "tauri": "tauri"
+    "desktop:dev": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && tauri dev",
+    "desktop:build": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && tauri build",
+    "tauri": "tauri",
+    "stage:psiphon": "node scripts/stage-psiphon.mjs",
+    "stage:tor": "node scripts/stage-tor.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

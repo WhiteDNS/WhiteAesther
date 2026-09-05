@@ -5,13 +5,24 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { buildCoreCommand } from "@/core/command";
 import { endpointError, normalizeEndpoint } from "@/core/endpoint";
 import { REPORT_EVENT_LIMIT, buildReport, reportFilename } from "@/core/report";
-import { type LanStatus, lanShareStatus, saveReport, setLanShare } from "@/core/api";
+import {
+  type LanStatus,
+  carriersAvailable,
+  fetchBridges,
+  isDesktopRuntime,
+  lanShareStatus,
+  psiphonStatus,
+  saveReport,
+  setLanShare,
+  setPsiphonRegion,
+} from "@/core/api";
 import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
 import { Chain } from "./Chain";
 import { Scanner } from "./Scanner";
@@ -318,6 +329,325 @@ const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: Co
   { id: "gool", label: "WARP in WARP", detail: "Nested tunnel. Slower, harder to classify.", protocol: "gool" },
 ];
 
+/**
+ * The ways out of the network, and what each one costs.
+ *
+ * Tor is deliberately absent until it exists: an option that saves and does
+ * nothing is worse than one that is not offered.
+ */
+const CARRIERS: Array<{ id: ConnectionProfile["carrier"]; label: string; detail: string }> = [
+  {
+    id: "aether",
+    label: "Aether",
+    detail: "Cloudflare's network. Fast, and exits near you — it does not change your country.",
+  },
+  {
+    id: "psiphon",
+    label: "Psiphon",
+    detail: "Finds its own way out and can exit from another country. Slower to connect.",
+  },
+  {
+    id: "tor",
+    label: "Tor",
+    detail: "Three relays. The strongest against being identified, and the slowest. No UDP.",
+  },
+];
+
+/**
+ * Where Tor's bridges come from.
+ *
+ * The built-in list is Tor's own, shipped inside the expert bundle beside the
+ * binary it belongs to — so it can only go stale when the bundle does.
+ */
+const BRIDGE_MODES: Array<[ConnectionProfile["tor"]["bridges"], string]> = [
+  ["none", "Off"],
+  ["built-in", "Built-in"],
+  ["custom", "Pasted"],
+];
+
+const BRIDGE_TRANSPORTS: Array<[string, string]> = [
+  ["obfs4", "obfs4"],
+  ["snowflake", "snowflake"],
+  ["meek", "meek"],
+];
+
+/** Tor's bridges: off, Tor's own list, or lines the user was given. */
+function TorPanel({
+  profile,
+  onChange,
+}: Pick<AdvancedProps, "profile" | "onChange">) {
+  const set = (patch: Partial<ConnectionProfile["tor"]>) =>
+    onChange({ ...profile, tor: { ...profile.tor, ...patch } });
+
+  return (
+    <>
+      <Row
+        title="Bridges"
+        help="Only needed where Tor itself is blocked. Off is faster and works on an ordinary network."
+      >
+        <Seg value={profile.tor.bridges} options={BRIDGE_MODES} onChange={(bridges) => set({ bridges })} />
+      </Row>
+
+      {profile.tor.bridges === "built-in" ? (
+        <Row
+          title="Bridge transport"
+          help="Tor ships these bridges itself, so they are as current as this build. They are also public, which is what a censor blocks first."
+        >
+          <Seg
+            value={profile.tor.transport || "obfs4"}
+            options={BRIDGE_TRANSPORTS}
+            onChange={(transport) => set({ transport })}
+          />
+        </Row>
+      ) : null}
+
+      {profile.tor.bridges === "custom" ? (
+        <>
+          <RulesField
+            label="Bridge lines"
+            help="One per line, from bridges.torproject.org or someone who has one. A leading “Bridge” is fine — it is stripped."
+            value={profile.tor.customBridges}
+            onChange={(customBridges) => set({ customBridges })}
+            placeholder="obfs4 1.2.3.4:443 FINGERPRINT cert=… iat-mode=0"
+          />
+          <BridgeFetch
+            onFetched={(lines) =>
+              set({
+                // Appended rather than replacing: someone who was given a
+                // working line by a friend should not lose it to a button.
+                customBridges: [profile.tor.customBridges.trim(), lines.join("\n")]
+                  .filter(Boolean)
+                  .join("\n"),
+              })
+            }
+          />
+        </>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The one-tap fetch: ask Tor which bridges work in a country.
+ *
+ * The request goes out through whichever carrier is already up, because
+ * `bridges.torproject.org` is blocked in most of the places its answer is
+ * wanted. And it asks about the country the person is *in*, which is why there
+ * is a field rather than a guess — a desktop has no SIM to read one from, and
+ * inferring it from the current exit would ask about the one country the answer
+ * does not apply to.
+ */
+function BridgeFetch({ onFetched }: { onFetched: (lines: string[]) => void }) {
+  const t = useT();
+  const [country, setCountry] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const ask = async () => {
+    setFailure(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const lines = await fetchBridges(country);
+      onFetched(lines);
+      setNote(`${lines.length} ${lines.length === 1 ? "bridge added" : "bridges added"}`);
+    } catch (error) {
+      setFailure(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Row
+        title="Ask Tor for bridges"
+        help="The country you are connecting from, not the one you want to appear in. Sent through your current connection, because this service is itself blocked in most places it is needed."
+      >
+        <div className="flex items-center gap-2">
+          <Input
+            value={country}
+            onChange={(event) => setCountry(event.target.value.toUpperCase().slice(0, 2))}
+            placeholder="IR"
+            className="h-9 w-16 text-center font-mono text-[13px]"
+            aria-label={t("Country you are connecting from")}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || country.trim().length !== 2}
+            onClick={() => void ask()}
+          >
+            {busy ? t("Asking…") : t("Fetch")}
+          </Button>
+        </div>
+      </Row>
+      {note ? <p className="pb-1 text-[12.5px] text-muted-foreground">{note}</p> : null}
+      {failure ? <p className="pb-1 text-[12.5px] text-destructive">{failure}</p> : null}
+    </>
+  );
+}
+
+/**
+ * Choosing the way out, and where it comes out.
+ *
+ * The country list is Psiphon's own answer rather than a table of ours, so it
+ * is empty until the first successful connect — the field says "best available"
+ * until then instead of offering countries it cannot promise.
+ */
+function CarrierPanel({
+  profile,
+  onChange,
+}: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  const [regions, setRegions] = useState<string[]>([]);
+  const [moving, setMoving] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  // Everything until the backend answers. A picker that starts empty and fills
+  // in would flicker; one that starts full and removes a carrier is worse,
+  // because someone may have clicked it already.
+  const [available, setAvailable] = useState<ConnectionProfile["carrier"][] | null>(null);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let cancelled = false;
+    carriersAvailable()
+      .then((list) => {
+        if (!cancelled) setAvailable(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (profile.carrier !== "psiphon" || !isDesktopRuntime()) return;
+    let cancelled = false;
+    const read = () =>
+      psiphonStatus()
+        .then((status) => {
+          if (!cancelled) setRegions(status.availableRegions);
+        })
+        .catch(() => {});
+    read();
+    // Psiphon reports its countries after a handshake, so the list arrives some
+    // time after the screen does. Polling rather than waiting for an event
+    // because it changes at most once per session.
+    const timer = window.setInterval(read, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [profile.carrier]);
+
+  const chooseRegion = async (region: string) => {
+    set({ psiphon: { ...profile.psiphon, egressRegion: region } });
+    if (!isDesktopRuntime()) return;
+    setFailure(null);
+    setMoving(true);
+    try {
+      // Applies to a live session; a no-op when nothing is connected, in which
+      // case the choice above still stands for the next connect.
+      await setPsiphonRegion(region);
+    } catch (error) {
+      setFailure(String(error));
+    } finally {
+      setMoving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-[15px]">{t("Way out")}</CardTitle>
+        <CardDescription>
+          {t("What carries your traffic off this network. Everything below applies to Aether only.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <div className="grid grid-cols-2 gap-2.5">
+          {CARRIERS.filter((option) => !available || available.includes(option.id)).map((option) => {
+            const on = profile.carrier === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={on}
+                onClick={() => set({ carrier: option.id })}
+                className={`rounded-lg border p-3 text-left transition ${
+                  on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
+                }`}
+              >
+                <div className="text-[13.5px] font-medium">{t(option.label)}</div>
+                <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">
+                  {t(option.detail)}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {profile.carrier === "psiphon" ? (
+          <>
+            <Row title="Exit country" help="A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.">
+              <select
+                value={profile.psiphon.egressRegion}
+                disabled={moving}
+                onChange={(event) => void chooseRegion(event.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-2 text-[13px]"
+              >
+                <option value="">{t("Best available")}</option>
+                {regions.map((region) => (
+                  <option key={region} value={region}>
+                    {region}
+                  </option>
+                ))}
+              </select>
+            </Row>
+            {moving ? (
+              <p className="pb-1 text-[12.5px] text-muted-foreground">
+                {t("Moving the exit. This reconnects, so it takes as long as connecting does.")}
+              </p>
+            ) : null}
+            {failure ? <p className="pb-1 text-[12.5px] text-destructive">{failure}</p> : null}
+            {regions.length === 0 ? (
+              <p className="pb-1 text-[12.5px] text-muted-foreground">
+                {t("The country list is Psiphon's own and arrives once you have connected at least once.")}
+              </p>
+            ) : null}
+            {/* The brief's rule, made visible rather than left to be discovered:
+                the scanner, the pinned endpoint and the discovery depth all
+                describe a hunt for a Cloudflare gateway, and none of them do
+                anything here. */}
+            <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+              {t("Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.")}
+            </p>
+          </>
+        ) : null}
+
+        {profile.carrier === "tor" ? (
+          <>
+            <TorPanel profile={profile} onChange={onChange} />
+            {/* Said plainly rather than left to be met as a fault. Tor carries
+                no datagrams, so the chain refuses them rather than swallowing
+                them — which is what makes a resolver fall back to TCP within a
+                round trip instead of hanging. */}
+            <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+              {t("Tor carries no UDP, so QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.")}
+            </p>
+            <p className="pt-1 text-[12.5px] leading-snug text-muted-foreground">
+              {t("Under Tor the endpoint scanner, the pinned endpoint and the transport choice do nothing — Tor picks its own relays.")}
+            </p>
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 function Routes({ profile, onChange }: AdvancedProps) {
   const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
@@ -328,6 +658,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
 
   return (
     <>
+      <CarrierPanel profile={profile} onChange={onChange} />
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-[15px]">{t("Protocol")}</CardTitle>

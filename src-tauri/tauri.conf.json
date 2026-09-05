@@ -29,12 +29,18 @@
     "targets": "all",
     "externalBin": [
       "binaries/aether",
-      "binaries/mihomo"
+      "binaries/mihomo",
+      "binaries/psiphon-tunnel-core"
     ],
     "resources": {
       "../LICENSE": "licenses/whiteaesther-AGPL-3.0.txt",
       "../licenses/mihomo-GPL-3.0.txt": "licenses/mihomo-GPL-3.0.txt",
-      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md"
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "binaries/psiphon_server_entries.txt": "psiphon_server_entries.txt",
+      "../licenses/psiphon-tunnel-core-GPL-3.0.txt": "licenses/psiphon-tunnel-core-GPL-3.0.txt",
+      "binaries/tor/*": "tor/",
+      "../licenses/tor-BSD-3-Clause.txt": "licenses/tor-BSD-3-Clause.txt",
+      "../licenses/lyrebird-BSD-3-Clause.txt": "licenses/lyrebird-BSD-3-Clause.txt"
     },
     "icon": [
       "icons/32x32.png",

@@ -33,6 +33,21 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# TLS, for exactly one request: asking Tor's circumvention service which bridges
+# work in a given country. That request has to go out through whichever carrier
+# is up, because the service is itself blocked in most of the places its answer
+# is wanted -- so the webview's own TLS is no use, and a plain-HTTP client (what
+# the rest of this crate uses, deliberately) cannot speak to it at all.
+#
+# `ring` rather than the default `aws-lc-rs` provider: the default wants cmake
+# and nasm on Windows, which is a build-toolchain requirement for every
+# contributor in exchange for nothing we need here.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The trust roots. Deliberately not the platform store: this is a pinned set
+# that travels with the build, so a request made through a carrier cannot be
+# read by a root someone added to this machine.
+webpki-roots = "1"
+
 # System proxy control. Both are already in the tree via Tauri; naming them here
 # only adds the dependency edge.
 [target.'cfg(windows)'.dependencies]
