@@ -101,13 +101,16 @@ over documented interfaces, and none of their code is linked into WhiteAesther.
 
 - Upstream: <https://gitlab.torproject.org/tpo/core/tor> and
   <https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird>
-- The build shipped here: the **Tor Expert Bundle** `15.0.21`, downloaded unmodified by
+- The build shipped here: the **Tor Expert Bundle** `15.0.22`, downloaded unmodified by
   `scripts/stage-tor.mjs` and verified against the SHA-256 Tor publishes for it in
   `sha256sums-signed-build.txt` — so the check is against Tor's own number, not one we computed from
   bytes we happened to receive. The Windows x86-64 bundle we ship is
-  `f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490`; the digests for the other
+  `231dad6b9cb401a54c260db7046965ef04e4f72ff071b140d423fb5da281ab1e`; the digests for the other
   targets are in `BUNDLES` in that script.
-- Corresponding source: <https://dist.torproject.org/torbrowser/15.0.21/>
+- Corresponding source: <https://dist.torproject.org/torbrowser/15.0.22/> — note that Tor keeps only
+  the current release there, so an older version named in a past build of this file will 404. The
+  revision is still the record of what we shipped; `gitlab.torproject.org/tpo/core/tor` has the
+  source for every version.
 - Licence: BSD 3-Clause. The full texts are in `licenses/tor-BSD-3-Clause.txt` and
   `licenses/lyrebird-BSD-3-Clause.txt`, copied out of that same archive rather than fetched
   separately — a licence file that can drift from the build it describes is worse than none.
@@ -155,3 +158,11 @@ The Rust and JavaScript dependencies are recorded in `src-tauri/Cargo.lock` and 
 each under its own licence — predominantly MIT and Apache-2.0. Notable components include Tauri
 (MIT/Apache-2.0), React (MIT), Radix UI (MIT), Tailwind CSS (MIT), shadcn/ui (MIT) and Lucide
 (ISC).
+
+Two are named separately because they are not MIT or Apache-2.0 and are compiled into the shipped
+binary. `rustls` (Apache-2.0 OR ISC OR MIT) with its `ring` provider (Apache-2.0 AND ISC) is the TLS
+client, present for exactly one request: asking Tor's circumvention service which bridges work in a
+given country, which has to travel through whichever carrier is up. `webpki-roots`
+(CDLA-Permissive-2.0) supplies the trust anchors for that request — Mozilla's CA set, pinned in the
+build rather than read from the machine, so a root added to this computer cannot read a request made
+through a carrier.

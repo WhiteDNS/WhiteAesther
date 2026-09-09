@@ -240,6 +240,20 @@ impl Psiphon {
         lock(&self.inner.notices).iter().cloned().collect()
     }
 
+    /// Whether the child is still running.
+    ///
+    /// Asked of the process rather than of the snapshot: the notice reader
+    /// simply ends when the pipe closes, so a process that died leaves the last
+    /// state it reported sitting there looking healthy. Nothing else would ever
+    /// notice, and the screen would say connected over a listener that is gone.
+    pub fn is_alive(&self) -> bool {
+        let mut guard = lock(&self.inner.child);
+        match guard.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
+            None => false,
+        }
+    }
+
     /// Starts Psiphon and waits for a tunnel.
     ///
     /// Blocking, and returns only once there is something to route into or a
@@ -640,6 +654,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Whether this build ships the Psiphon carrier and the list it bootstraps from.
+///
+/// Both are required: the binary without the server list spends two minutes
+/// dialling nothing and then reports that it could not connect.
+pub fn is_available(app: &AppHandle) -> bool {
+    locate(app).is_ok() && locate_server_list(app).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,26 +799,3 @@ mod tests {
     }
 }
 
-/// Whether this build ships the Psiphon carrier and the list it bootstraps from.
-///
-/// Both are required: the binary without the server list spends two minutes
-/// dialling nothing and then reports that it could not connect.
-pub fn is_available(app: &AppHandle) -> bool {
-    locate(app).is_ok() && locate_server_list(app).is_ok()
-}
-
-impl Psiphon {
-    /// Whether the child is still running.
-    ///
-    /// Asked of the process rather than of the snapshot: the notice reader
-    /// simply ends when the pipe closes, so a process that died leaves the last
-    /// state it reported sitting there looking healthy. Nothing else would ever
-    /// notice, and the screen would say connected over a listener that is gone.
-    pub fn is_alive(&self) -> bool {
-        let mut guard = lock(&self.inner.child);
-        match guard.as_mut() {
-            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
-            None => false,
-        }
-    }
-}

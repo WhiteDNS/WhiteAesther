@@ -227,6 +227,16 @@ impl Tor {
         lock(&self.inner.lines).iter().cloned().collect()
     }
 
+    /// Whether the child is still running. See the note on the Psiphon one:
+    /// a dead process leaves a healthy-looking snapshot behind it.
+    pub fn is_alive(&self) -> bool {
+        let mut guard = lock(&self.inner.child);
+        match guard.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
+            None => false,
+        }
+    }
+
     /// Starts tor and waits for a circuit.
     pub fn start(&self, app: &AppHandle, settings: &TorSettings) -> Result<SocketAddr, String> {
         settings.validate()?;
@@ -544,9 +554,22 @@ fn render_torrc(
         // do the managed-proxy handshake by hand because Guardian Project's JNI
         // build aborts on `exec`; nothing here has that problem, and porting
         // that machinery would be work for a bug we do not have.
+        //
+        // The path is NOT quoted here, unlike every other path in this file.
+        // tor strips quotes from its own options but passes the `exec` argument
+        // through to CreateProcess as written, so a quoted path becomes a file
+        // name with quotation marks in it:
+        //
+        //     Managed proxy ""…/lyrebird.exe"" having PID 0 terminated
+        //     CreateProcessA() failed: The system cannot find the file specified
+        //
+        // and then every bridge fails with "there is no configured transport
+        // called obfs4". Measured, both ways: unquoted works, and it works even
+        // when the path contains a space -- which the installed path does,
+        // under `C:\Program Files`.
         config.push_str(&format!(
             "ClientTransportPlugin meek_lite,obfs4,webtunnel,snowflake exec {}\n",
-            quote(&lyrebird)
+            lyrebird.to_string_lossy()
         ));
         config.push_str("UseBridges 1\n");
         for line in bridge_lines(settings, support)? {
@@ -738,6 +761,19 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Whether this build actually ships the Tor carrier.
+///
+/// Tor publishes no expert bundle for `windows-aarch64` or `linux-aarch64`, so
+/// a build for those targets has everything except this. The screen reads this
+/// rather than offering a carrier that cannot start -- a control that saves and
+/// does nothing is worse than one that is absent.
+pub fn is_available(app: &AppHandle) -> bool {
+    let Ok(support) = support_dir(app) else {
+        return false;
+    };
+    locate(app, TOR_FILENAME, &[support.join(TOR_FILENAME)]).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +876,55 @@ mod tests {
     }
 
     #[test]
+    fn the_transport_binary_is_the_one_path_that_must_not_be_quoted() {
+        // tor strips quotes from its own options but hands the `exec` argument
+        // to CreateProcess as written, so a quoted path becomes a file name
+        // with quotation marks in it. It fails with "CreateProcessA() failed:
+        // The system cannot find the file specified", and then every bridge
+        // reports "there is no configured transport called obfs4" -- which
+        // points at the bridge list rather than at the one line that is wrong.
+        //
+        // Measured both ways. Unquoted also survives a space in the path, which
+        // matters because the installed path is under `C:\Program Files`.
+        let support = std::env::temp_dir().join("whiteaesther-pt-quote-test");
+        std::fs::create_dir_all(&support).unwrap();
+        let lyrebird = support.join(LYREBIRD_FILENAME);
+        std::fs::write(&lyrebird, b"not a real binary").unwrap();
+        std::fs::write(
+            support.join("pt_config.json"),
+            r#"{"bridges":{"obfs4":["obfs4 1.2.3.4:443 A cert=x"]}}"#,
+        )
+        .unwrap();
+
+        let config = render_torrc(
+            &TorSettings {
+                bridges: BridgeMode::BuiltIn,
+                transport: "obfs4".into(),
+                custom_bridges: String::new(),
+            },
+            Path::new("/tmp/tor"),
+            &support,
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+        )
+        .unwrap();
+
+        let plugin = config
+            .lines()
+            .find(|line| line.starts_with("ClientTransportPlugin"))
+            .expect("a transport plugin line");
+        assert!(!plugin.contains('"'), "the exec path must not be quoted: {plugin}");
+        assert!(plugin.contains(&lyrebird.to_string_lossy().to_string()), "{plugin}");
+
+        // And the paths that are tor's own options still are quoted, or a
+        // Windows path breaks them instead.
+        assert!(config.contains("DataDirectory \""), "{config}");
+        assert!(config.contains("CookieAuthFile \""), "{config}");
+
+        let _ = std::fs::remove_dir_all(&support);
+    }
+
+    #[test]
     fn no_bridges_means_no_transport_plugin_line() {
         // A ClientTransportPlugin naming a binary we did not ship would stop
         // tor from starting at all, so it appears only when bridges do.
@@ -863,27 +948,3 @@ mod tests {
     }
 }
 
-/// Whether this build actually ships the Tor carrier.
-///
-/// Tor publishes no expert bundle for `windows-aarch64` or `linux-aarch64`, so
-/// a build for those targets has everything except this. The screen reads this
-/// rather than offering a carrier that cannot start -- a control that saves and
-/// does nothing is worse than one that is absent.
-pub fn is_available(app: &AppHandle) -> bool {
-    let Ok(support) = support_dir(app) else {
-        return false;
-    };
-    locate(app, TOR_FILENAME, &[support.join(TOR_FILENAME)]).is_ok()
-}
-
-impl Tor {
-    /// Whether the child is still running. See the note on the Psiphon one:
-    /// a dead process leaves a healthy-looking snapshot behind it.
-    pub fn is_alive(&self) -> bool {
-        let mut guard = lock(&self.inner.child);
-        match guard.as_mut() {
-            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
-            None => false,
-        }
-    }
-}
