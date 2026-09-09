@@ -155,3 +155,11 @@ The Rust and JavaScript dependencies are recorded in `src-tauri/Cargo.lock` and 
 each under its own licence — predominantly MIT and Apache-2.0. Notable components include Tauri
 (MIT/Apache-2.0), React (MIT), Radix UI (MIT), Tailwind CSS (MIT), shadcn/ui (MIT) and Lucide
 (ISC).
+
+Two are named separately because they are not MIT or Apache-2.0 and are compiled into the shipped
+binary. `rustls` (Apache-2.0 OR ISC OR MIT) with its `ring` provider (Apache-2.0 AND ISC) is the TLS
+client, present for exactly one request: asking Tor's circumvention service which bridges work in a
+given country, which has to travel through whichever carrier is up. `webpki-roots`
+(CDLA-Permissive-2.0) supplies the trust anchors for that request — Mozilla's CA set, pinned in the
+build rather than read from the machine, so a root added to this computer cannot read a request made
+through a carrier.
