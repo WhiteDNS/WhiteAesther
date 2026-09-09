@@ -34,8 +34,17 @@ const option = (name) => {
   return index === -1 ? undefined : process.argv[index + 1];
 };
 
-/** Pinned so a build is reproducible. Bump deliberately, digests and all. */
-const VERSION = "15.0.21";
+/**
+ * Pinned so a build is reproducible. Bump deliberately, digests and all.
+ *
+ * This one expires, unlike the others. `dist.torproject.org/torbrowser/` keeps
+ * only the current release -- 15.0.21 was pinned here and staging began failing
+ * with a plain 404 the day 15.0.22 replaced it. A pin protects against the
+ * asset changing under us; it cannot keep the asset alive. Expect to bump this
+ * on roughly Tor Browser's release cadence, and note that a green build says
+ * nothing about tomorrow.
+ */
+const VERSION = "15.0.22";
 
 /**
  * Rust target triple to the bundle that serves it, with the SHA-256 Tor
@@ -58,19 +67,19 @@ const VERSION = "15.0.21";
 const BUNDLES = {
   "x86_64-pc-windows-msvc": {
     asset: `tor-expert-bundle-windows-x86_64-${VERSION}.tar.gz`,
-    sha256: "f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490",
+    sha256: "231dad6b9cb401a54c260db7046965ef04e4f72ff071b140d423fb5da281ab1e",
   },
   "x86_64-apple-darwin": {
     asset: `tor-expert-bundle-macos-x86_64-${VERSION}.tar.gz`,
-    sha256: "7e21f5dab4c627e2ff8e894b2039fa49bdd78d12b025f96893d4d6238c6577e4",
+    sha256: "be1be1cb13cd093713f02a0beade0d2471b61119011bfeb0efc08353eadf2e4e",
   },
   "aarch64-apple-darwin": {
     asset: `tor-expert-bundle-macos-aarch64-${VERSION}.tar.gz`,
-    sha256: "83dec16412c1d97b91af603229481dd29f578e1485620ecffd9ac4aabcf6fb46",
+    sha256: "e8ea3f667c83309abad34280f0f9e1cfae52843da6b8db111ca15d6221051db5",
   },
   "x86_64-unknown-linux-gnu": {
     asset: `tor-expert-bundle-linux-x86_64-${VERSION}.tar.gz`,
-    sha256: "40ef58c536d7077543a25707be5ba467f4b6bcdbafdc015daa25bcf9cb1edc11",
+    sha256: "08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985",
   },
 };
 

@@ -101,13 +101,16 @@ over documented interfaces, and none of their code is linked into WhiteAesther.
 
 - Upstream: <https://gitlab.torproject.org/tpo/core/tor> and
   <https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird>
-- The build shipped here: the **Tor Expert Bundle** `15.0.21`, downloaded unmodified by
+- The build shipped here: the **Tor Expert Bundle** `15.0.22`, downloaded unmodified by
   `scripts/stage-tor.mjs` and verified against the SHA-256 Tor publishes for it in
   `sha256sums-signed-build.txt` — so the check is against Tor's own number, not one we computed from
   bytes we happened to receive. The Windows x86-64 bundle we ship is
-  `f22b8b17cb18c9fa775dfcf68acf6a2fe788336535fe94645204ca85158aa490`; the digests for the other
+  `231dad6b9cb401a54c260db7046965ef04e4f72ff071b140d423fb5da281ab1e`; the digests for the other
   targets are in `BUNDLES` in that script.
-- Corresponding source: <https://dist.torproject.org/torbrowser/15.0.21/>
+- Corresponding source: <https://dist.torproject.org/torbrowser/15.0.22/> — note that Tor keeps only
+  the current release there, so an older version named in a past build of this file will 404. The
+  revision is still the record of what we shipped; `gitlab.torproject.org/tpo/core/tor` has the
+  source for every version.
 - Licence: BSD 3-Clause. The full texts are in `licenses/tor-BSD-3-Clause.txt` and
   `licenses/lyrebird-BSD-3-Clause.txt`, copied out of that same archive rather than fetched
   separately — a licence file that can drift from the build it describes is worse than none.
