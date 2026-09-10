@@ -91,9 +91,25 @@ export interface AdvancedProps {
   jumpTo?: { section: SectionId; at: number } | null;
 }
 
+/**
+ * The sections that only describe the Aether engine.
+ *
+ * "Endpoint" is pinning a Cloudflare gateway, which Psiphon and Tor neither
+ * read nor have. Hidden rather than shown-and-inert, for the same reason the
+ * transport cards are.
+ */
+const AETHER_ONLY_SECTIONS: SectionId[] = ["endpoint"];
+
 export function Advanced(props: AdvancedProps) {
   const t = useT();
   const [section, setSection] = useState<SectionId>("status");
+  const aetherOnly = props.profile.carrier === "aether";
+
+  // Someone who was reading Endpoint and then switched carrier would otherwise
+  // be left looking at a section that is no longer in the list.
+  useEffect(() => {
+    if (!aetherOnly && AETHER_ONLY_SECTIONS.includes(section)) setSection("routes");
+  }, [aetherOnly, section]);
 
   const { jumpTo } = props;
   useEffect(() => {
@@ -109,7 +125,9 @@ export function Advanced(props: AdvancedProps) {
             <span className="px-2.5 pb-1 pt-3.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
               {t(group.group)}
             </span>
-            {group.items.map(({ id, label, icon: Icon }) => (
+            {group.items
+              .filter(({ id }) => aetherOnly || !AETHER_ONLY_SECTIONS.includes(id))
+              .map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
                 type="button"
@@ -656,10 +674,31 @@ function Routes({ profile, onChange }: AdvancedProps) {
   const isMasque = profile.protocol === "masque";
   const isH2 = isMasque && profile.masqueTransport === "h2";
 
+  // Everything below the carrier picker describes the Aether engine: which
+  // transport it rides, how hard it searches for a Cloudflare gateway, how it
+  // obfuscates. Under Psiphon or Tor none of it is read.
+  //
+  // 1.8.0 left these live and merely added a sentence saying they did nothing,
+  // and the first question asked of that screen was "which of these protocols
+  // work with Psiphon?" — with MASQUE H2 still highlighted as though it were
+  // the answer. A control that saves and does nothing is worse than one that is
+  // absent, so they are absent.
+  const aetherOnly = profile.carrier === "aether";
+
   return (
     <>
       <CarrierPanel profile={profile} onChange={onChange} />
-      <Card>
+      {!aetherOnly ? (
+        <Card>
+          <CardContent className="py-4">
+            <p className="text-[13px] leading-snug text-muted-foreground">
+              {t("The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.")}
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
+      {aetherOnly ? (
+      <><Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-[15px]">{t("Protocol")}</CardTitle>
           <CardDescription>{t("Retries alternate the two MASQUE transports automatically.")}</CardDescription>
@@ -832,7 +871,8 @@ function Routes({ profile, onChange }: AdvancedProps) {
             />
           </div>
         </CardContent>
-      </Card>
+      </Card></>
+      ) : null}
     </>
   );
 }

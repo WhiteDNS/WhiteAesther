@@ -312,6 +312,8 @@ const FA: Record<string, string> = {
     "در حال جابه‌جایی خروج. این کار دوباره وصل می‌شود، پس به اندازهٔ یک اتصال طول می‌کشد.",
   "The country list is Psiphon's own and arrives once you have connected at least once.":
     "فهرست کشورها را خود سایفون می‌دهد و پس از نخستین اتصال می‌رسد.",
+  "The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.":
+    "تنظیمات ترابرد، جستجو و ضدمسدودسازی به موتور Aether مربوط‌اند. برای دیدنشان بالا Aether را انتخاب کنید.",
   "Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.":
     "زیر سایفون، پویشگر نقطهٔ پایانی، نقطهٔ پایانی ثابت‌شده و انتخاب ترابرد هیچ کاری نمی‌کنند — سایفون مسیر خودش را پیدا می‌کند.",
 

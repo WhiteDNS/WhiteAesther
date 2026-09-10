@@ -1899,18 +1899,42 @@ mod tests {
 
     #[test]
     fn a_carrier_that_carries_datagrams_refuses_none_of_them() {
-        for kind in [CarrierKind::Aether, CarrierKind::Psiphon] {
-            let config = render(&RenderPlan {
-                carrier: carrier_of(kind),
-                manual: "vless://x",
-                ..Default::default()
-            });
-            assert!(config.contains("udp: true"), "{kind:?}: {config}");
-            assert!(
-                !config.contains("NETWORK,udp,REJECT"),
-                "{kind:?} carries datagrams and must not refuse them: {config}"
-            );
-        }
+        // Aether is the only one. This test used to include Psiphon, on the
+        // strength of a guess that its SOCKS5 relayed datagrams; asking it
+        // directly returned 0x07 COMMAND NOT SUPPORTED. The guess shipped in
+        // 1.8.0 and made QUIC hang under Psiphon instead of falling back.
+        let config = render(&RenderPlan {
+            carrier: carrier_of(CarrierKind::Aether),
+            manual: "vless://x",
+            ..Default::default()
+        });
+        assert!(config.contains("udp: true"), "{config}");
+        assert!(
+            !config.contains("NETWORK,udp,REJECT"),
+            "Aether carries datagrams and must not refuse them: {config}"
+        );
+    }
+
+    #[test]
+    fn psiphon_refuses_datagrams_exactly_as_tor_does() {
+        // Measured, not inferred: Psiphon's SOCKS5 answers UDP ASSOCIATE with
+        // 0x07. Both halves have to follow from that -- the declaration and the
+        // rule -- or the failure is a hang rather than a refusal.
+        let config = render(&RenderPlan {
+            carrier: carrier_of(CarrierKind::Psiphon),
+            manual: "vless://x",
+            ..Default::default()
+        });
+        assert!(config.contains("udp: false"), "{config}");
+        assert!(config.contains("  - NETWORK,udp,REJECT\n"), "{config}");
+
+        // And in the right place: after everything sent DIRECT, before the
+        // catch-all, so the local network keeps its datagrams.
+        let rules = config.split("rules:\n").nth(1).expect("a rules section");
+        let private = rules.find("192.168.0.0/16").expect("the private rule");
+        let reject = rules.find("NETWORK,udp,REJECT").expect("the refusal");
+        let catch_all = rules.find("MATCH,").expect("the catch-all");
+        assert!(private < reject && reject < catch_all, "{config}");
     }
 
     #[test]
