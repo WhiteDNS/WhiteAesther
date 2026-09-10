@@ -12,7 +12,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use crate::carrier::{Carrier, CarrierKind};
+use crate::carrier::{Carrier, CarrierChain, CarrierKind, RunningChain};
 use crate::chain::{Chain, ChainRequest, ChainSettings};
 use crate::http_bridge::{self, HttpBridge};
 use crate::lan_share::{LanDoor, LanSettings, LanStatus};
@@ -36,13 +36,15 @@ const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(default, rename_all = "camelCase")]
 pub struct CoreProfile {
     pub name: String,
-    /// Which way out of the network to use.
+    /// Which way out of the network to use, and in what order.
     ///
     /// Everything below it describes the Aether engine and applies only when
-    /// this is `Aether`. A profile saved before carriers existed names none,
-    /// which reads as `Aether` -- see [`CarrierKind`].
+    /// the chain ends there. A profile saved before carriers existed names
+    /// none, which reads as Aether alone; one saved by 1.8.x carries a bare
+    /// `carrier` string, which [`migrate_carrier_chain`] turns into a
+    /// single-hop chain. See [`CarrierChain`].
     #[serde(default)]
-    pub carrier: CarrierKind,
+    pub carriers: CarrierChain,
     pub protocol: String,
     pub masque_transport: String,
     pub scan_mode: String,
@@ -162,7 +164,7 @@ impl Default for CoreProfile {
     fn default() -> Self {
         Self {
             name: "Adaptive · Iran".into(),
-            carrier: CarrierKind::Aether,
+            carriers: CarrierChain::default(),
             protocol: "masque".into(),
             masque_transport: "h2".into(),
             scan_mode: "balanced".into(),
@@ -736,7 +738,7 @@ fn start_core_blocking(
     // is no gateway to hunt, no transport to alternate, and nothing to read out
     // of log prose. The session above is still claimed first, so a stop and a
     // second connect behave the same way whichever carrier is running.
-    if profile.carrier != CarrierKind::Aether {
+    if !profile.carriers.is_lone_aether() {
         return match start_carrier_blocking(app, inner, &profile, generation) {
             Ok(snapshot) => Ok(snapshot),
             Err(error) => {
@@ -781,8 +783,8 @@ fn start_carrier_blocking(
         let mut snapshot = lock(&inner.snapshot);
         *snapshot = CoreSnapshot {
             state: "connecting".into(),
-            transport: Some(profile.carrier.proxy_name().into()),
-            status_message: Some(format!("Starting {}", profile.carrier.label())),
+            transport: Some(profile.carriers.last().proxy_name().into()),
+            status_message: Some(format!("Starting {}", profile.carriers.label())),
             started_at: Some(now_millis()),
             ..CoreSnapshot::default()
         };
@@ -791,13 +793,13 @@ fn start_carrier_blocking(
     supervisor_log(
         inner,
         "info",
-        format!("carrier {} is starting", profile.carrier.label()),
+        format!("carrier {} is starting", profile.carriers.label()),
     );
 
     // Each carrier brings itself up its own way and they share nothing but the
     // shape of the answer: a listener, and something to say about where traffic
     // is leaving from.
-    let (listener, leaving_from) = match profile.carrier {
+    let (listener, leaving_from) = match profile.carriers.last() {
         CarrierKind::Psiphon => {
             let psiphon = app.state::<crate::psiphon::Psiphon>();
             let listener = psiphon.start(app, &profile.psiphon)?;
@@ -847,7 +849,7 @@ fn start_carrier_blocking(
     let chain_listener = match chain.start(
         app,
         &ChainRequest {
-            carrier: Some(carrier),
+            carriers: Some(RunningChain::single(carrier)),
             settings: &profile.chain,
             bypass_iran_sites: profile.bypass_iran_sites,
             tun,
@@ -864,7 +866,7 @@ fn start_carrier_blocking(
             // report connected with nothing carrying anything.
             return Err(format!(
                 "{} is up but the routing engine did not start: {error}",
-                profile.carrier.label()
+                profile.carriers.label()
             ));
         }
     };
@@ -1303,7 +1305,7 @@ pub async fn set_full_tunnel(
     let address = chain.start(
         &app,
         &ChainRequest {
-            carrier: Some(carrier),
+            carriers: Some(RunningChain::single(carrier)),
             settings: &chain_settings,
             bypass_iran_sites,
             tun: enabled,
@@ -1376,7 +1378,7 @@ pub async fn set_chain(
         let address = chain.start(
             &app,
             &ChainRequest {
-                carrier,
+                carriers: carrier.map(RunningChain::single),
                 settings: &settings,
                 bypass_iran_sites,
                 tun,
@@ -1478,8 +1480,14 @@ fn set_psiphon_region_blocking(
     let Some(profile) = profile else {
         return Ok(lock(&inner.snapshot).clone());
     };
-    if profile.carrier == CarrierKind::Aether {
-        return Err("the exit country is a Psiphon setting; this connection is using Aether".into());
+    // Named after what is actually running rather than assuming Aether: a
+    // Tor-only connection reaches this too, and being told it is "using Aether"
+    // would send someone looking for a setting that is not the problem.
+    if !profile.carriers.contains(CarrierKind::Psiphon) {
+        return Err(format!(
+            "the exit country is a Psiphon setting, and this connection is using {}",
+            profile.carriers.label()
+        ));
     }
 
     let generation = inner.generation.load(Ordering::SeqCst);
@@ -1555,6 +1563,7 @@ fn load_profile_blocking(app: AppHandle) -> Result<CoreProfile, String> {
     let mut stored: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("profile is invalid: {error}"))?;
     migrate_endpoint_mode(&mut stored);
+    migrate_carrier_chain(&mut stored);
     migrate_keepalive(&mut stored);
     let profile: CoreProfile =
         serde_json::from_value(stored).map_err(|error| format!("profile is invalid: {error}"))?;
@@ -1580,6 +1589,32 @@ fn migrate_keepalive(stored: &mut serde_json::Value) {
     if object.get("keepaliveSecs").and_then(serde_json::Value::as_u64) == Some(OLD_DEFAULT) {
         object.insert("keepaliveSecs".into(), serde_json::json!(25));
     }
+}
+
+/// Turns the single `carrier` that 1.8.x saved into a one-hop chain.
+///
+/// The field went from a bare string to an ordered pair, and a profile written
+/// by 1.8.0 or 1.8.1 carries `"carrier": "psiphon"`. Left alone it would be
+/// ignored and the chain would default to Aether -- moving someone off the
+/// carrier they chose, silently, at the next launch.
+///
+/// Only fills in what is absent: a profile that already has `carriers` is left
+/// exactly as it is, so this runs harmlessly forever rather than needing to
+/// know whether it has run before.
+fn migrate_carrier_chain(stored: &mut serde_json::Value) {
+    let Some(object) = stored.as_object_mut() else {
+        return;
+    };
+    if object.contains_key("carriers") {
+        return;
+    }
+    let Some(kind) = object.get("carrier").cloned() else {
+        return;
+    };
+    object.insert(
+        "carriers".into(),
+        serde_json::json!({ "first": kind, "second": serde_json::Value::Null }),
+    );
 }
 
 /// Keeps a profile saved before endpoint modes existed behaving as it did.
@@ -2306,7 +2341,7 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
             match chain.start(
                 app,
                 &ChainRequest {
-                    carrier,
+                    carriers: carrier.map(RunningChain::single),
                     settings: &chain_settings,
                     bypass_iran_sites,
                     tun: full_tunnel,
@@ -2430,7 +2465,7 @@ fn spawn_carrier_watch(app: &AppHandle, inner: &Arc<SupervisorInner>, generation
         let kind = {
             let session = lock(&inner.session);
             match session.as_ref() {
-                Some(session) => session.profile.carrier,
+                Some(session) => session.profile.carriers.last(),
                 None => return,
             }
         };
@@ -2531,7 +2566,7 @@ fn current_carrier(app: &AppHandle, inner: &SupervisorInner) -> Option<Carrier> 
     // nothing declares, which fails every node with no clue why.
     let kind = lock(&inner.session)
         .as_ref()
-        .map_or(CarrierKind::Aether, |session| session.profile.carrier);
+        .map_or(CarrierKind::Aether, |session| session.profile.carriers.last());
     match kind {
         CarrierKind::Psiphon => return app.state::<crate::psiphon::Psiphon>().carrier(),
         CarrierKind::Tor => return app.state::<crate::tor::Tor>().carrier(),
@@ -3722,12 +3757,37 @@ mod tests {
 
     #[test]
     fn a_profile_saved_before_carriers_reads_as_aether() {
-        // Every profile on disk predates the field. Reading a missing carrier
-        // as anything else would move existing users onto a way out of the
-        // network they never chose, silently, at the next launch.
+        // Reading a missing carrier as anything else would move existing users
+        // onto a way out of the network they never chose, silently, at the next
+        // launch.
         let stored = serde_json::json!({ "name": "Adaptive · Iran" });
         let profile: CoreProfile = serde_json::from_value(stored).unwrap();
-        assert_eq!(profile.carrier, CarrierKind::Aether);
+        assert!(profile.carriers.is_lone_aether());
+    }
+
+    #[test]
+    fn a_profile_saved_by_1_8_keeps_the_carrier_it_chose() {
+        // 1.8.0 and 1.8.1 saved a bare string. The field is an ordered pair
+        // now, and left alone the old key would be ignored -- moving someone
+        // off Psiphon and back to Aether without saying so.
+        let mut stored = serde_json::json!({ "name": "x", "carrier": "psiphon" });
+        migrate_carrier_chain(&mut stored);
+        let profile: CoreProfile = serde_json::from_value(stored).unwrap();
+        assert_eq!(profile.carriers.first, CarrierKind::Psiphon);
+        assert_eq!(profile.carriers.second, None);
+        assert!(!profile.carriers.is_chained());
+
+        // A profile that already carries a chain is left exactly as it is, so
+        // the migration is safe to run on every load rather than needing to
+        // know whether it has run before.
+        let mut chained = serde_json::json!({
+            "carrier": "aether",
+            "carriers": { "first": "aether", "second": "tor" },
+        });
+        migrate_carrier_chain(&mut chained);
+        let profile: CoreProfile = serde_json::from_value(chained).unwrap();
+        assert_eq!(profile.carriers.second, Some(CarrierKind::Tor));
+        assert_eq!(profile.carriers.label(), "Aether → Tor");
     }
 
     #[test]

@@ -32,7 +32,8 @@ import { transportName } from "./Simple";
 // that. The same text is installed beside the executable under licences/.
 import notices from "../../THIRD_PARTY_NOTICES.md?raw";
 import {
-  ENDPOINT_MODES, type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
+  ENDPOINT_MODES, carrierChainHas, isLoneAether, type CarrierKind,
+  type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
 } from "@/types";
 
 type SectionId =
@@ -103,7 +104,7 @@ const AETHER_ONLY_SECTIONS: SectionId[] = ["endpoint"];
 export function Advanced(props: AdvancedProps) {
   const t = useT();
   const [section, setSection] = useState<SectionId>("status");
-  const aetherOnly = props.profile.carrier === "aether";
+  const aetherOnly = isLoneAether(props.profile.carriers);
 
   // Someone who was reading Endpoint and then switched carrier would otherwise
   // be left looking at a section that is no longer in the list.
@@ -353,7 +354,7 @@ const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: Co
  * Tor is deliberately absent until it exists: an option that saves and does
  * nothing is worse than one that is not offered.
  */
-const CARRIERS: Array<{ id: ConnectionProfile["carrier"]; label: string; detail: string }> = [
+const CARRIERS: Array<{ id: CarrierKind; label: string; detail: string }> = [
   {
     id: "aether",
     label: "Aether",
@@ -526,7 +527,7 @@ function CarrierPanel({
   // Everything until the backend answers. A picker that starts empty and fills
   // in would flicker; one that starts full and removes a carrier is worse,
   // because someone may have clicked it already.
-  const [available, setAvailable] = useState<ConnectionProfile["carrier"][] | null>(null);
+  const [available, setAvailable] = useState<CarrierKind[] | null>(null);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -542,7 +543,7 @@ function CarrierPanel({
   }, []);
 
   useEffect(() => {
-    if (profile.carrier !== "psiphon" || !isDesktopRuntime()) return;
+    if (!carrierChainHas(profile.carriers, "psiphon") || !isDesktopRuntime()) return;
     let cancelled = false;
     const read = () =>
       psiphonStatus()
@@ -559,7 +560,7 @@ function CarrierPanel({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [profile.carrier]);
+  }, [profile.carriers.first, profile.carriers.second]);
 
   const chooseRegion = async (region: string) => {
     set({ psiphon: { ...profile.psiphon, egressRegion: region } });
@@ -588,13 +589,13 @@ function CarrierPanel({
       <CardContent className="pt-0">
         <div className="grid grid-cols-2 gap-2.5">
           {CARRIERS.filter((option) => !available || available.includes(option.id)).map((option) => {
-            const on = profile.carrier === option.id;
+            const on = profile.carriers.first === option.id;
             return (
               <button
                 key={option.id}
                 type="button"
                 aria-pressed={on}
-                onClick={() => set({ carrier: option.id })}
+                onClick={() => set({ carriers: { first: option.id, second: null } })}
                 className={`rounded-lg border p-3 text-left transition ${
                   on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
                 }`}
@@ -608,7 +609,7 @@ function CarrierPanel({
           })}
         </div>
 
-        {profile.carrier === "psiphon" ? (
+        {carrierChainHas(profile.carriers, "psiphon") ? (
           <>
             <Row title="Exit country" help="A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.">
               <select
@@ -646,7 +647,7 @@ function CarrierPanel({
           </>
         ) : null}
 
-        {profile.carrier === "tor" ? (
+        {carrierChainHas(profile.carriers, "tor") ? (
           <>
             <TorPanel profile={profile} onChange={onChange} />
             {/* Said plainly rather than left to be met as a fault. Tor carries
@@ -683,7 +684,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
   // work with Psiphon?" — with MASQUE H2 still highlighted as though it were
   // the answer. A control that saves and does nothing is worse than one that is
   // absent, so they are absent.
-  const aetherOnly = profile.carrier === "aether";
+  const aetherOnly = isLoneAether(profile.carriers);
 
   return (
     <>

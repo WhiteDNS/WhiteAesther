@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::carrier::{Carrier, CarrierKind};
+use crate::carrier::{CarrierKind, RunningChain};
 use crate::core_supervisor::CoreSupervisor;
 
 /// The group every rule points at. Selecting a node means selecting into this.
@@ -112,11 +112,16 @@ impl Default for ChainSettings {
 pub struct ChainRequest<'a> {
     /// Whatever is getting us out of the network right now, when something is.
     ///
-    /// Was the Aether listener as a bare address. It carries the listener still,
-    /// and with it the three things about the carrier that change what gets
-    /// rendered -- the proxy name, the process to exempt from the TUN device,
-    /// and whether datagrams survive the trip. See [`crate::carrier`].
-    pub carrier: Option<Carrier>,
+    /// Was the Aether listener as a bare address, then one `Carrier`, and now a
+    /// chain of one or two hops.
+    ///
+    /// Deliberately the whole chain rather than the hop mihomo dials, because
+    /// three of the four answers needed here are **not** the last hop's: every
+    /// process is exempted from the TUN device, datagram support is the AND
+    /// across hops, and the address exemption belongs to the first. Reading
+    /// them off one carrier is how a chain silently becomes a single hop in the
+    /// rendered config. See [`crate::carrier::RunningChain`].
+    pub carriers: Option<RunningChain>,
     pub settings: &'a ChainSettings,
     /// Let Iranian sites go straight out. See [`crate::iran_routes`].
     pub bypass_iran_sites: bool,
@@ -141,12 +146,17 @@ impl ChainRequest<'_> {
     /// the whole arrangement is that mihomo owns the interface and routes it
     /// into whichever carrier is up, so refusing to start without an exit chain
     /// would leave Psiphon or Tor connected and carrying nothing.
+    /// The last hop decides this, not the chain's length. A chain ending at
+    /// Aether hands out a listener applications can use directly, exactly as a
+    /// lone Aether does -- so it needs no more help from mihomo than that case
+    /// does, whatever is carrying it underneath.
     fn has_something_to_do(&self) -> bool {
         self.wants_exit_chain()
             || self.tun
             || self
-                .carrier
-                .is_some_and(|carrier| carrier.kind != CarrierKind::Aether)
+                .carriers
+                .as_ref()
+                .is_some_and(|chain| chain.last().kind != CarrierKind::Aether)
     }
 }
 
@@ -221,7 +231,7 @@ impl Chain {
         self.stop();
 
         let settings = request.settings;
-        let carrier = request.carrier;
+        let carriers = request.carriers.as_ref();
         let usable: Vec<&ChainSource> = settings
             .sources
             .iter()
@@ -231,7 +241,7 @@ impl Chain {
             if usable.is_empty() && settings.manual.trim().is_empty() {
                 return Err("add a subscription or a config before turning the chain on".into());
             }
-            if settings.through_tunnel && carrier.is_none() {
+            if settings.through_tunnel && carriers.is_none() {
                 return Err("connect first, or turn off \"dial nodes through the tunnel\"".into());
             }
         } else if !request.has_something_to_do() {
@@ -242,7 +252,7 @@ impl Chain {
         // Full tunnel forwards everything to the carrier's listener, so without
         // one it would capture the machine's traffic and have nowhere to send
         // it -- which is worse than not capturing it.
-        if request.tun && carrier.is_none() {
+        if request.tun && carriers.is_none() {
             return Err("connect first: full tunnel has nothing to forward to".into());
         }
 
@@ -267,7 +277,7 @@ impl Chain {
         // moved it, and anything configured against the last run quietly went
         // out past the hop with the old exit address.
         let mixed = preferred_port(
-            carrier.map_or(DEFAULT_MIXED_PORT, |carrier| next_port(carrier.socks)),
+            carriers.map_or(DEFAULT_MIXED_PORT, |chain| next_port(chain.listener())),
         )?;
         // The API stays ephemeral: only this process ever speaks to it.
         let api = free_port()?;
@@ -291,7 +301,7 @@ impl Chain {
         }
 
         let config = render(&RenderPlan {
-            carrier,
+            carriers: carriers.cloned(),
             mixed,
             api,
             secret: &secret,
@@ -381,7 +391,7 @@ impl Chain {
             api: api_address,
             secret,
             through_tunnel: settings.through_tunnel,
-            carrier: carrier.map(|carrier| carrier.kind),
+            carrier: carriers.map(|chain| chain.last().kind),
             home: home.clone(),
         });
         Ok(mixed_address)
@@ -713,7 +723,7 @@ impl Drop for Chain {
 /// these are bools and Options of the same shape, and transposing two of them
 /// would produce a config that is valid, silently wrong, and routes traffic.
 struct RenderPlan<'a> {
-    carrier: Option<Carrier>,
+    carriers: Option<RunningChain>,
     mixed: u16,
     api: u16,
     secret: &'a str,
@@ -729,7 +739,7 @@ struct RenderPlan<'a> {
 impl Default for RenderPlan<'_> {
     fn default() -> Self {
         Self {
-            carrier: None,
+            carriers: None,
             mixed: DEFAULT_MIXED_PORT,
             api: 1821,
             secret: "",
@@ -743,8 +753,11 @@ impl Default for RenderPlan<'_> {
 }
 
 fn render(plan: &RenderPlan) -> String {
+    // Borrowed rather than destructured with the rest: a chain is a Vec and so
+    // is not Copy, and moving it out of a shared reference is not allowed.
+    // Everything else here is a scalar or a slice.
+    let carriers = plan.carriers.as_ref();
     let RenderPlan {
-        carrier,
         mixed,
         api,
         secret,
@@ -753,6 +766,7 @@ fn render(plan: &RenderPlan) -> String {
         bypass_iran_sites,
         exit_chain,
         tun,
+        ..
     } = *plan;
     let mut config = String::new();
     config.push_str(&format!("mixed-port: {mixed}\n"));
@@ -830,19 +844,22 @@ fn render(plan: &RenderPlan) -> String {
 
     // Declared only when there is a carrier to declare. A socks5 proxy pointing
     // at a port nothing is listening on would fail every node it fronted.
-    let (through, fetch_through) = match carrier {
-        Some(carrier) => {
-            let name = carrier.proxy_name();
-            // `udp` is the carrier's answer, not a constant. A carrier that
-            // cannot carry datagrams and is declared as though it can swallows
-            // every one of them: DNS and QUIC hang rather than failing, and
-            // neither falls back because nothing told them to. The REJECT rule
-            // below is the other half of the same statement.
+    let (through, fetch_through) = match carriers {
+        Some(chain) => {
+            // The last hop: every earlier one is reached through it rather than
+            // by mihomo, so it is the only listener there is anything to dial.
+            let name = chain.last().proxy_name();
+            // `udp` is the *chain's* answer, not the last hop's. One TCP-only
+            // hop anywhere in it makes the whole thing TCP-only, and a proxy
+            // declared as carrying datagrams that cannot swallows every one:
+            // DNS and QUIC hang rather than failing, and neither falls back
+            // because nothing told them to. The REJECT rule below is the other
+            // half of the same statement.
             config.push_str(&format!(
                 "proxies:\n  - {{name: {name}, type: socks5, server: {}, port: {}, udp: {}}}\n",
-                carrier.socks.ip(),
-                carrier.socks.port(),
-                carrier.carries_udp(),
+                chain.listener().ip(),
+                chain.listener().port(),
+                chain.carries_udp(),
             ));
             (
                 format!("\n    dialer-proxy: {name}"),
@@ -891,9 +908,9 @@ fn render(plan: &RenderPlan) -> String {
     // With neither -- no exit chain and no carrier -- there is nothing to name,
     // and DIRECT is the only honest answer. `start` refuses that combination
     // before it can be rendered, so this is a floor rather than a path.
-    let catch_all = match (exit_chain, carrier) {
+    let catch_all = match (exit_chain, carriers) {
         (true, _) => EXIT_GROUP,
-        (false, Some(carrier)) => carrier.proxy_name(),
+        (false, Some(chain)) => chain.last().proxy_name(),
         (false, None) => "DIRECT",
     };
 
@@ -933,13 +950,18 @@ fn render(plan: &RenderPlan) -> String {
     // address to name at all: Psiphon and Tor reach many relays, so there the
     // process rule is the whole of it.
     if tun {
-        if let Some(carrier) = carrier {
-            config.push_str(&format!(
-                "  - PROCESS-NAME,{},DIRECT\n",
-                carrier.process_name()
-            ));
+        // One rule per hop, not one for the hop mihomo dials. Strictly only the
+        // first hop reaches the physical network -- later hops talk to it on
+        // loopback, which `auto-route` does not capture -- but exempting all of
+        // them costs a rule each and covers the case that would otherwise be
+        // silent: a hop that makes one unexpected direct connection and takes
+        // the whole connection down with nothing to read afterwards.
+        for process in carriers.map(RunningChain::process_names).unwrap_or_default() {
+            config.push_str(&format!("  - PROCESS-NAME,{process},DIRECT\n"));
         }
-        if let Some(address) = carrier.and_then(|carrier| carrier.endpoint) {
+        // The *first* hop's gateway. Later hops reach the network through it,
+        // so they have no address on the real internet to name.
+        if let Some(address) = carriers.and_then(RunningChain::endpoint) {
             let prefix = if address.is_ipv4() { 32 } else { 128 };
             // `no-resolve` because the address is already an address, and
             // resolving it would be one more DNS query going through the
@@ -1010,7 +1032,7 @@ fn render(plan: &RenderPlan) -> String {
     //
     // DNS still resolves throughout: the resolvers configured above are
     // DNS-over-HTTPS, which is TCP.
-    if carrier.is_some_and(|carrier| !carrier.carries_udp()) {
+    if carriers.is_some_and(|chain| !chain.carries_udp()) {
         config.push_str("  - NETWORK,udp,REJECT\n");
     }
 
@@ -1327,35 +1349,42 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::carrier::Carrier;
 
     fn source(name: &str, url: &str) -> ChainSource {
         ChainSource { name: name.into(), url: url.into(), enabled: true }
     }
 
-    /// The Aether engine, up and carrying, with no gateway picked yet.
-    fn tunnel() -> Option<Carrier> {
-        Some(Carrier {
-            kind: CarrierKind::Aether,
-            socks: "127.0.0.1:1819".parse().unwrap(),
-            endpoint: None,
+    fn hop(kind: CarrierKind, port: u16, endpoint: Option<&str>) -> Carrier {
+        Carrier {
+            kind,
+            socks: format!("127.0.0.1:{port}").parse().unwrap(),
+            endpoint: endpoint.map(|value| value.parse().unwrap()),
             carries_quic: false,
-        })
+        }
+    }
+
+    /// The Aether engine alone, up and carrying, with no gateway picked yet.
+    fn tunnel() -> Option<RunningChain> {
+        Some(RunningChain::single(hop(CarrierKind::Aether, 1819, None)))
     }
 
     /// The same, once a gateway is known.
-    fn tunnel_via(endpoint: &str) -> Option<Carrier> {
-        Some(Carrier {
-            endpoint: Some(endpoint.parse().unwrap()),
-            ..tunnel().unwrap()
-        })
+    fn tunnel_via(endpoint: &str) -> Option<RunningChain> {
+        Some(RunningChain::single(hop(CarrierKind::Aether, 1819, Some(endpoint))))
     }
 
-    /// A carrier that is not Aether, for the properties that differ by kind.
-    fn carrier_of(kind: CarrierKind) -> Option<Carrier> {
-        Some(Carrier {
-            kind,
-            ..tunnel().unwrap()
-        })
+    /// One carrier alone, for the properties that differ by kind.
+    fn carrier_of(kind: CarrierKind) -> Option<RunningChain> {
+        Some(RunningChain::single(hop(kind, 1819, None)))
+    }
+
+    /// Two hops, in the order traffic travels.
+    fn chain_of(first: CarrierKind, second: CarrierKind) -> Option<RunningChain> {
+        Some(RunningChain::pair(
+            hop(first, 1819, Some("162.159.198.2")),
+            hop(second, 64347, None),
+        ))
     }
 
     #[test]
@@ -1365,7 +1394,7 @@ mod tests {
         // local network and leaving the exit address unchanged.
         let sources = [source("ours", "https://example.com/a"), source("theirs", "https://example.com/b")];
         let refs: Vec<&ChainSource> = sources.iter().collect();
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, manual: "vless://pasted", ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, manual: "vless://pasted", ..Default::default() });
 
         let providers = config.matches("dialer-proxy: aether").count();
         assert_eq!(providers, 3, "two subscriptions and the pasted block, all behind the tunnel");
@@ -1379,7 +1408,7 @@ mod tests {
         // cache, and the screen showed one stale node out of seven.
         let sources = [source("ours", "https://example.com/a")];
         let refs: Vec<&ChainSource> = sources.iter().collect();
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
         assert!(config.contains("\n    proxy: aether"), "the fetch must name the tunnel");
         // And the nodes it carries still dial through the tunnel: these are two
         // different routes and setting one must not have replaced the other.
@@ -1401,8 +1430,8 @@ mod tests {
         // could not refresh.
         let old = [source("ours", "https://example.com/old")];
         let new = [source("ours", "https://example.com/new")];
-        let old_config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &old.iter().collect::<Vec<_>>(), ..Default::default() });
-        let new_config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &new.iter().collect::<Vec<_>>(), ..Default::default() });
+        let old_config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &old.iter().collect::<Vec<_>>(), ..Default::default() });
+        let new_config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &new.iter().collect::<Vec<_>>(), ..Default::default() });
         let path_of = |config: &str| {
             config
                 .lines()
@@ -1421,7 +1450,7 @@ mod tests {
         // nothing which could actually leave this network is: the catch-all
         // must be the exit, and every direct rule must name a range that is
         // unroutable from outside.
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://pasted", ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://pasted", ..Default::default() });
         assert!(config.contains("MATCH,exit"));
         assert!(!config.contains("MATCH,DIRECT"), "the catch-all must never be direct");
 
@@ -1441,7 +1470,7 @@ mod tests {
     fn dns_resolves_inside_the_chain() {
         // A query that escapes names the destination even when the traffic does
         // not, which is the most common way a chain like this leaks.
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
         assert!(config.contains("enhanced-mode: fake-ip"));
         assert!(config.contains("https://1.1.1.1/dns-query"));
         assert!(!config.contains("\n    - 8.8.8.8"), "a plain resolver would leave the chain");
@@ -1449,7 +1478,7 @@ mod tests {
 
     #[test]
     fn the_control_api_is_never_exposed() {
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s3cret", manual: "vless://x", ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s3cret", manual: "vless://x", ..Default::default() });
         assert!(config.contains("external-controller: 127.0.0.1:1821"));
         assert!(config.contains("secret: \"s3cret\""));
     }
@@ -1460,7 +1489,7 @@ mod tests {
         off.enabled = false;
         let on = source("on", "https://example.com/on");
         let refs: Vec<&ChainSource> = vec![&on];
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
         assert!(config.contains("example.com/on"));
         assert!(!config.contains("example.com/off"));
         let _ = off;
@@ -1469,7 +1498,7 @@ mod tests {
     #[test]
     fn full_tunnel_declares_a_device_and_hijacks_dns() {
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1489,7 +1518,7 @@ mod tests {
         // hijacking is what stops the query leaving in the clear beside a
         // tunnelled connection.
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1505,7 +1534,7 @@ mod tests {
         // Without this, those queries take a direct route whatever the traffic
         // does -- so the resolver and the exit end up in different countries,
         // which is both a leak and a mismatch anyone can see on a leak test.
-        let config = render(&RenderPlan { carrier: tunnel(), manual: "vless://x", ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), manual: "vless://x", ..Default::default() });
         assert!(config.contains("respect-rules: true"), "{config}");
         // Resolving the proxies' own names cannot go through the proxies.
         assert!(config.contains("proxy-server-nameserver:"), "{config}");
@@ -1518,7 +1547,7 @@ mod tests {
     #[test]
     fn without_full_tunnel_no_device_is_declared() {
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             manual: "vless://x",
             ..Default::default()
         });
@@ -1534,7 +1563,7 @@ mod tests {
         // handed back to the tunnel that produced them -- taking everything
         // down including whatever would have explained why.
         let config = render(&RenderPlan {
-            carrier: tunnel_via("162.159.198.2"),
+            carriers: tunnel_via("162.159.198.2"),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1565,7 +1594,7 @@ mod tests {
         // there and is retried by Windows on some other adapter -- which is
         // how a query escapes a tunnel that looked complete.
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1599,7 +1628,7 @@ mod tests {
         // matches nothing, and every packet the tunnel sends is handed back to
         // the tunnel -- so the exemption cannot depend on knowing it.
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1629,7 +1658,7 @@ mod tests {
         // reach a gateway on the open internet. With it on, the connection
         // went away entirely once the exit chain was in the path.
         let config = render(&RenderPlan {
-            carrier: tunnel_via("162.159.198.2"),
+            carriers: tunnel_via("162.159.198.2"),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1642,7 +1671,7 @@ mod tests {
         // /32 on an IPv6 address would silently exempt a sixteenth of the
         // internet rather than one host.
         let config = render(&RenderPlan {
-            carrier: tunnel_via("2606:4700:d0::a29f:c602"),
+            carriers: tunnel_via("2606:4700:d0::a29f:c602"),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -1657,7 +1686,7 @@ mod tests {
         // the tunnel itself -- pointing at a group that was never declared
         // would be a config mihomo rejects.
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             exit_chain: false,
             tun: true,
             ..Default::default()
@@ -1672,7 +1701,7 @@ mod tests {
         let source = source("ours", "https://example.com/a");
         let refs: Vec<&ChainSource> = vec![&source];
         let config = render(&RenderPlan {
-            carrier: tunnel(),
+            carriers: tunnel(),
             sources: &refs,
             tun: true,
             ..Default::default()
@@ -1696,7 +1725,7 @@ mod tests {
 
     #[test]
     fn iran_bypass_adds_rule_providers_ahead_of_the_exit_group() {
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", bypass_iran_sites: true, ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", bypass_iran_sites: true, ..Default::default() });
         assert!(config.contains("DOMAIN-SUFFIX,ir,DIRECT"));
         assert!(config.contains("RULE-SET,iran-domain,DIRECT"));
         assert!(config.contains("RULE-SET,iran-ip,DIRECT"));
@@ -1713,7 +1742,7 @@ mod tests {
     fn without_the_iran_bypass_no_rule_provider_is_declared() {
         // The default: nothing here should change for someone who never
         // touched the setting.
-        let config = render(&RenderPlan { carrier: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
+        let config = render(&RenderPlan { carriers: tunnel(), mixed: 1820, api: 1821, secret: "s", manual: "vless://x", ..Default::default() });
         assert!(!config.contains("rule-providers"));
         assert!(!config.contains("DOMAIN-SUFFIX,ir"));
         assert_eq!(config.matches("MATCH,exit").count(), 1);
@@ -1787,7 +1816,7 @@ mod tests {
         };
         let refs: Vec<&ChainSource> = vec![&source];
         let config = render(&RenderPlan {
-            carrier: tunnel_via("162.159.198.2"),
+            carriers: tunnel_via("162.159.198.2"),
             mixed: 1820,
             api: 1821,
             secret: "s3cret",
@@ -1855,6 +1884,92 @@ mod tests {
     }
 
     #[test]
+    fn a_chain_is_dialled_at_its_last_hop_and_exempts_every_process() {
+        // The whole point of handing `render` the chain rather than the hop it
+        // dials. Three of these four answers are not the last hop's, and
+        // reading them off one carrier is how a chain silently becomes a single
+        // hop in the rendered config.
+        let config = render(&RenderPlan {
+            carriers: chain_of(CarrierKind::Aether, CarrierKind::Psiphon),
+            manual: "vless://x",
+            tun: true,
+            ..Default::default()
+        });
+
+        // Dialled at the last hop: Psiphon's name and Psiphon's port.
+        assert!(
+            config.contains("name: psiphon, type: socks5, server: 127.0.0.1, port: 64347"),
+            "{config}"
+        );
+        assert!(config.contains("dialer-proxy: psiphon"), "{config}");
+        assert!(!config.contains("dialer-proxy: aether"), "{config}");
+
+        // Both processes out of the device, not just the one mihomo dials.
+        assert!(
+            config.contains(&format!("- PROCESS-NAME,{},DIRECT", CarrierKind::Aether.process_name())),
+            "the first hop must be exempted: {config}"
+        );
+        assert!(
+            config.contains(&format!("- PROCESS-NAME,{},DIRECT", CarrierKind::Psiphon.process_name())),
+            "the second hop must be exempted too: {config}"
+        );
+
+        // The address exemption is the first hop's gateway. The second hop
+        // reaches the network through the first and has no address to name.
+        assert!(config.contains("- IP-CIDR,162.159.198.2/32,DIRECT,no-resolve"), "{config}");
+    }
+
+    #[test]
+    fn one_tcp_only_hop_makes_the_whole_rendered_chain_tcp_only() {
+        // Measured: Psiphon's SOCKS5 refuses UDP ASSOCIATE and Tor carries no
+        // datagrams. A chain is only as good as its weakest hop, and both
+        // halves of saying so have to reach the config -- the declaration and
+        // the rule -- or the failure is a hang rather than a refusal.
+        //
+        // Aether is last here and does carry datagrams. Reading the last hop
+        // would declare `udp: true` over a Psiphon hop that cannot pass one.
+        let config = render(&RenderPlan {
+            carriers: chain_of(CarrierKind::Psiphon, CarrierKind::Aether),
+            manual: "vless://x",
+            ..Default::default()
+        });
+        assert!(config.contains("udp: false"), "the weakest hop decides: {config}");
+        assert!(config.contains("  - NETWORK,udp,REJECT\n"), "{config}");
+    }
+
+    #[test]
+    fn a_chain_of_two_capable_hops_still_carries_datagrams() {
+        // The AND must not be a blanket "chains are TCP-only". Aether twice is
+        // refused elsewhere as pointless, so this uses the only pair that is
+        // both allowed and capable -- and asserts the rule stays absent.
+        let config = render(&RenderPlan {
+            carriers: Some(RunningChain::pair(
+                Carrier { carries_quic: true, ..hop(CarrierKind::Aether, 1819, None) },
+                Carrier { carries_quic: true, ..hop(CarrierKind::Aether, 1820, None) },
+            )),
+            manual: "vless://x",
+            ..Default::default()
+        });
+        assert!(config.contains("udp: true"), "{config}");
+        assert!(!config.contains("NETWORK,udp,REJECT"), "{config}");
+    }
+
+    #[test]
+    fn a_chain_with_no_exit_group_sends_everything_to_its_last_hop() {
+        // Without a second-hop subscription the catch-all names the carrier,
+        // and for a chain that is the last hop. Naming the first would send
+        // traffic to a listener that is not carrying the exit.
+        let config = render(&RenderPlan {
+            carriers: chain_of(CarrierKind::Aether, CarrierKind::Tor),
+            exit_chain: false,
+            tun: true,
+            ..Default::default()
+        });
+        assert!(config.contains("  - MATCH,tor\n"), "{config}");
+        assert!(!config.contains("MATCH,aether"), "{config}");
+    }
+
+    #[test]
     fn the_remedy_offered_matches_the_carrier_that_cannot_carry_it() {
         // Aether over MASQUE is 28 bytes short and WireGuard closes the gap, so
         // there is something to switch. Tor carries no datagrams at all and no
@@ -1879,7 +1994,7 @@ mod tests {
         // QUIC hang while TCP works. Refused, a resolver retries over TCP and a
         // browser drops off QUIC, both within a round trip.
         let config = render(&RenderPlan {
-            carrier: carrier_of(CarrierKind::Tor),
+            carriers: carrier_of(CarrierKind::Tor),
             manual: "vless://x",
             ..Default::default()
         });
@@ -1904,7 +2019,7 @@ mod tests {
         // directly returned 0x07 COMMAND NOT SUPPORTED. The guess shipped in
         // 1.8.0 and made QUIC hang under Psiphon instead of falling back.
         let config = render(&RenderPlan {
-            carrier: carrier_of(CarrierKind::Aether),
+            carriers: carrier_of(CarrierKind::Aether),
             manual: "vless://x",
             ..Default::default()
         });
@@ -1921,7 +2036,7 @@ mod tests {
         // 0x07. Both halves have to follow from that -- the declaration and the
         // rule -- or the failure is a hang rather than a refusal.
         let config = render(&RenderPlan {
-            carrier: carrier_of(CarrierKind::Psiphon),
+            carriers: carrier_of(CarrierKind::Psiphon),
             manual: "vless://x",
             ..Default::default()
         });
@@ -1945,7 +2060,7 @@ mod tests {
         // not exist, and feed that carrier's own packets back into itself.
         for kind in [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor] {
             let config = render(&RenderPlan {
-                carrier: carrier_of(kind),
+                carriers: carrier_of(kind),
                 manual: "vless://x",
                 tun: true,
                 ..Default::default()
@@ -1973,7 +2088,7 @@ mod tests {
         // would put the whole machine on the local network in the clear.
         for kind in [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor] {
             let config = render(&RenderPlan {
-                carrier: carrier_of(kind),
+                carriers: carrier_of(kind),
                 exit_chain: false,
                 tun: true,
                 ..Default::default()
@@ -1992,7 +2107,7 @@ mod tests {
         // address to write, so there the process rule is the whole of it --
         // and an exemption invented for them would name the wrong host.
         let aether = render(&RenderPlan {
-            carrier: tunnel_via("162.159.198.2"),
+            carriers: tunnel_via("162.159.198.2"),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -2000,7 +2115,7 @@ mod tests {
         assert!(aether.contains("- IP-CIDR,162.159.198.2/32,DIRECT,no-resolve"), "{aether}");
 
         let tor = render(&RenderPlan {
-            carrier: carrier_of(CarrierKind::Tor),
+            carriers: carrier_of(CarrierKind::Tor),
             manual: "vless://x",
             tun: true,
             ..Default::default()
@@ -2132,6 +2247,18 @@ mod tests {
 #[cfg(test)]
 mod config_dump {
     use super::*;
+    use crate::carrier::Carrier;
+
+    /// Its own copy rather than a shared helper: this module exists to be run
+    /// by hand and should not break when the suite's fixtures move.
+    fn hop(kind: CarrierKind, port: u16, endpoint: Option<&str>) -> Carrier {
+        Carrier {
+            kind,
+            socks: format!("127.0.0.1:{port}").parse().unwrap(),
+            endpoint: endpoint.and_then(|value| value.parse().ok()),
+            carries_quic: false,
+        }
+    }
 
     /// Writes the config the app would generate with the Iran bypass on, so it
     /// can be handed to the real mihomo for validation. Not part of the suite:
@@ -2151,17 +2278,24 @@ mod config_dump {
             // All three set from the environment so one dump can cover any
             // shape: which carrier, whether a device is held up, and whether a
             // gateway has been picked.
-            carrier: Some(Carrier {
-                kind: match std::env::var("WHITEAESTHER_CONFIG_DUMP_CARRIER").as_deref() {
-                    Ok("psiphon") => CarrierKind::Psiphon,
-                    Ok("tor") => CarrierKind::Tor,
+            carriers: Some({
+                let kind = |name: &str| match name {
+                    "psiphon" => CarrierKind::Psiphon,
+                    "tor" => CarrierKind::Tor,
                     _ => CarrierKind::Aether,
-                },
-                socks: "127.0.0.1:1819".parse().unwrap(),
-                endpoint: std::env::var("WHITEAESTHER_CONFIG_DUMP_ENDPOINT")
-                    .ok()
-                    .and_then(|value| value.parse().ok()),
-                carries_quic: false,
+                };
+                let first = hop(
+                    kind(std::env::var("WHITEAESTHER_CONFIG_DUMP_CARRIER").unwrap_or_default().as_str()),
+                    1819,
+                    std::env::var("WHITEAESTHER_CONFIG_DUMP_ENDPOINT").ok().as_deref(),
+                );
+                // A second hop when one is named, so a dump can cover a chain.
+                match std::env::var("WHITEAESTHER_CONFIG_DUMP_SECOND") {
+                    Ok(name) if !name.is_empty() => {
+                        RunningChain::pair(first, hop(kind(&name), 64347, None))
+                    }
+                    _ => RunningChain::single(first),
+                }
             }),
             mixed: 1820,
             api: 1821,
