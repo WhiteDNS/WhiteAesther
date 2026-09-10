@@ -349,6 +349,17 @@ const FA: Record<string, string> = {
   "Tor": "تور",
   "Three relays. The strongest against being identified, and the slowest. No UDP.":
     "سه بازپخش. قوی‌ترین گزینه در برابر شناسایی، و کندترین. UDP ندارد.",
+  // -- the search that tries every way out ------------------------------
+  "Find one that works": "یکی که کار می‌کند را پیدا کن",
+  "Stop searching": "توقف جستجو",
+  "Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.":
+    "هر راه خروج را به‌ترتیب امتحان می‌کند و اولی که ترافیک حمل کند نگه می‌دارد. اول تک‌ها، و جفت‌ها فقط اگر هیچ‌کدام بیرون نرفت.",
+  "Each one gets up to 90 seconds. Stopping takes effect after the current attempt.":
+    "به هرکدام تا ۹۰ ثانیه فرصت داده می‌شود. توقف بعد از تلاش فعلی اعمال می‌شود.",
+  "carrying traffic": "در حال حمل ترافیک",
+  "Nothing got out. Every way out was tried; the list above says how each one failed.":
+    "هیچ‌چیز بیرون نرفت. همهٔ راه‌های خروج امتحان شد؛ فهرست بالا می‌گوید هرکدام چطور شکست خورد.",
+
   "Bridges": "پل‌ها",
   "Bridges are not used when Tor is the second hop: the carrier in front is what got out of this network, so Tor takes the direct relays.":
     "وقتی تور هپ دوم است پل‌ها استفاده نمی‌شوند: کریر جلویی همان چیزی است که از این شبکه بیرون رفته، پس تور از بازپخش‌های مستقیم استفاده می‌کند.",

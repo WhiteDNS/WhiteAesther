@@ -296,6 +296,37 @@ saying so leaves someone believing they are on Aether.
    **Gate:** on a network where only one ordering works, the search finds it and
    names it.
 
+## What the gates actually returned
+
+Steps 1-5 are closed, measured from outside the app on 2026-09-10.
+
+- **Step 2 and 3.** Five of the six orderings were run and every one carried
+  real traffic through mihomo: `Aether → Psiphon`, `Psiphon → Aether`,
+  `Tor → Aether`, `Tor → Psiphon`, `Aether → Tor`. `Psiphon → Tor` has not
+  been run. The exit belongs to the last hop, not the first: on
+  `Aether → Tor`, `curl` through mihomo's port reached
+  `check.torproject.org/api/ip`, which answered
+  `{"IsTor":true,"IP":"203.55.81.2"}`.
+- **Step 4.** `Aether → Tor` rendered
+  `{name: tor, type: socks5, port: 45990, udp: false}` with
+  `NETWORK,udp,REJECT` — Aether carries datagrams and Tor does not, and the
+  chain declared the weaker of the two. The transport cards are absent from the
+  screen for any chain.
+- **Step 5.** Hop 1 killed at 13:22:52.186; `Aether, carrying Aether → Tor,
+  stopped unexpectedly` logged at 13:22:52.809 — **623ms** — and five seconds
+  later `tor`, `mihomo` and the engine were all gone. The kill-switch half is
+  untested.
+
+One thing measured and not yet explained: both orderings **ending** at Aether
+come up, carry traffic, and then reset within seconds —
+`h2 body: connection reset; reconnecting`, three times out of three, at 4s, 10s
+and immediately. A lone Aether stays up for minutes, so this correlates with
+the SOCKS upstream rather than with the chain wiring, which puts it in the
+engine's upstream path. The engine recovers on its own and the app reports
+`reconnecting` honestly, so it degrades rather than breaks — but it is why the
+snapshot's advertised address had to stop following the engine's listener line
+(finding 10): an internal reconnect is routine here, not rare.
+
 ## Rules
 
 - Never present an ordering as giving a foreign exit when it ends at Aether.

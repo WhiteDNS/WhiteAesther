@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/core/useT";
 import {
   Activity, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
@@ -22,7 +22,12 @@ import {
   saveReport,
   setLanShare,
   setPsiphonRegion,
+  startCore,
+  stopCore,
 } from "@/core/api";
+import {
+  ATTEMPT_CAP_MS, isImpossible, searchOrder, type SearchAttempt,
+} from "./carrierSearch";
 import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
 import { Chain } from "./Chain";
 import { Scanner } from "./Scanner";
@@ -610,6 +615,87 @@ function CarrierPanel({
   // Weakest link: a chain passes datagrams only if every hop does.
   const carriesUdp = CARRIES_UDP[chain.first] && (chain.second === null || CARRIES_UDP[chain.second]);
 
+  const [attempts, setAttempts] = useState<SearchAttempt[]>([]);
+  const [searching, setSearching] = useState(false);
+  // Its own state rather than the exit country's `failure`: sharing one would
+  // let a stale region error read as a search result, and the region error is
+  // only rendered where Psiphon is in the chain, so a search that found
+  // nothing would have had nowhere to say so.
+  const [searchFailure, setSearchFailure] = useState<string | null>(null);
+  // Read by the loop between attempts, so Stop takes effect on the next one
+  // rather than after all nine. Held in a ref because the running loop closes
+  // over its own render's state and would never see a change to it.
+  const cancelled = useRef(false);
+
+  /**
+   * Tries each way out in turn and keeps the first that carries traffic.
+   *
+   * Drives the same `start_core` the Connect button does rather than
+   * orchestrating hops itself. Two orchestrators would be two copies of the
+   * startup order, and a second copy of a rule is what put seven faults in the
+   * chain path at once.
+   */
+  const search = async () => {
+    setSearching(true);
+    setSearchFailure(null);
+    cancelled.current = false;
+    const order = searchOrder(available);
+    setAttempts(order.map((candidate) => ({ chain: candidate, outcome: "skipped" })));
+
+    // Whatever is up now is in the way: the supervisor refuses a second
+    // connection while one is claimed.
+    await stopCore().catch(() => {});
+
+    let settled = false;
+    for (const [index, candidate] of order.entries()) {
+      if (cancelled.current) break;
+      setAttempts((current) =>
+        current.map((entry, at) => (at === index ? { ...entry, outcome: "trying" } : entry)),
+      );
+
+      // The cap is enforced by stopping rather than by walking away: the
+      // supervisor checks between hops and unwinds, so a timed-out attempt
+      // leaves no process behind.
+      const timer = window.setTimeout(() => void stopCore().catch(() => {}), ATTEMPT_CAP_MS);
+      let failure: string | null = null;
+      try {
+        await startCore({ ...profile, carriers: candidate });
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      } finally {
+        window.clearTimeout(timer);
+      }
+
+      if (!failure) {
+        setAttempts((current) =>
+          current.map((entry, at) => (at === index ? { ...entry, outcome: "connected" } : entry)),
+        );
+        // Say what it settled on, and leave the profile holding it. Ending on
+        // one ordering while the screen still shows another is the whole
+        // failure this feature could introduce.
+        set({ carriers: candidate });
+        settled = true;
+        break;
+      }
+
+      setAttempts((current) =>
+        current.map((entry, at) =>
+          at === index
+            ? { ...entry, outcome: isImpossible(failure) ? "skipped" : "failed", detail: failure }
+            : entry,
+        ),
+      );
+      await stopCore().catch(() => {});
+    }
+
+    if (!settled && !cancelled.current) {
+      setSearchFailure(
+        t("Nothing got out. Every way out was tried; the list above says how each one failed."),
+      );
+    }
+    setSearching(false);
+  };
+
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     let cancelled = false;
@@ -730,6 +816,67 @@ function CarrierPanel({
             </div>
           ) : null}
         </div>
+
+        {/* For the network where the answer is not knowable in advance. Tries
+            the cheap ways out first and the pairs only after every single has
+            failed -- see `carrierSearch.ts` for why that order. */}
+        <div className="mt-4 flex items-center gap-2.5">
+          <Button
+            variant={searching ? "outline" : "secondary"}
+            size="sm"
+            onClick={() => {
+              if (searching) {
+                cancelled.current = true;
+                void stopCore().catch(() => {});
+                return;
+              }
+              void search();
+            }}
+          >
+            {searching ? t("Stop searching") : t("Find one that works")}
+          </Button>
+          <p className="text-[12.5px] leading-snug text-muted-foreground">
+            {searching
+              ? t("Each one gets up to 90 seconds. Stopping takes effect after the current attempt.")
+              : t("Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.")}
+          </p>
+        </div>
+
+        {searchFailure ? (
+          <p className="mt-2 text-[12.5px] leading-snug text-destructive">{searchFailure}</p>
+        ) : null}
+
+        {attempts.length > 0 ? (
+          <ul className="mt-3 flex flex-col gap-1">
+            {attempts.map((entry) => {
+              const name = carrierChainLabel(entry.chain, (kind) => t(CARRIER_NAME[kind]));
+              const mark = {
+                trying: "…",
+                connected: "✓",
+                failed: "✕",
+                skipped: "–",
+              }[entry.outcome];
+              const tone = {
+                trying: "text-foreground",
+                connected: "text-primary font-medium",
+                failed: "text-muted-foreground",
+                skipped: "text-muted-foreground/70",
+              }[entry.outcome];
+              return (
+                <li key={name} className={`text-[12.5px] leading-snug ${tone}`}>
+                  <span className="inline-block w-4">{mark}</span>
+                  {name}
+                  {entry.outcome === "connected" ? ` — ${t("carrying traffic")}` : null}
+                  {/* The backend's own words. A search that says "failed" and
+                      nothing else is a search nobody can act on. */}
+                  {entry.detail && entry.outcome !== "connected" ? (
+                    <span className="text-muted-foreground/70"> — {entry.detail}</span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
 
         {carrierChainHas(profile.carriers, "psiphon") ? (
           <>
