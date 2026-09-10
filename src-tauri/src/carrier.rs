@@ -90,15 +90,28 @@ impl CarrierKind {
 
     /// Whether this carrier can carry datagrams at all.
     ///
-    /// Tor cannot: it is a TCP-only transport, and nothing configures that
-    /// away. Declaring the proxy `udp: true` anyway produces a carrier that
+    /// Declaring a proxy `udp: true` when it cannot produces a carrier that
     /// swallows every datagram -- DNS and QUIC hang rather than failing, and
     /// neither falls back because nothing told them to. Refused, a resolver
     /// retries over TCP and a browser drops off QUIC, both within a round trip.
+    ///
+    /// Tor cannot, by design: it is a TCP-only transport and nothing configures
+    /// that away.
+    ///
+    /// **Psiphon cannot either, which was measured rather than assumed.** Its
+    /// SOCKS5 listener answers `UDP ASSOCIATE` with `0x07 COMMAND NOT
+    /// SUPPORTED`, so mihomo has no way to relay a datagram through it. This
+    /// shipped as `true` in 1.8.0 on the strength of a guess, and the cost was
+    /// exactly the failure described above: under Psiphon, QUIC hung instead of
+    /// falling back, which reads as "the internet is slow" rather than as
+    /// anything to report.
+    ///
+    /// Only Aether carries datagrams, and even then not a QUIC handshake --
+    /// see `Carrier::carries_quic`, which is a narrower question.
     pub fn carries_udp(self) -> bool {
         match self {
-            Self::Aether | Self::Psiphon => true,
-            Self::Tor => false,
+            Self::Aether => true,
+            Self::Psiphon | Self::Tor => false,
         }
     }
 
@@ -167,13 +180,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tor_is_the_one_carrier_that_carries_no_datagrams() {
+    fn only_aether_carries_datagrams() {
         // Declared rather than discovered. A proxy that claims UDP and swallows
         // it is experienced as DNS and QUIC hanging while TCP works, which is
         // the hardest shape of broken to recognise.
-        assert!(!CarrierKind::Tor.carries_udp());
+        //
+        // Tor is TCP-only by design. Psiphon was measured: its SOCKS5 answers
+        // `UDP ASSOCIATE` with 0x07 COMMAND NOT SUPPORTED. 1.8.0 claimed it
+        // carried datagrams because nobody had asked it.
         assert!(CarrierKind::Aether.carries_udp());
-        assert!(CarrierKind::Psiphon.carries_udp());
+        assert!(!CarrierKind::Psiphon.carries_udp());
+        assert!(!CarrierKind::Tor.carries_udp());
     }
 
     #[test]
