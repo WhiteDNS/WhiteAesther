@@ -238,7 +238,12 @@ impl Tor {
     }
 
     /// Starts tor and waits for a circuit.
-    pub fn start(&self, app: &AppHandle, settings: &TorSettings) -> Result<SocketAddr, String> {
+    pub fn start(
+        &self,
+        app: &AppHandle,
+        settings: &TorSettings,
+        upstream: Option<SocketAddr>,
+    ) -> Result<SocketAddr, String> {
         settings.validate()?;
         self.stop();
 
@@ -271,7 +276,7 @@ impl Tor {
         let torrc = home.join("torrc");
         std::fs::write(
             &torrc,
-            render_torrc(settings, &home, &support, &control_port_file, &cookie_file)?,
+            render_torrc(settings, &home, &support, &control_port_file, &cookie_file, upstream)?,
         )
         .map_err(|error| format!("cannot write the Tor configuration: {error}"))?;
 
@@ -521,6 +526,7 @@ fn render_torrc(
     support: &Path,
     control_port_file: &Path,
     cookie_file: &Path,
+    upstream: Option<SocketAddr>,
 ) -> Result<String, String> {
     let mut config = String::new();
     // Both auto: a fixed port is one more thing that can already be taken on a
@@ -544,6 +550,16 @@ fn render_torrc(
     config.push_str("__OwningControllerProcess ");
     config.push_str(&std::process::id().to_string());
     config.push('\n');
+
+    // The hop in front, when there is one. Measured honouring this: with a
+    // proxy under our own control in front, tor's guard connections arrived
+    // there and it bootstrapped through them.
+    //
+    // Not quoted, and not a URL: unlike the paths above, tor takes this as a
+    // bare `host:port`.
+    if let Some(address) = upstream {
+        config.push_str(&format!("Socks5Proxy {address}\n"));
+    }
 
     if settings.bridges != BridgeMode::None {
         let lyrebird = support.join(LYREBIRD_FILENAME);
@@ -906,6 +922,7 @@ mod tests {
             &support,
             Path::new("/tmp/tor/control-port"),
             Path::new("/tmp/tor/cookie"),
+            None,
         )
         .unwrap();
 
@@ -925,6 +942,37 @@ mod tests {
     }
 
     #[test]
+    fn a_hop_in_front_becomes_a_socks5_proxy_line() {
+        // Measured honouring this: tor's guard connections arrived at a proxy
+        // under our own control and it bootstrapped through them.
+        //
+        // A bare host:port, and unquoted -- unlike every path in this file. tor
+        // takes this one as an address rather than as a filename or a URL.
+        let chained = render_torrc(
+            &TorSettings::default(),
+            Path::new("/tmp/tor"),
+            Path::new("/tmp/support"),
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+            Some("127.0.0.1:64347".parse().unwrap()),
+        )
+        .unwrap();
+        assert!(chained.contains("\nSocks5Proxy 127.0.0.1:64347\n"), "{chained}");
+        assert!(!chained.contains("Socks5Proxy \""), "not a quoted path: {chained}");
+
+        let alone = render_torrc(
+            &TorSettings::default(),
+            Path::new("/tmp/tor"),
+            Path::new("/tmp/support"),
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+            None,
+        )
+        .unwrap();
+        assert!(!alone.contains("Socks5Proxy"), "{alone}");
+    }
+
+    #[test]
     fn no_bridges_means_no_transport_plugin_line() {
         // A ClientTransportPlugin naming a binary we did not ship would stop
         // tor from starting at all, so it appears only when bridges do.
@@ -936,6 +984,7 @@ mod tests {
             support,
             Path::new("/tmp/tor/control-port"),
             Path::new("/tmp/tor/cookie"),
+            None,
         )
         .unwrap();
         assert!(!config.contains("ClientTransportPlugin"), "{config}");

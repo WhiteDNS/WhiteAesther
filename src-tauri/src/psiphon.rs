@@ -260,7 +260,12 @@ impl Psiphon {
     /// reason there is not. The caller is about to point an interface at this:
     /// a listener with no tunnel behind it swallows packets instead of refusing
     /// them, which is worse for the person using it than an honest failure.
-    pub fn start(&self, app: &AppHandle, settings: &PsiphonSettings) -> Result<SocketAddr, String> {
+    pub fn start(
+        &self,
+        app: &AppHandle,
+        settings: &PsiphonSettings,
+        upstream: Option<SocketAddr>,
+    ) -> Result<SocketAddr, String> {
         settings.validate()?;
         self.stop();
 
@@ -278,7 +283,7 @@ impl Psiphon {
             .map_err(|error| format!("cannot prepare the Psiphon directory: {error}"))?;
 
         let config_path = home.join("config.json");
-        std::fs::write(&config_path, render_config(settings, &home))
+        std::fs::write(&config_path, render_config(settings, &home, upstream))
             .map_err(|error| format!("cannot write the Psiphon config: {error}"))?;
 
         {
@@ -568,8 +573,12 @@ fn apply_notice_to_snapshot(snapshot: &mut PsiphonSnapshot, notice: &Notice) -> 
 /// tunnel-core has dozens more whose defaults are chosen against live censored
 /// networks by people who measure them, which is not something to second-guess
 /// from here.
-fn render_config(settings: &PsiphonSettings, home: &Path) -> String {
-    serde_json::json!({
+fn render_config(
+    settings: &PsiphonSettings,
+    home: &Path,
+    upstream: Option<SocketAddr>,
+) -> String {
+    let mut config = serde_json::json!({
         "PropagationChannelId": PROPAGATION_CHANNEL_ID,
         "SponsorId": SPONSOR_ID,
         // Our own version, as a string, which is what tunnel-core's sample says
@@ -592,8 +601,25 @@ fn render_config(settings: &PsiphonSettings, home: &Path) -> String {
         // machine unless the user sends a report.
         "EmitDiagnosticNotices": true,
         "EmitDiagnosticNetworkParameters": false,
-    })
-    .to_string()
+        // The hop in front, when there is one. Measured honouring this: with a
+        // proxy under our own control in front, 15 of tunnel-core's own
+        // connections arrived there and the tunnel established through it.
+        //
+        // Measured refusing to go round it, too. Pointed at a proxy that
+        // refused every connection it made 1340 attempts and never once
+        // connected directly, which is what makes a chain worth trusting: a
+        // first hop that drops does not leak the second.
+        //
+    });
+
+    // Inserted only when there is one, rather than sent as null: tunnel-core
+    // declares this `omitempty`, and a config that always carries the key --
+    // even empty -- is a config that says something about a proxy in the case
+    // where there is none.
+    if let Some(address) = upstream {
+        config["UpstreamProxyURL"] = serde_json::json!(format!("socks5://{address}"));
+    }
+    config.to_string()
 }
 
 fn locate(app: &AppHandle) -> Result<PathBuf, String> {
@@ -764,6 +790,7 @@ mod tests {
         let rendered = render_config(
             &PsiphonSettings { egress_region: "JP".into() },
             Path::new("/tmp/psiphon"),
+            None,
         );
         let config: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         // Zero is "pick one and tell me". A fixed port is one more thing that
@@ -781,11 +808,32 @@ mod tests {
     }
 
     #[test]
+    fn a_hop_in_front_is_named_and_its_absence_is_silence() {
+        // Measured honouring this: with a proxy under our own control in front,
+        // 15 of tunnel-core's own connections arrived there and the tunnel
+        // established through it.
+        let chained = render_config(
+            &PsiphonSettings::default(),
+            Path::new("/tmp/psiphon"),
+            Some("127.0.0.1:1819".parse().unwrap()),
+        );
+        let config: serde_json::Value = serde_json::from_str(&chained).unwrap();
+        assert_eq!(config["UpstreamProxyURL"], "socks5://127.0.0.1:1819");
+
+        // Absent, not null and not empty. tunnel-core declares the field
+        // `omitempty`, and a config that always carries the key says something
+        // about a proxy in the case where there is none.
+        let alone = render_config(&PsiphonSettings::default(), Path::new("/tmp/psiphon"), None);
+        let config: serde_json::Value = serde_json::from_str(&alone).unwrap();
+        assert!(config.get("UpstreamProxyURL").is_none(), "{alone}");
+    }
+
+    #[test]
     fn no_exit_country_is_sent_as_empty_rather_than_omitted() {
         // tunnel-core reads a missing EgressRegion and an empty one the same
         // way, but writing it explicitly keeps the config self-describing for
         // anyone reading it out of the data directory during a support call.
-        let rendered = render_config(&PsiphonSettings::default(), Path::new("/tmp/psiphon"));
+        let rendered = render_config(&PsiphonSettings::default(), Path::new("/tmp/psiphon"), None);
         let config: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(config["EgressRegion"], "");
     }

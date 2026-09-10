@@ -495,6 +495,14 @@ struct SupervisorInner {
     snapshot: Mutex<CoreSnapshot>,
     logs: Mutex<VecDeque<CoreLogEvent>>,
     session: Mutex<Option<Session>>,
+    /// The chain that is up, built hop by hop as each starts carrying.
+    ///
+    /// Held here rather than derived from the snapshot, because the snapshot
+    /// can only ever describe one carrier: it has one `socks_address` and one
+    /// `endpoint`. With two hops, whichever was written last would be the only
+    /// one anything could see -- and the routing engine needs the first hop's
+    /// gateway and every hop's process name, not just the last one's listener.
+    chain: Mutex<Option<RunningChain>>,
     /// Bumped by every start and every stop. A retry thread that wakes up on a
     /// stale generation has been superseded and does nothing.
     generation: AtomicU64,
@@ -540,6 +548,7 @@ impl CoreSupervisor {
                 snapshot: Mutex::new(CoreSnapshot::default()),
                 logs: Mutex::new(VecDeque::with_capacity(MAX_LOGS)),
                 session: Mutex::new(None),
+                chain: Mutex::new(None),
                 generation: AtomicU64::new(0),
                 proxy_route: Mutex::new(None),
                 scan_child: Mutex::new(None),
@@ -580,6 +589,17 @@ impl CoreSupervisor {
     /// after the first had been dropped. Here they come from one snapshot.
     pub fn carrier(&self, app: &AppHandle) -> Option<Carrier> {
         current_carrier(app, &self.inner)
+    }
+
+    /// The whole chain that is carrying traffic, hops and all.
+    ///
+    /// What the routing engine needs, and not the same as `carrier()`: mihomo
+    /// has to exempt every hop's process from the TUN device and read datagram
+    /// support across all of them. Restarting mihomo with only the last hop is
+    /// how a live chain would silently become a single hop in the config it
+    /// renders.
+    pub fn chain(&self, app: &AppHandle) -> Option<RunningChain> {
+        current_chain(app, &self.inner)
     }
 
     /// Records a line from something the app runs alongside the core.
@@ -755,7 +775,7 @@ fn start_core_blocking(
         };
     }
 
-    match launch(app, inner, &profile, 0, generation) {
+    match launch(app, inner, &profile, 0, generation, true) {
         Ok(()) => Ok(lock(&inner.snapshot).clone()),
         Err(error) => {
             *lock(&inner.session) = None;
@@ -796,41 +816,57 @@ fn start_carrier_blocking(
         format!("carrier {} is starting", profile.carriers.label()),
     );
 
-    // Each carrier brings itself up its own way and they share nothing but the
-    // shape of the answer: a listener, and something to say about where traffic
-    // is leaving from.
-    let (listener, leaving_from) = match profile.carriers.last() {
-        CarrierKind::Psiphon => {
-            let psiphon = app.state::<crate::psiphon::Psiphon>();
-            let listener = psiphon.start(app, &profile.psiphon)?;
-            // The exit country, when Psiphon has said one.
-            (listener, psiphon.snapshot().exit_region)
-        }
-        CarrierKind::Tor => {
-            let tor = app.state::<crate::tor::Tor>();
-            let listener = tor.start(app, &profile.tor)?;
-            // Tor has no one exit to name -- the relay changes per circuit and
-            // per destination -- so nothing is claimed here rather than a
-            // guess being put in front of someone who would act on it.
-            (listener, None)
-        }
-        // Guarded by the caller, which only reaches this for a non-Aether
-        // carrier. Named rather than left to a wildcard so adding a fourth
-        // carrier fails to compile here instead of silently doing nothing.
-        CarrierKind::Aether => {
-            return Err("the Aether engine does not start through the carrier path".into())
-        }
-    };
+    // Hop by hop, in the order traffic travels. Each one must be *carrying
+    // traffic* before the next starts -- not merely listening -- because the
+    // next will use it immediately, and a listener with no tunnel behind it
+    // swallows connections rather than refusing them.
+    //
+    // Every hop after the first is told to make its own outbound connections
+    // through the one before it. That is the whole of the chaining: no hop
+    // knows it is in a chain, only that it has an upstream.
+    let kinds = profile.carriers.kinds();
+    let mut hops: Vec<Carrier> = Vec::with_capacity(kinds.len());
+    let mut leaving_from: Option<String> = None;
 
-    if !inner.is_current(generation) {
-        stop_carriers(app);
-        return Err("the connection was stopped while it was starting".into());
+    for (position, kind) in kinds.iter().copied().enumerate() {
+        let upstream = hops.last().map(|previous: &Carrier| previous.socks);
+        if position > 0 {
+            let mut snapshot = lock(&inner.snapshot);
+            snapshot.status_message = Some(format!(
+                "{} is up; starting {} through it",
+                kinds[position - 1].label(),
+                kind.label()
+            ));
+            mark_snapshot_dirty(inner);
+        }
+
+        let hop = start_hop(app, inner, profile, kind, upstream, generation)?;
+        if !inner.is_current(generation) {
+            stop_carriers(app);
+            return Err("the connection was stopped while it was starting".into());
+        }
+        // The last hop that says where it leaves from wins, because that is
+        // the one the exit address belongs to.
+        if let Some(region) = hop_exit_region(app, kind) {
+            leaving_from = Some(region);
+        }
+        hops.push(hop);
     }
+
+    let chain = match hops.as_slice() {
+        [only] => RunningChain::single(*only),
+        [first, second] => RunningChain::pair(*first, *second),
+        // `CarrierChain` holds at most two, so this is unreachable rather than
+        // a case to handle. Named so a third hop fails here loudly instead of
+        // being silently truncated to the first two.
+        other => return Err(format!("a chain of {} hops is not supported", other.len())),
+    };
+    *lock(&inner.chain) = Some(chain.clone());
 
     {
         let mut snapshot = lock(&inner.snapshot);
         snapshot.state = "connected".into();
-        snapshot.socks_address = listener.to_string();
+        snapshot.socks_address = chain.listener().to_string();
         snapshot.status_message = None;
         snapshot.started_at = Some(now_millis());
         // Reported in the field the engine uses for its gateway, because it
@@ -839,17 +875,23 @@ fn start_carrier_blocking(
         snapshot.endpoint = leaving_from;
         mark_snapshot_dirty(inner);
     }
-
-    // mihomo always runs for a carrier, whether or not a second hop was asked
-    // for: it is what owns the interface and routes it into the carrier.
-    let carrier = current_carrier(app, inner)
-        .ok_or("the carrier reported a listener and then stopped carrying traffic")?;
+    supervisor_log(
+        inner,
+        "info",
+        format!(
+            "{} is carrying traffic; listener on {}",
+            profile.carriers.label(),
+            chain.listener()
+        ),
+    );
     let tun = tun_is_possible(inner, profile.full_tunnel);
-    let chain = app.state::<Chain>();
-    let chain_listener = match chain.start(
+    // `engine`, not `chain`: the mihomo instance, as distinct from the carrier
+    // chain it is being pointed at.
+    let engine = app.state::<Chain>();
+    let chain_listener = match engine.start(
         app,
         &ChainRequest {
-            carriers: Some(RunningChain::single(carrier)),
+            carriers: Some(chain),
             settings: &profile.chain,
             bypass_iran_sites: profile.bypass_iran_sites,
             tun,
@@ -901,12 +943,21 @@ fn start_carrier_blocking(
 ///
 /// `profile` is the profile for this attempt, which is not necessarily the one
 /// the user configured -- see [`profile_for_attempt`].
+///
+/// `supervised` decides whether the engine retries on its own. True on the
+/// engine path, where the exit monitor and the route watch are the whole of how
+/// a dropped tunnel recovers. False when the engine is one hop of a chain: a
+/// hop that retries by itself leaves the hop in front of it hammering a dead
+/// upstream -- measured at 1340 attempts from Psiphon against a refusing proxy
+/// -- so the chain owns recovery instead, as one unit. See finding 4 in
+/// `CARRIER-CHAINING.md`.
 fn launch(
     app: &AppHandle,
     inner: &Arc<SupervisorInner>,
     profile: &CoreProfile,
     attempt: u32,
     generation: u64,
+    supervised: bool,
 ) -> Result<(), String> {
     let core_path = resolve_core_path(app, profile.core_path.as_deref())?;
     let version = core_version(&core_path)?;
@@ -1039,8 +1090,10 @@ fn launch(
     if let Some(stderr) = stderr {
         spawn_log_reader(app.clone(), inner.clone(), stderr, "stderr");
     }
-    spawn_exit_monitor(app.clone(), inner.clone(), generation);
-    spawn_route_watch(app.clone(), inner.clone(), generation);
+    if supervised {
+        spawn_exit_monitor(app.clone(), inner.clone(), generation);
+        spawn_route_watch(app.clone(), inner.clone(), generation);
+    }
 
     Ok(())
 }
@@ -1291,7 +1344,7 @@ pub async fn set_full_tunnel(
         return Err(NEEDS_ADMINISTRATOR.into());
     }
 
-    let Some(carrier) = supervisor.carrier(&app) else {
+    let Some(carriers) = supervisor.chain(&app) else {
         return Ok(false);
     };
 
@@ -1305,7 +1358,7 @@ pub async fn set_full_tunnel(
     let address = chain.start(
         &app,
         &ChainRequest {
-            carriers: Some(RunningChain::single(carrier)),
+            carriers: Some(carriers),
             settings: &chain_settings,
             bypass_iran_sites,
             tun: enabled,
@@ -1361,12 +1414,12 @@ pub async fn set_chain(
     };
 
     let socks = supervisor.connected_socks();
-    let carrier = supervisor.carrier(&app);
+    let carriers = supervisor.chain(&app);
     // Without a carrier the chain can still carry traffic straight to the
     // nodes. Refusing outright is what left this unusable on a network that
     // resets MASQUE: the tunnel never came up, so the chain never ran, so
     // nothing the user configured did anything at all.
-    if carrier.is_none() && (!settings.enabled || settings.through_tunnel) {
+    if carriers.is_none() && (!settings.enabled || settings.through_tunnel) {
         chain.stop();
         return Ok(false);
     }
@@ -1374,11 +1427,11 @@ pub async fn set_chain(
     // The engine also runs to hold up a full-tunnel device, so "is a second hop
     // wanted" is no longer the same question as "should it be running".
     let tun = tun_is_possible(inner, full_tunnel);
-    let started = if engine_is_wanted(settings.enabled, tun, carrier) {
+    let started = if engine_is_wanted(settings.enabled, tun, carriers.as_ref().map(|chain| *chain.last())) {
         let address = chain.start(
             &app,
             &ChainRequest {
-                carriers: carrier.map(RunningChain::single),
+                carriers: carriers.clone(),
                 settings: &settings,
                 bypass_iran_sites,
                 tun,
@@ -1398,7 +1451,7 @@ pub async fn set_chain(
     // Anything pointed at the old listener would go around the change the user
     // just made -- devices on the network included, which is why the shared
     // door is retargeted rather than left to be reconfigured by hand.
-    if let Some(listener) = started.or_else(|| carrier.map(|carrier| carrier.socks)) {
+    if let Some(listener) = started.or_else(|| carriers.as_ref().map(RunningChain::listener)) {
         app.state::<LanDoor>().retarget(listener);
     }
 
@@ -1862,7 +1915,7 @@ fn rescan_bad_route(app: &AppHandle, inner: &Arc<SupervisorInner>, generation: u
         snapshot.status_message = Some("Finding a faster gateway".into());
         mark_snapshot_dirty(inner);
     }
-    if let Err(error) = launch(app, inner, &profile, 0, next) {
+    if let Err(error) = launch(app, inner, &profile, 0, next, true) {
         handle_exit(app, inner, next, error);
     }
 }
@@ -2108,7 +2161,7 @@ fn handle_exit(app: &AppHandle, inner: &Arc<SupervisorInner>, generation: u64, r
         if !inner.is_current(generation) {
             return;
         }
-        if let Err(error) = launch(&app, &inner, &profile, attempt, generation) {
+        if let Err(error) = launch(&app, &inner, &profile, attempt, generation, true) {
             handle_exit(&app, &inner, generation, error);
         }
     });
@@ -2174,7 +2227,7 @@ fn hold(
         // gets a blocked transport past a filter, and a hold that only ever tried
         // the configured one would sit there forever.
         let next = profile_for_attempt(&profile, 1);
-        if let Err(error) = launch(&app, &inner, &next, 1, generation) {
+        if let Err(error) = launch(&app, &inner, &next, 1, generation, true) {
             handle_exit(&app, &inner, generation, error);
         }
     });
@@ -2294,7 +2347,17 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
     // A tunnel that came up has spent its failures. Anything after this is a
     // fresh problem and gets the full retry budget again. Kept out of the
     // snapshot lock above so the two are never held at once.
-    if connected {
+    // Only the engine on its own orchestrates from here. When Aether is a hop
+    // of a chain its log still arrives, and everything below would fire on it:
+    // mihomo started early, pointed at Aether alone, before the hop in front
+    // even exists -- and then the chain path would start a second one. The
+    // chain path owns all of this for a chain, in order, once every hop is
+    // carrying.
+    let orchestrates_here = lock(&inner.session)
+        .as_ref()
+        .is_none_or(|session| session.profile.carriers.is_lone_aether());
+
+    if connected && orchestrates_here {
         let (wanted, chain_settings, lan, bypass_iran_sites, full_tunnel) = {
             let mut guard = lock(&inner.session);
             match guard.as_mut() {
@@ -2559,6 +2622,161 @@ fn stop_carriers(app: &AppHandle) {
 /// which holds `inner` and not the supervisor. Everything it reports comes from
 /// a single lock: taken separately, the listener and the gateway could be read
 /// from two different moments, and under a reconnect they were.
+/// Brings one hop up and waits until it is carrying traffic.
+///
+/// `upstream` is the previous hop's listener, or `None` for the first. Each
+/// carrier is told about it in its own way -- Psiphon's `UpstreamProxyURL`,
+/// Tor's `Socks5Proxy`, Aether's `AETHER_UPSTREAM` -- and all three were
+/// measured honouring it. See `CARRIER-CHAINING.md`.
+fn start_hop(
+    app: &AppHandle,
+    inner: &Arc<SupervisorInner>,
+    profile: &CoreProfile,
+    kind: CarrierKind,
+    upstream: Option<SocketAddr>,
+    generation: u64,
+) -> Result<Carrier, String> {
+    match kind {
+        CarrierKind::Psiphon => {
+            let psiphon = app.state::<crate::psiphon::Psiphon>();
+            psiphon.start(app, &profile.psiphon, upstream)?;
+            psiphon
+                .carrier()
+                .ok_or_else(|| "Psiphon reported a listener and then stopped carrying".into())
+        }
+        CarrierKind::Tor => {
+            let tor = app.state::<crate::tor::Tor>();
+            tor.start(app, &profile.tor, upstream)?;
+            tor.carrier()
+                .ok_or_else(|| "Tor reported a listener and then stopped carrying".into())
+        }
+        CarrierKind::Aether => start_aether_hop(app, inner, profile, upstream, generation),
+    }
+}
+
+/// How long to wait for the engine to come up as one hop of a chain.
+///
+/// Its own `startup_secs` governs the scan; this bounds the whole thing so a
+/// chain reports failure rather than sitting on "connecting" forever.
+const AETHER_HOP_TIMEOUT: Duration = Duration::from_secs(150);
+
+/// The engine as one hop, brought up and waited for.
+///
+/// Not the engine path: that one owns the session, retries on a widening
+/// backoff and alternates transports. Here it is a hop, and the chain owns
+/// recovery -- so `launch` runs unsupervised and this blocks until the log says
+/// the listener is up.
+fn start_aether_hop(
+    app: &AppHandle,
+    inner: &Arc<SupervisorInner>,
+    profile: &CoreProfile,
+    upstream: Option<SocketAddr>,
+    generation: u64,
+) -> Result<Carrier, String> {
+    let mut hop = profile.clone();
+    if let Some(address) = upstream {
+        // The user's own upstream proxy wins, and a chain alongside one is
+        // refused rather than silently overwriting it. Quietly replacing a
+        // proxy someone configured deliberately sends their traffic somewhere
+        // they did not choose. See finding 8 in `CARRIER-CHAINING.md`.
+        if non_empty(Some(profile.upstream_proxy.as_str())).is_some() {
+            return Err(
+                "this profile already dials through a proxy of your own, so Aether cannot also \
+                 be chained behind another carrier. Clear \"Dial through a local proxy\" under \
+                 Routes and transports, or put Aether first in the chain."
+                    .into(),
+            );
+        }
+        hop.upstream_proxy = format!("socks5://{address}");
+        // Measured: the engine never resolves Cloudflare's API by name, it
+        // dials raw edge addresses with a spoofed SNI so DNS cannot be
+        // blocked -- and that fails through a SOCKS proxy. Registration
+        // therefore cannot happen from inside a chain, though an identity that
+        // already exists works completely. Said before the attempt, because
+        // the engine's own error names a registration failure and nothing the
+        // person can act on. See finding 1 in `CARRIER-CHAINING.md`.
+        if !aether_identity_exists(app) {
+            return Err(
+                "Aether has not registered a device yet, and it cannot register from inside \
+                 another carrier. Connect with Aether on its own once, then chain it."
+                    .into(),
+            );
+        }
+    }
+
+    launch(app, inner, &hop, 0, generation, false)?;
+
+    let deadline = Instant::now() + AETHER_HOP_TIMEOUT;
+    while Instant::now() < deadline {
+        if !inner.is_current(generation) {
+            return Err("the connection was stopped while it was starting".into());
+        }
+        if let Some(carrier) = current_carrier(app, inner) {
+            return Ok(carrier);
+        }
+        // A core that died before connecting leaves no child; noticing turns a
+        // wait into a message.
+        if lock(&inner.child).is_none() {
+            let reported = lock(&inner.snapshot).last_error.clone();
+            return Err(reported.unwrap_or_else(|| "Aether stopped before it connected".into()));
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "Aether did not connect in {}s",
+        AETHER_HOP_TIMEOUT.as_secs()
+    ))
+}
+
+/// Whether the engine already has a device identity on disk.
+///
+/// Registration cannot happen from inside a chain, so an Aether hop behind
+/// another carrier needs one that already exists.
+fn aether_identity_exists(app: &AppHandle) -> bool {
+    let Ok(config_dir) = app.path().app_config_dir() else {
+        return false;
+    };
+    let identity = config_dir.join("identity");
+    // The engine derives its own file names from the `--config` path it is
+    // given, so this looks for any of them rather than one exact name.
+    std::fs::read_dir(identity).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("aether") && name.ends_with(".toml"))
+        })
+    })
+}
+
+/// Where a hop says its traffic leaves from, when it knows.
+///
+/// Only Psiphon does: it reports the connected server's country. Tor's relay
+/// changes per circuit and Aether's gateway is an address rather than a place,
+/// so neither claims one here -- a guess in front of someone who would act on
+/// it is worse than saying nothing.
+fn hop_exit_region(app: &AppHandle, kind: CarrierKind) -> Option<String> {
+    match kind {
+        CarrierKind::Psiphon => app.state::<crate::psiphon::Psiphon>().snapshot().exit_region,
+        CarrierKind::Tor | CarrierKind::Aether => None,
+    }
+}
+
+/// The chain that is carrying traffic, or `None` when nothing is.
+///
+/// Reads what the start path recorded rather than re-deriving it. A chain built
+/// hop by hop cannot be reconstructed from the snapshot afterwards -- the
+/// snapshot has one listener and one gateway, so the second hop's arrival
+/// erases the first's.
+fn current_chain(app: &AppHandle, inner: &SupervisorInner) -> Option<RunningChain> {
+    if let Some(chain) = lock(&inner.chain).clone() {
+        return Some(chain);
+    }
+    // No recorded chain: the engine on its own, whose state lives in the
+    // snapshot because its supervisor writes it there as the log arrives.
+    current_carrier(app, inner).map(RunningChain::single)
+}
+
 fn current_carrier(app: &AppHandle, inner: &SupervisorInner) -> Option<Carrier> {
     // Whose listener this is depends on what the session chose. Reading the
     // engine's snapshot regardless is what would put `aether` in a config that
