@@ -306,6 +306,22 @@ impl RunningChain {
         self.hops.iter().all(|hop| hop.carries_quic)
     }
 
+    /// The hop whose datagram limit a person has to be told about.
+    ///
+    /// The first hop that cannot carry a QUIC handshake, because that is the
+    /// one the remedy has to address -- and the last hop's kind when every hop
+    /// can, so there is always something to name. Keyed on the last hop, the
+    /// advice for `Psiphon -> Aether` read "switch the protocol to WireGuard",
+    /// which is Aether's remedy for Aether's 28-byte shortfall and does
+    /// nothing whatever about Psiphon refusing datagrams in front of it.
+    pub fn datagram_blocker(&self) -> CarrierKind {
+        self.hops
+            .iter()
+            .find(|hop| !hop.carries_quic)
+            .unwrap_or_else(|| self.last())
+            .kind
+    }
+
     /// The gateway to exempt from the TUN device by address.
     ///
     /// The **first** hop's, because it is the only one with a gateway on the
@@ -318,6 +334,28 @@ impl RunningChain {
     /// Whether this is more than one hop, for the lines a person reads.
     pub fn is_chained(&self) -> bool {
         self.hops.len() > 1
+    }
+
+    /// Whether mihomo has to run for this chain to behave correctly.
+    ///
+    /// The single answer to a question that used to be asked in two places and
+    /// answered differently in each -- once in the renderer's
+    /// `has_something_to_do` and once in the supervisor's `engine_is_wanted`.
+    /// Both keyed it on the last hop, and both were wrong for the same reason.
+    ///
+    /// A carrier that is not Aether needs mihomo because mihomo owns the
+    /// interface and routes it into whichever listener is up. *Any* chain of
+    /// two hops needs it as well, whatever it ends at, because a chain carries
+    /// only what its weakest hop carries and mihomo is the only thing that can
+    /// enforce that. `Psiphon -> Aether` ends at a listener that accepts
+    /// `UDP ASSOCIATE` quite happily and the datagrams then have to cross
+    /// Psiphon, which refuses them -- so without mihomo they are accepted and
+    /// die in the middle of the chain instead of being refused at the edge.
+    ///
+    /// Only a lone Aether can do without it: one hop, datagrams and all, whose
+    /// own listener is directly usable.
+    pub fn needs_routing_engine(&self) -> bool {
+        self.is_chained() || self.last().kind != CarrierKind::Aether
     }
 }
 
@@ -432,6 +470,61 @@ mod tests {
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.contains(&CarrierKind::Aether.process_name()), "{names:?}");
         assert!(names.contains(&CarrierKind::Tor.process_name()), "{names:?}");
+    }
+
+    #[test]
+    fn the_hop_that_blocks_datagrams_is_the_one_named_in_the_advice() {
+        // `Psiphon -> Aether` was told to "switch the protocol to WireGuard",
+        // which is Aether's remedy for Aether's 28-byte shortfall and does
+        // nothing about Psiphon refusing datagrams in front of it. The hop to
+        // name is the first that cannot carry a handshake, not the last.
+        let psiphon_then_aether = RunningChain::pair(
+            hop(CarrierKind::Psiphon, 1080, None, false),
+            hop(CarrierKind::Aether, 1819, None, true),
+        );
+        assert_eq!(psiphon_then_aether.datagram_blocker(), CarrierKind::Psiphon);
+
+        // And when the engine itself is the obstacle -- MASQUE fits datagrams
+        // but not a QUIC handshake -- it is named, because it is the hop whose
+        // transport can actually be changed.
+        let masque_alone = RunningChain::single(hop(CarrierKind::Aether, 1819, None, false));
+        assert_eq!(masque_alone.datagram_blocker(), CarrierKind::Aether);
+
+        // Nothing blocking: the exit is named, so there is always a subject.
+        let wireguard_alone = RunningChain::single(hop(CarrierKind::Aether, 1819, None, true));
+        assert_eq!(wireguard_alone.datagram_blocker(), CarrierKind::Aether);
+    }
+
+    #[test]
+    fn only_a_lone_aether_can_do_without_the_routing_engine() {
+        // The whole of the rule, in the units the callers ask in.
+        let kinds = [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor];
+        for first in kinds {
+            for second in kinds {
+                if first == second {
+                    continue;
+                }
+                assert!(
+                    RunningChain::pair(
+                        hop(first, 1080, None, true),
+                        hop(second, 1819, None, true),
+                    )
+                    .needs_routing_engine(),
+                    "{first:?} -> {second:?}: only mihomo can enforce the weakest hop"
+                );
+            }
+        }
+        for kind in [CarrierKind::Psiphon, CarrierKind::Tor] {
+            assert!(
+                RunningChain::single(hop(kind, 1080, None, false)).needs_routing_engine(),
+                "{kind:?} alone is routed into by mihomo, so it needs it"
+            );
+        }
+        assert!(
+            !RunningChain::single(hop(CarrierKind::Aether, 1819, None, true))
+                .needs_routing_engine(),
+            "a lone Aether hands out a directly usable listener"
+        );
     }
 
     #[test]

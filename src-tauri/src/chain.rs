@@ -141,22 +141,17 @@ impl ChainRequest<'_> {
 
     /// Whether mihomo has any reason to run at all.
     ///
-    /// Three of them, and it used to know only two. A carrier that is not
-    /// Aether needs the engine running even with no second hop and no device:
-    /// the whole arrangement is that mihomo owns the interface and routes it
-    /// into whichever carrier is up, so refusing to start without an exit chain
-    /// would leave Psiphon or Tor connected and carrying nothing.
-    /// The last hop decides this, not the chain's length. A chain ending at
-    /// Aether hands out a listener applications can use directly, exactly as a
-    /// lone Aether does -- so it needs no more help from mihomo than that case
-    /// does, whatever is carrying it underneath.
+    /// The carrier half of this is [`RunningChain::needs_routing_engine`], and
+    /// deliberately not restated here: this rule and the supervisor's used to
+    /// be two copies keyed on the last hop, and they disagreed the moment a
+    /// chain ended at Aether.
     fn has_something_to_do(&self) -> bool {
         self.wants_exit_chain()
             || self.tun
             || self
                 .carriers
                 .as_ref()
-                .is_some_and(|chain| chain.last().kind != CarrierKind::Aether)
+                .is_some_and(RunningChain::needs_routing_engine)
     }
 }
 
@@ -177,7 +172,11 @@ pub struct Running {
     /// up on can change under a chain that keeps running -- which is why
     /// `carries_quic` is still asked of the supervisor on every call rather
     /// than snapshotted alongside this.
-    carrier: Option<CarrierKind>,
+    /// The hop whose datagram limit the "this protocol cannot work" advice
+    /// has to describe -- see [`RunningChain::datagram_blocker`]. Not simply
+    /// "which carrier this is": under a chain those are different hops, and
+    /// naming the wrong one hands out a remedy that cannot work.
+    datagram_blocker: Option<CarrierKind>,
     /// The chain directory, so the node list can read back what the
     /// subscriptions actually contained. mihomo's API reports a protocol and a
     /// name and nothing about REALITY, and REALITY is the one thing this
@@ -245,8 +244,9 @@ impl Chain {
                 return Err("connect first, or turn off \"dial nodes through the tunnel\"".into());
             }
         } else if !request.has_something_to_do() {
-            // No second hop wanted, no device to hold up, and Aether needs no
-            // help routing its own listener.
+            // No second hop wanted, no device to hold up, and a lone Aether
+            // needs no help routing its own listener. A *chained* Aether does
+            // -- see `has_something_to_do`.
             return Err("the chain has nothing to carry".into());
         }
         // Full tunnel forwards everything to the carrier's listener, so without
@@ -391,7 +391,7 @@ impl Chain {
             api: api_address,
             secret,
             through_tunnel: settings.through_tunnel,
-            carrier: carriers.map(|chain| chain.last().kind),
+            datagram_blocker: carriers.map(RunningChain::datagram_blocker),
             home: home.clone(),
         });
         Ok(mixed_address)
@@ -414,7 +414,7 @@ impl Chain {
             let guard = self.running.lock().map_err(|_| "the chain lock is poisoned")?;
             match guard.as_ref() {
                 Some(running) => {
-                    (running.through_tunnel, running.carrier, Some(running.home.clone()))
+                    (running.through_tunnel, running.datagram_blocker, Some(running.home.clone()))
                 }
                 None => (false, None, None),
             }

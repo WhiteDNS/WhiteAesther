@@ -131,12 +131,14 @@ async fn fetch_bridges(
 /// Every node the chain knows about, with the delay each last recorded.
 #[tauri::command]
 async fn chain_nodes(
+    app: AppHandle,
     chain: tauri::State<'_, Chain>,
     supervisor: tauri::State<'_, CoreSupervisor>,
 ) -> Result<Vec<chain::ChainNode>, String> {
-    // Which transport came up decides whether a QUIC node behind the tunnel can
-    // work at all, and only the supervisor knows that.
-    chain.nodes(supervisor.carries_quic())
+    // Whether a QUIC node behind the tunnel can work at all is a property of
+    // the whole chain, not of one transport: one hop that refuses datagrams
+    // settles it for every hop behind it.
+    chain.nodes(supervisor.carries_quic(&app))
 }
 
 /// Measures one node through the tunnel.

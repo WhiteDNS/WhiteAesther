@@ -561,7 +561,20 @@ fn render_torrc(
         config.push_str(&format!("Socks5Proxy {address}\n"));
     }
 
-    if settings.bridges != BridgeMode::None {
+    // Bridges exist to reach tor where tor itself is blocked. Behind another
+    // carrier that question is already answered -- the hop in front is what got
+    // us out -- so a chained tor takes the direct relays and leaves the
+    // transports alone.
+    //
+    // This is also the one combination `CARRIER-CHAINING.md` forbids shipping
+    // on the strength of a config check (finding 7): tor accepts `Socks5Proxy`
+    // and `ClientTransportPlugin` together, but whether lyrebird then dials its
+    // bridge *through* that proxy was never observed, and a pluggable transport
+    // that ignores it would reach for the bridge directly -- the one address on
+    // a censored network that must not be dialled in the clear. Not shipped
+    // unproven, and not refused either: dropped, because it has nothing to do.
+    let bridges_wanted = settings.bridges != BridgeMode::None && upstream.is_none();
+    if bridges_wanted {
         let lyrebird = support.join(LYREBIRD_FILENAME);
         if !lyrebird.is_file() {
             return Err("the pluggable transports are missing from this installation".into());
@@ -939,6 +952,36 @@ mod tests {
         assert!(config.contains("CookieAuthFile \""), "{config}");
 
         let _ = std::fs::remove_dir_all(&support);
+    }
+
+    #[test]
+    fn a_chained_tor_takes_the_direct_relays_and_no_transports() {
+        // The one combination `CARRIER-CHAINING.md` forbids shipping on a
+        // config check alone (finding 7). Bridges exist to reach tor where tor
+        // is blocked; behind another carrier the hop in front already answered
+        // that, so there is nothing for a transport to do -- and whether
+        // lyrebird would dial its bridge *through* the proxy or reach for it
+        // directly was never observed. Dropped rather than risked: reaching for
+        // a bridge address in the clear is the one thing this must not do.
+        //
+        // No lyrebird is staged in this test, so a chained tor that still
+        // wanted bridges would fail outright here rather than render.
+        let chained = render_torrc(
+            &TorSettings { bridges: BridgeMode::BuiltIn, ..TorSettings::default() },
+            Path::new("/tmp/tor"),
+            Path::new("/tmp/support-absent"),
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+            Some("127.0.0.1:64347".parse().unwrap()),
+        )
+        .expect("a chained tor renders without needing the transports");
+        assert!(chained.contains("
+Socks5Proxy 127.0.0.1:64347
+"), "{chained}");
+        assert!(!chained.contains("UseBridges"), "{chained}");
+        assert!(!chained.contains("ClientTransportPlugin"), "{chained}");
+        assert!(!chained.contains("
+Bridge "), "{chained}");
     }
 
     #[test]

@@ -161,6 +161,44 @@ exit each ordering produces; `PORT-CARRIERS.md` already records what happens whe
 it does not — an Android screen that said traffic left from Cloudflare while
 Psiphon carried it out of Singapore.
 
+### 10. The last hop was standing in for the whole chain — measured
+
+Written after the first end-to-end run of a real pair, which found seven faults
+with one cause. Every question that is properly about *the chain* was being
+asked of its **last hop**, because before chaining there was only ever one hop
+and the two were the same thing.
+
+| Asked of the last hop | What it broke |
+| --- | --- |
+| `current_carrier`, polled by the Aether hop | `Aether → X` never got past hop 1: the poll waited the full 30s hop timeout for the *second* hop's listener, which does not exist yet because it is started through the first. Two of six orderings, dead. |
+| `has_something_to_do` | mihomo refused to start for `X → Aether` — "the chain has nothing to carry". Two more orderings, dead. |
+| `engine_is_wanted` | Toggling the exit chain on a live `X → Aether` stopped the routing engine, and with it the only thing enforcing that the chain carries no datagrams. |
+| `spawn_carrier_watch` | Returned outright when the last hop was Aether, so `X → Aether` had no watcher at all; in the others, hop 1 dying went unnoticed while the screen read connected. |
+| `Running.carrier`, for the QUIC advice | `Psiphon → Aether` was told to "switch the protocol to WireGuard" — Aether's remedy for Aether's shortfall, useless against Psiphon refusing datagrams in front of it. |
+| `carries_quic()` | Read the snapshot's `transport`, which holds a proxy name under a carrier and so matched neither MASQUE transport: **every** chain reported itself as carrying QUIC, including ones whose first hop refuses datagrams outright. |
+
+Two further faults were teardown rather than capability:
+
+- `stop_carriers` knows only the two carriers that are separate programs, so the
+  error paths left a chained Aether running. Measured: after one failed
+  `Psiphon → Aether`, the engine lost its upstream, began hunting for a
+  Cloudflare gateway **directly**, and was still sweeping two minutes later with
+  the screen reading Stopped. On a network that filters, that is the one thing
+  this must never do.
+- `carrier_died` stopped mihomo and the door but left the surviving hops up.
+
+And one that was honest before chaining and is not now: the snapshot's
+`socks_address` kept the last hop's own port while mihomo owned the route, so
+"This app only" named a listener that bypasses mihomo — and with it the datagram
+rejection and the Iranian-sites bypass that only mihomo applies.
+
+The remedy is structural, not seven patches: the rules live on `RunningChain`,
+which is the only type that can see every hop, and the call sites ask it rather
+than re-deriving. `needs_routing_engine`, `carries_udp`, `carries_quic`,
+`datagram_blocker` and `process_names` are that surface. Where a caller
+genuinely means the engine and not the exit — the Aether hop's own readiness
+poll — it says so by name: `aether_carrier`, never `current_carrier`.
+
 ## The types
 
 ```rust
