@@ -640,7 +640,7 @@ function CarrierPanel({
     setSearchFailure(null);
     cancelled.current = false;
     const order = searchOrder(available);
-    setAttempts(order.map((candidate) => ({ chain: candidate, outcome: "skipped" })));
+    setAttempts(order.map((candidate) => ({ chain: candidate, outcome: "pending" })));
 
     // Whatever is up now is in the way: the supervisor refuses a second
     // connection while one is claimed.
@@ -851,12 +851,14 @@ function CarrierPanel({
             {attempts.map((entry) => {
               const name = carrierChainLabel(entry.chain, (kind) => t(CARRIER_NAME[kind]));
               const mark = {
+                pending: "·",
                 trying: "…",
                 connected: "✓",
                 failed: "✕",
                 skipped: "–",
               }[entry.outcome];
               const tone = {
+                pending: "text-muted-foreground/60",
                 trying: "text-foreground",
                 connected: "text-primary font-medium",
                 failed: "text-muted-foreground",

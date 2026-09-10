@@ -64,10 +64,16 @@ export function searchOrder(available: CarrierKind[] | null): CarrierChain[] {
  */
 export const ATTEMPT_CAP_MS = 90_000;
 
-/** What happened to one attempt, for the list the user watches. */
+/** What happened to one attempt, for the list the user watches.
+ *
+ * "pending" and "skipped" are different facts and are shown differently:
+ * the first is "not reached yet", the second is "reached and refused as
+ * impossible here". Collapsing them would make a search that stopped early
+ * look like one that ruled everything out.
+ */
 export interface SearchAttempt {
   chain: CarrierChain;
-  outcome: "trying" | "connected" | "failed" | "skipped";
+  outcome: "pending" | "trying" | "connected" | "failed" | "skipped";
   /** The backend's own words, when it refused or failed. */
   detail?: string;
 }
