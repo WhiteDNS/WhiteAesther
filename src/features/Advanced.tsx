@@ -32,7 +32,7 @@ import { transportName } from "./Simple";
 // that. The same text is installed beside the executable under licences/.
 import notices from "../../THIRD_PARTY_NOTICES.md?raw";
 import {
-  ENDPOINT_MODES, carrierChainHas, isLoneAether, type CarrierKind,
+  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, isLoneAether, type CarrierKind,
   type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
 } from "@/types";
 
@@ -372,6 +372,69 @@ const CARRIERS: Array<{ id: CarrierKind; label: string; detail: string }> = [
   },
 ];
 
+const CARRIER_NAME: Record<CarrierKind, string> = {
+  aether: "Aether",
+  psiphon: "Psiphon",
+  tor: "Tor",
+};
+
+/**
+ * What each carrier means in the second position, where it decides the exit.
+ *
+ * Different text from the first position on purpose: the same carrier answers a
+ * different question there, and Aether in particular carries a condition that
+ * only applies when it is second.
+ */
+const AS_EXIT: Record<CarrierKind, string> = {
+  aether: "Needs an Aether identity already on this machine — it cannot register a new one through another carrier.",
+  psiphon: "Can be pinned to a country below. Slower to connect.",
+  tor: "A Tor exit relay, in a country nobody here chooses. No UDP.",
+};
+
+/** Where the traffic comes out, given the hop that ends the chain. */
+const EXIT_NOTE: Record<CarrierKind, string> = {
+  aether: "Comes out on Cloudflare's network, close to you. This does not change your country.",
+  psiphon: "Comes out wherever Psiphon has capacity, and can be pinned to a country below.",
+  tor: "Comes out at a Tor exit relay.",
+};
+
+/**
+ * Whether a carrier passes datagrams.
+ *
+ * Measured rather than assumed — Psiphon answers a SOCKS5 UDP ASSOCIATE with
+ * "command not supported", which is why it reads false here despite having
+ * shipped as true once. A chain carries UDP only if every hop does.
+ */
+const CARRIES_UDP: Record<CarrierKind, boolean> = { aether: true, psiphon: false, tor: false };
+
+/** One choice in either hop picker. */
+function CarrierButton({
+  label,
+  detail,
+  on,
+  onClick,
+}: {
+  label: string;
+  detail: string;
+  on: boolean;
+  onClick: () => void;
+}) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      onClick={onClick}
+      className={`rounded-lg border p-3 text-left transition ${
+        on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
+      }`}
+    >
+      <div className="text-[13.5px] font-medium">{t(label)}</div>
+      <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">{t(detail)}</div>
+    </button>
+  );
+}
+
 /**
  * Where Tor's bridges come from.
  *
@@ -395,8 +458,21 @@ function TorPanel({
   profile,
   onChange,
 }: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile["tor"]>) =>
     onChange({ ...profile, tor: { ...profile.tor, ...patch } });
+
+  // Bridges reach Tor where Tor is blocked. As the second hop that question is
+  // already answered by the carrier in front, so the backend renders a torrc
+  // with no transports at all -- and controls that quietly do nothing are worse
+  // than controls that are not there.
+  if (profile.carriers.second === "tor") {
+    return (
+      <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+        {t("Bridges are not used when Tor is the second hop: the carrier in front is what got out of this network, so Tor takes the direct relays.")}
+      </p>
+    );
+  }
 
   return (
     <>
@@ -529,6 +605,11 @@ function CarrierPanel({
   // because someone may have clicked it already.
   const [available, setAvailable] = useState<CarrierKind[] | null>(null);
 
+  const chain = profile.carriers;
+  const offered = CARRIERS.filter((option) => !available || available.includes(option.id));
+  // Weakest link: a chain passes datagrams only if every hop does.
+  const carriesUdp = CARRIES_UDP[chain.first] && (chain.second === null || CARRIES_UDP[chain.second]);
+
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     let cancelled = false;
@@ -583,30 +664,71 @@ function CarrierPanel({
       <CardHeader className="pb-3">
         <CardTitle className="text-[15px]">{t("Way out")}</CardTitle>
         <CardDescription>
-          {t("What carries your traffic off this network. Everything below applies to Aether only.")}
+          {t("What carries your traffic off this network. Add a second hop to change where it comes out.")}
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
+        <p className="pb-2 text-[12.5px] font-medium">{t("Leaves this network through")}</p>
         <div className="grid grid-cols-2 gap-2.5">
-          {CARRIERS.filter((option) => !available || available.includes(option.id)).map((option) => {
-            const on = profile.carriers.first === option.id;
-            return (
-              <button
+          {offered.map((option) => (
+            <CarrierButton
+              key={option.id}
+              label={option.label}
+              detail={option.detail}
+              on={chain.first === option.id}
+              // Keep the second hop across a change of the first unless that
+              // would chain a carrier to itself, which reaches the same
+              // network through itself for twice the delay.
+              onClick={() =>
+                set({
+                  carriers: { first: option.id, second: chain.second === option.id ? null : chain.second },
+                })
+              }
+            />
+          ))}
+        </div>
+
+        <p className="pb-2 pt-4 text-[12.5px] font-medium">{t("Then out through")}</p>
+        <div className="grid grid-cols-2 gap-2.5">
+          <CarrierButton
+            label="Nothing further"
+            detail="One hop. Traffic comes out wherever the carrier above puts it."
+            on={chain.second === null}
+            onClick={() => set({ carriers: { first: chain.first, second: null } })}
+          />
+          {offered
+            .filter((option) => option.id !== chain.first)
+            .map((option) => (
+              <CarrierButton
                 key={option.id}
-                type="button"
-                aria-pressed={on}
-                onClick={() => set({ carriers: { first: option.id, second: null } })}
-                className={`rounded-lg border p-3 text-left transition ${
-                  on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
-                }`}
-              >
-                <div className="text-[13.5px] font-medium">{t(option.label)}</div>
-                <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">
-                  {t(option.detail)}
-                </div>
-              </button>
-            );
-          })}
+                label={option.label}
+                detail={AS_EXIT[option.id]}
+                on={chain.second === option.id}
+                onClick={() => set({ carriers: { first: chain.first, second: option.id } })}
+              />
+            ))}
+        </div>
+
+        {/* The chain said back, in the order traffic travels, with what this
+            particular ordering does and does not get you. Two orderings look
+            alike in the pickers and differ entirely here. */}
+        <div className="mt-4 rounded-lg border border-border bg-muted/40 p-3">
+          <div className="text-[13.5px] font-medium">
+            {carrierChainLabel(chain, (kind) => t(CARRIER_NAME[kind]))}
+          </div>
+          <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">
+            {t(EXIT_NOTE[carrierChainLast(chain)])}
+          </div>
+          {chain.second === "aether" ? (
+            <div className="mt-1.5 text-[12.5px] leading-snug text-amber-600 dark:text-amber-500">
+              {t("Aether cannot register a new device through another carrier, so this ordering only works if Aether has connected on this machine before. It also comes out near you rather than abroad.")}
+            </div>
+          ) : null}
+          {chain.second && !carriesUdp ? (
+            <div className="mt-1.5 text-[12.5px] leading-snug text-muted-foreground">
+              {t("No UDP through this chain: QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.")}
+            </div>
+          ) : null}
         </div>
 
         {carrierChainHas(profile.carriers, "psiphon") ? (
