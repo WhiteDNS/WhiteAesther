@@ -88,9 +88,16 @@ capacity. Ours are therefore indistinguishable from every other unattributed cli
 `psiphon_server_entries.txt` is the embedded list tunnel-core bootstraps from — one hex-encoded
 server entry per line. Psiphon publishes it only inside their own clients, so it is fetched from a
 third-party mirror (`mbm110/MSN-GUARD`) pinned to a revision and verified against a SHA-256 before
-it is staged. That is safe in a way it would not be for a binary: every entry is signed and verified
-by tunnel-core itself, so a substituted file costs a slow first connect rather than trust. Psiphon
-replaces the list from inside the tunnel once a connection is up.
+it is staged. The digest guarantees the file cannot change under us; it does not guarantee the
+entries are Psiphon's.
+
+An earlier version of this notice said every entry is signed and verified by tunnel-core. That holds
+only when the client is configured with Psiphon's `ServerEntrySignaturePublicKey`, and ours is not:
+Psiphon does not publish that key outside its own clients, and tunnel-core's default is empty.
+Without it tunnel-core skips verification of stored entries (`psiphon/dataStore.go`), so the list is
+trusted as far as the mirror and the pinned revision are and no further. For the same reason the
+list is never refreshed: the in-tunnel discovery that would replace it rejects every entry it
+receives with "missing public key".
 
 ## Tor, and the lyrebird pluggable transport
 
