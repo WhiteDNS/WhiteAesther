@@ -39,6 +39,7 @@ jobs:
     outputs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
+      prerelease: ${{ steps.decide.outputs.prerelease }}
       reuse: ${{ steps.decide.outputs.reuse }}
     steps:
       - uses: actions/checkout@v7
@@ -57,6 +58,14 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+          # Set per release in package.json, beside the version it describes.
+          # A pre-release keeps a plain version number: a semver suffix such as
+          # "-beta.1" is the usual way to say it, but the bundle targets are
+          # "all", which includes the Windows MSI, and the MSI takes numeric
+          # versions only.
+          prerelease="$(node -p "require('./package.json').prerelease === true")"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
           publish=false
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -99,7 +108,7 @@ jobs:
             fi
           fi
           echo "reuse=${reuse}" >> "$GITHUB_OUTPUT"
-          echo "version ${version}, publish ${publish}, reuse ${reuse:-none}"
+          echo "version ${version}, prerelease ${prerelease}, publish ${publish}, reuse ${reuse:-none}"
 
   package:
     name: ${{ matrix.name }}
@@ -440,10 +449,20 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/* --clobber
           else
+            # A pre-release is published and downloadable, but GitHub leaves it
+            # out of `releases/latest` -- which is what the in-app update check
+            # reads -- so nobody on a stable build is offered it. Promoting it
+            # later is `gh release edit <tag> --prerelease=false --latest`, with
+            # nothing rebuilt.
+            flags=()
+            if [[ "${{ needs.gate.outputs.prerelease }}" == "true" ]]; then
+              flags+=(--prerelease)
+            fi
             gh release create "$tag" release-assets/* \
               --target "${GITHUB_SHA}" \
               --generate-notes \
-              --title "WhiteAesther $tag"
+              --title "WhiteAesther $tag" \
+              ${flags[@]+"${flags[@]}"}
           fi
           echo "Released $tag from ${GITHUB_SHA}"
           gh release view "$tag" --json url --jq .url
