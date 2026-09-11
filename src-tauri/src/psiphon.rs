@@ -52,16 +52,24 @@ use crate::core_supervisor::CoreSupervisor;
 /// How long to wait for a tunnel before calling it a failure.
 ///
 /// Matches `EstablishTunnelTimeoutSeconds` in the config, plus a margin for the
-/// process to start and for the notice to reach us. Bounded on purpose:
-/// tunnel-core's own default is unlimited, and an unlimited establish is a
-/// carrier that never reports failure -- the screen would say "connecting"
-/// until the app was closed.
-const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(135);
+/// process to start and for the notice to reach us.
+const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(315);
 
-/// What the config asks tunnel-core for. Kept just under [`ESTABLISH_TIMEOUT`]
-/// so the process gives up first and says why, rather than being killed by us
-/// with nothing to report.
-const ESTABLISH_TUNNEL_TIMEOUT_SECONDS: u64 = 120;
+/// What the config asks tunnel-core for: its own default, 300 seconds.
+///
+/// This was 120, on the belief that tunnel-core's default was unlimited. It is
+/// not -- `EstablishTunnelTimeout` defaults to 300s in
+/// `psiphon/common/parameters` -- so we gave up at less than half the time
+/// Psiphon itself allows. That costs most on exactly the networks this carrier
+/// exists for: an in-proxy connection has to be matched with a volunteer proxy
+/// by a broker and set up over WebRTC before any tunnel exists, and users
+/// reported the official app connecting where ours had already quit.
+///
+/// Sent explicitly although it equals the default, so the value
+/// [`ESTABLISH_TIMEOUT`] is sized against is the value actually in force even
+/// if upstream moves its own. Kept just under it so the process gives up first
+/// and says why, rather than being killed by us with nothing to report.
+const ESTABLISH_TUNNEL_TIMEOUT_SECONDS: u64 = 300;
 
 /// Psiphon's documented values for a client that has not been issued its own.
 ///
@@ -578,6 +586,27 @@ fn render_config(
     home: &Path,
     upstream: Option<SocketAddr>,
 ) -> String {
+    // What is deliberately absent, and what its absence costs -- measured on
+    // 2026-09-10 against this exact config.
+    //
+    // No `ServerEntrySignaturePublicKey`. Psiphon publishes it only inside its
+    // own clients, and tunnel-core's default is empty. Without it:
+    //
+    //   - Every in-proxy dial fails in `MakeDialParameters`, before a packet is
+    //     sent: "missing public key", 10,116 times in a 70-second run with
+    //     in-proxy forced, zero dials, zero tunnels. 316 of the 430 bootstrap
+    //     servers offer in-proxy and none can be reached that way. In-proxy is
+    //     how Psiphon gets through where its direct protocols are blocked, so
+    //     this is the difference users report between the official app
+    //     connecting and this one not. The tactics that arrive *do* carry
+    //     broker specs; it is the key, not the IDs below, that closes it.
+    //   - The list is never refreshed: in-tunnel discovery rejects every entry
+    //     it receives for the same reason.
+    //   - The bootstrap list is used unverified: `dataStore.go` checks
+    //     signatures only when the key is set.
+    //
+    // No `RemoteServerListURLs` or their signing key either, for the same
+    // reason. What fixes all of it is Psiphon's own client configuration.
     let mut config = serde_json::json!({
         "PropagationChannelId": PROPAGATION_CHANNEL_ID,
         "SponsorId": SPONSOR_ID,
@@ -798,8 +827,8 @@ mod tests {
         assert_eq!(config["LocalSocksProxyPort"], 0);
         assert_eq!(config["DisableLocalHTTPProxy"], true);
         assert_eq!(config["EgressRegion"], "JP");
-        // Bounded, because tunnel-core's own default is unlimited -- and an
-        // unlimited establish is a carrier that never reports failure.
+        // Sent explicitly although it is tunnel-core's own default, so our own
+        // timer is sized against the value actually in force.
         assert_eq!(
             config["EstablishTunnelTimeoutSeconds"],
             ESTABLISH_TUNNEL_TIMEOUT_SECONDS
