@@ -88,6 +88,30 @@ const ESTABLISH_TUNNEL_TIMEOUT_SECONDS: u64 = 300;
 const PROPAGATION_CHANNEL_ID: &str = "FFFFFFFFFFFFFFFF";
 const SPONSOR_ID: &str = "1111111111111111";
 
+/// The key Psiphon signs its server entries with.
+///
+/// Without it tunnel-core cannot use in-proxy at all -- every in-proxy dial
+/// fails in `MakeDialParameters` on "missing public key" -- and in-tunnel
+/// discovery rejects every server it is sent. Measured with in-proxy forced:
+/// 0 dials and 10,116 failures without it; with it, 21 dials and a tunnel
+/// through a volunteer proxy in 33 seconds -- and in-tunnel discovery fetched
+/// fresh server entries in that same run, where without the key it had
+/// rejected every one, so the list refreshes itself again. In-proxy is how Psiphon gets
+/// through where its direct protocols are blocked, which is why users saw the
+/// official app connect where this one did not.
+///
+/// Psiphon ships it only inside its own clients, so it is the value used by the
+/// open-source clients that share our placeholder IDs -- Oblivion, MSN-GUARD
+/// and Aether_Desktop -- and it is *verified* rather than trusted: it validates
+/// the signature on all 430 entries of our bootstrap list, and two other keys
+/// from the same sources validate none. It is a verification key: it grants
+/// nothing and identifies no one. A rotation fails closed -- entries signed
+/// under a new key are rejected, not accepted -- and `scripts/stage-psiphon.mjs`
+/// re-checks the list against it every time it stages.
+///
+/// Kept in its own file so the app and that check read one copy of it.
+const SERVER_ENTRY_SIGNATURE_PUBLIC_KEY: &str = include_str!("psiphon_server_entry_signature_key.txt");
+
 #[cfg(windows)]
 const PSIPHON_FILENAME: &str = "psiphon-tunnel-core.exe";
 #[cfg(not(windows))]
@@ -586,30 +610,15 @@ fn render_config(
     home: &Path,
     upstream: Option<SocketAddr>,
 ) -> String {
-    // What is deliberately absent, and what its absence costs -- measured on
-    // 2026-09-10 against this exact config.
-    //
-    // No `ServerEntrySignaturePublicKey`. Psiphon publishes it only inside its
-    // own clients, and tunnel-core's default is empty. Without it:
-    //
-    //   - Every in-proxy dial fails in `MakeDialParameters`, before a packet is
-    //     sent: "missing public key", 10,116 times in a 70-second run with
-    //     in-proxy forced, zero dials, zero tunnels. 316 of the 430 bootstrap
-    //     servers offer in-proxy and none can be reached that way. In-proxy is
-    //     how Psiphon gets through where its direct protocols are blocked, so
-    //     this is the difference users report between the official app
-    //     connecting and this one not. The tactics that arrive *do* carry
-    //     broker specs; it is the key, not the IDs below, that closes it.
-    //   - The list is never refreshed: in-tunnel discovery rejects every entry
-    //     it receives for the same reason.
-    //   - The bootstrap list is used unverified: `dataStore.go` checks
-    //     signatures only when the key is set.
-    //
-    // No `RemoteServerListURLs` or their signing key either, for the same
-    // reason. What fixes all of it is Psiphon's own client configuration.
+    // Still absent: `RemoteServerListURLs` and their signing key. They have not
+    // been verified the way the signature key has, so they are left out rather
+    // than trusted -- and they are no longer what keeps the list fresh: with
+    // the signature key set, in-tunnel discovery does that once any tunnel is
+    // up. See `SERVER_ENTRY_SIGNATURE_PUBLIC_KEY`.
     let mut config = serde_json::json!({
         "PropagationChannelId": PROPAGATION_CHANNEL_ID,
         "SponsorId": SPONSOR_ID,
+        "ServerEntrySignaturePublicKey": SERVER_ENTRY_SIGNATURE_PUBLIC_KEY.trim(),
         // Our own version, as a string, which is what tunnel-core's sample says
         // and what it rejects the config for getting wrong. Reporting one of
         // Psiphon's own client versions would put our sessions in someone
@@ -834,6 +843,17 @@ mod tests {
             ESTABLISH_TUNNEL_TIMEOUT_SECONDS
         );
         assert_eq!(config["EmitDiagnosticNotices"], true);
+        // Without it in-proxy is dead and discovery rejects every server; see
+        // the constant for what that cost, measured.
+        assert_eq!(
+            config["ServerEntrySignaturePublicKey"],
+            SERVER_ENTRY_SIGNATURE_PUBLIC_KEY.trim()
+        );
+        assert_eq!(
+            SERVER_ENTRY_SIGNATURE_PUBLIC_KEY.trim().len(),
+            44,
+            "a base64 Ed25519 public key, with no stray whitespace from the file"
+        );
     }
 
     #[test]
