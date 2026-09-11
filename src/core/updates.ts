@@ -12,7 +12,13 @@
  * connecting is the expected case, not an error worth showing anyone.
  */
 
-/** Where releases are published. Read-only, unauthenticated. */
+/**
+ * Where releases are published. Read-only, unauthenticated.
+ *
+ * `releases/latest` never returns a GitHub pre-release, and that is the point
+ * rather than a gap: a pre-release is published for the people who go and get
+ * it, and nobody on a stable build is offered one until it is promoted.
+ */
 const LATEST_RELEASE = "https://api.github.com/repos/WhiteDNS/WhiteAesther/releases/latest";
 
 /** How long to wait before asking again. */
@@ -41,9 +47,10 @@ export function compareVersions(a: string, b: string): number {
     value
       .trim()
       .replace(/^v/i, "")
-      // A prerelease suffix is dropped rather than ranked. We do not publish
-      // them, and guessing an order for something we never ship would be a rule
-      // written from nothing.
+      // A prerelease suffix is dropped rather than ranked. We never put one in
+      // a version number -- a pre-release is marked on GitHub instead, and
+      // `releases/latest` never returns it -- so guessing an order for
+      // something we never ship would be a rule written from nothing.
       .split("-")[0]
       .split(".")
       .map((piece) => Number.parseInt(piece, 10));
