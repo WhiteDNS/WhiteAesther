@@ -91,13 +91,11 @@ third-party mirror (`mbm110/MSN-GUARD`) pinned to a revision and verified agains
 it is staged. The digest guarantees the file cannot change under us; it does not guarantee the
 entries are Psiphon's.
 
-An earlier version of this notice said every entry is signed and verified by tunnel-core. That holds
-only when the client is configured with Psiphon's `ServerEntrySignaturePublicKey`, and ours is not:
-Psiphon does not publish that key outside its own clients, and tunnel-core's default is empty.
-Without it tunnel-core skips verification of stored entries (`psiphon/dataStore.go`), so the list is
-trusted as far as the mirror and the pinned revision are and no further. For the same reason the
-list is never refreshed: the in-tunnel discovery that would replace it rejects every entry it
-receives with "missing public key".
+What guarantees the entries are Psiphon's is the signature on each one: tunnel-core verifies it
+against `ServerEntrySignaturePublicKey`, which WhiteAesther now configures. Psiphon ships that key
+only inside its own clients; ours is the value used by open-source clients with the same placeholder
+IDs (Oblivion, MSN-GUARD, Aether_Desktop), and it is checked rather than trusted: it validates all 430
+entries in this list, and `scripts/stage-psiphon.mjs` refuses to stage a list it does not validate.
 
 ## Tor, and the lyrebird pluggable transport
 

@@ -16,7 +16,7 @@
  */
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, chmod, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { dirname, join, resolve } from "node:path";
@@ -105,6 +105,7 @@ if (await isBuilt(destination)) {
 }
 
 await stageServerList();
+await verifyServerList();
 
 const size = (await stat(destination)).size;
 console.log(`Staged Psiphon ${REVISION} for ${target}`);
@@ -120,6 +121,63 @@ console.log(`  ${serverListDestination}`);
  * served with a 200, which tunnel-core would reject as a whole without saying
  * which line lost it.
  */
+/**
+ * Checks every entry in the staged list against the key the app ships with.
+ *
+ * The digest pin proves the file has not changed; it proves nothing about the
+ * entries. Their signatures do. A list that does not verify is either a rotated
+ * key -- every entry would then be rejected at runtime, and Psiphon would
+ * silently stop connecting -- or a list that is not Psiphon's, which is worse.
+ * Either way it must not ship, so this refuses rather than warns.
+ *
+ * Reads the same file the app compiles in, so the two cannot drift apart.
+ */
+async function verifyServerList() {
+  const keyPath =
+    option("--signature-key") ?? join(appRoot, "src-tauri", "src", "psiphon_server_entry_signature_key.txt");
+  // Verified once per list-and-key pair. Those two are what can change -- a
+  // new list, or a rotated key -- and neither changes between two ordinary
+  // builds, so checking every time would only make Go a requirement of every
+  // `desktop:dev` for nothing. CI stages from nothing, so it always checks.
+  const key = (await readFile(keyPath, "utf8")).trim();
+  const pair = `${await sha256(serverListDestination)} ${createHash("sha256").update(key).digest("hex")}`;
+  const marker = `${serverListDestination}.verified`;
+  if ((await readFile(marker, "utf8").catch(() => "")).trim() === pair) {
+    console.log("  server list already verified against this signature key");
+    return;
+  }
+  // Gone before the check rather than after it, so a failed or interrupted
+  // check can never leave a marker claiming this pair was verified.
+  await rm(marker, { force: true });
+  await ensureCheckout(checkout);
+  const dir = join(checkout, "zz_whiteaesther_verify");
+  await mkdir(dir, { recursive: true });
+  await copyFile(join(appRoot, "scripts", "psiphon-verify", "main.go"), join(dir, "main.go"));
+  // The host's own toolchain: this runs here, whatever the build target is.
+  const env = { ...process.env, CGO_ENABLED: "0" };
+  delete env.GOOS;
+  delete env.GOARCH;
+  try {
+    const out = execFileSync("go", ["run", "./zz_whiteaesther_verify", serverListDestination, keyPath], {
+      cwd: checkout,
+      encoding: "utf8",
+      env,
+    });
+    console.log(`  ${out.trim()}`);
+    await writeFile(marker, pair);
+  } catch (error) {
+    throw new Error(
+      `The Psiphon server list does not verify against the signature key the app ships with.
+` +
+        `Either Psiphon rotated the key or the list is not Psiphon's; refusing to stage it.
+` +
+        `${error.stdout ?? ""}${error.stderr ?? ""}`.trim(),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function stageServerList() {
   if (await matches(serverListDestination, SERVER_LIST.sha256)) {
     console.log("server list already present and matches the pin");
