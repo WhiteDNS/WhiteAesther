@@ -297,8 +297,33 @@ const FA: Record<string, string> = {
   // asks the question the screen actually answers instead of naming a concept
   // the user has no reason to hold.
   "Way out": "راه خروج",
-  "What carries your traffic off this network. Everything below applies to Aether only.":
-    "چه چیزی ترافیک شما را از این شبکه بیرون می‌برد. هر چه پایین‌تر است فقط به Aether مربوط می‌شود.",
+  "What carries your traffic off this network. Add a second hop to change where it comes out.":
+    "چه چیزی ترافیک شما را از این شبکه بیرون می‌برد. برای عوض کردن محل خروج، یک پرش دوم اضافه کنید.",
+  // The two pickers are one sentence broken in half, so the halves have to
+  // read as a sentence in Persian too rather than as two labels.
+  "Leaves this network through": "خروج از این شبکه با",
+  "Then out through": "و سپس خروج از",
+  "Nothing further": "هیچ‌چیز دیگر",
+  "One hop. Traffic comes out wherever the carrier above puts it.":
+    "یک پرش. ترافیک همان‌جایی بیرون می‌آید که کریر بالا می‌گذارد.",
+  // Reached through AS_EXIT and EXIT_NOTE rather than as literals, so the
+  // check that scans for literal t() arguments cannot see them. Translated
+  // here on purpose: without these lines the whole panel falls back to English.
+  "Needs an Aether identity already on this machine — it cannot register a new one through another carrier.":
+    "به یک شناسهٔ Aether که از قبل روی این دستگاه باشد نیاز دارد — نمی‌تواند از راه کریر دیگری شناسهٔ تازه ثبت کند.",
+  "Can be pinned to a country below. Slower to connect.":
+    "می‌توان کشورش را پایین ثابت کرد. کندتر وصل می‌شود.",
+  "A Tor exit relay, in a country nobody here chooses. No UDP.":
+    "یک بازپخش خروجی تور، در کشوری که هیچ‌کس اینجا انتخابش نمی‌کند. UDP ندارد.",
+  "Comes out on Cloudflare's network, close to you. This does not change your country.":
+    "روی شبکهٔ کلادفلر، نزدیک خودتان بیرون می‌آید. این کشور شما را عوض نمی‌کند.",
+  "Comes out wherever Psiphon has capacity, and can be pinned to a country below.":
+    "هرجا که سایفون ظرفیت داشته باشد بیرون می‌آید، و می‌توان کشورش را پایین ثابت کرد.",
+  "Comes out at a Tor exit relay.": "در یک بازپخش خروجی تور بیرون می‌آید.",
+  "Aether cannot register a new device through another carrier, so this ordering only works if Aether has connected on this machine before. It also comes out near you rather than abroad.":
+    "Aether نمی‌تواند از راه کریر دیگری دستگاه تازه ثبت کند؛ پس این ترتیب فقط وقتی کار می‌کند که Aether پیش‌تر روی این دستگاه وصل شده باشد. خروجش هم نزدیک خودتان است، نه خارج.",
+  "No UDP through this chain: QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.":
+    "این زنجیره UDP را عبور نمی‌دهد: QUIC و DNS ساده رد می‌شوند تا معلق نمانند. صفحه‌ها باز می‌شوند و نام‌ها هم ترجمه می‌شوند.",
   "Cloudflare's network. Fast, and exits near you — it does not change your country.":
     "شبکهٔ کلادفلر. سریع است و نزدیک خودتان خارج می‌شود — کشور شما را عوض نمی‌کند.",
   "Psiphon": "سایفون",
@@ -324,7 +349,21 @@ const FA: Record<string, string> = {
   "Tor": "تور",
   "Three relays. The strongest against being identified, and the slowest. No UDP.":
     "سه بازپخش. قوی‌ترین گزینه در برابر شناسایی، و کندترین. UDP ندارد.",
+  // -- the search that tries every way out ------------------------------
+  "Not sure which one works?": "نمی‌دانید کدام کار می‌کند؟",
+  "Find one that works": "یکی که کار می‌کند را پیدا کن",
+  "Stop searching": "توقف جستجو",
+  "Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.":
+    "هر راه خروج را به‌ترتیب امتحان می‌کند و اولی که ترافیک حمل کند نگه می‌دارد. اول تک‌ها، و جفت‌ها فقط اگر هیچ‌کدام بیرون نرفت.",
+  "Each one gets up to 90 seconds. Stopping takes effect after the current attempt.":
+    "به هرکدام تا ۹۰ ثانیه فرصت داده می‌شود. توقف بعد از تلاش فعلی اعمال می‌شود.",
+  "carrying traffic": "در حال حمل ترافیک",
+  "Nothing got out. Every way out was tried; the list above says how each one failed.":
+    "هیچ‌چیز بیرون نرفت. همهٔ راه‌های خروج امتحان شد؛ فهرست بالا می‌گوید هرکدام چطور شکست خورد.",
+
   "Bridges": "پل‌ها",
+  "Bridges are not used when Tor is the second hop: the carrier in front is what got out of this network, so Tor takes the direct relays.":
+    "وقتی تور هپ دوم است پل‌ها استفاده نمی‌شوند: کریر جلویی همان چیزی است که از این شبکه بیرون رفته، پس تور از بازپخش‌های مستقیم استفاده می‌کند.",
   "Only needed where Tor itself is blocked. Off is faster and works on an ordinary network.":
     "فقط جایی لازم است که خود تور مسدود باشد. خاموش سریع‌تر است و روی شبکهٔ معمولی کار می‌کند.",
   "Off": "خاموش",

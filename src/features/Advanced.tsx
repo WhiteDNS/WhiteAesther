@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/core/useT";
 import {
   Activity, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
@@ -22,7 +22,12 @@ import {
   saveReport,
   setLanShare,
   setPsiphonRegion,
+  startCore,
+  stopCore,
 } from "@/core/api";
+import {
+  ATTEMPT_CAP_MS, isImpossible, searchOrder, type SearchAttempt,
+} from "./carrierSearch";
 import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
 import { Chain } from "./Chain";
 import { Scanner } from "./Scanner";
@@ -32,7 +37,8 @@ import { transportName } from "./Simple";
 // that. The same text is installed beside the executable under licences/.
 import notices from "../../THIRD_PARTY_NOTICES.md?raw";
 import {
-  ENDPOINT_MODES, type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
+  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, isLoneAether, type CarrierKind,
+  type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
 } from "@/types";
 
 type SectionId =
@@ -103,7 +109,7 @@ const AETHER_ONLY_SECTIONS: SectionId[] = ["endpoint"];
 export function Advanced(props: AdvancedProps) {
   const t = useT();
   const [section, setSection] = useState<SectionId>("status");
-  const aetherOnly = props.profile.carrier === "aether";
+  const aetherOnly = isLoneAether(props.profile.carriers);
 
   // Someone who was reading Endpoint and then switched carrier would otherwise
   // be left looking at a section that is no longer in the list.
@@ -353,7 +359,7 @@ const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: Co
  * Tor is deliberately absent until it exists: an option that saves and does
  * nothing is worse than one that is not offered.
  */
-const CARRIERS: Array<{ id: ConnectionProfile["carrier"]; label: string; detail: string }> = [
+const CARRIERS: Array<{ id: CarrierKind; label: string; detail: string }> = [
   {
     id: "aether",
     label: "Aether",
@@ -370,6 +376,69 @@ const CARRIERS: Array<{ id: ConnectionProfile["carrier"]; label: string; detail:
     detail: "Three relays. The strongest against being identified, and the slowest. No UDP.",
   },
 ];
+
+const CARRIER_NAME: Record<CarrierKind, string> = {
+  aether: "Aether",
+  psiphon: "Psiphon",
+  tor: "Tor",
+};
+
+/**
+ * What each carrier means in the second position, where it decides the exit.
+ *
+ * Different text from the first position on purpose: the same carrier answers a
+ * different question there, and Aether in particular carries a condition that
+ * only applies when it is second.
+ */
+const AS_EXIT: Record<CarrierKind, string> = {
+  aether: "Needs an Aether identity already on this machine — it cannot register a new one through another carrier.",
+  psiphon: "Can be pinned to a country below. Slower to connect.",
+  tor: "A Tor exit relay, in a country nobody here chooses. No UDP.",
+};
+
+/** Where the traffic comes out, given the hop that ends the chain. */
+const EXIT_NOTE: Record<CarrierKind, string> = {
+  aether: "Comes out on Cloudflare's network, close to you. This does not change your country.",
+  psiphon: "Comes out wherever Psiphon has capacity, and can be pinned to a country below.",
+  tor: "Comes out at a Tor exit relay.",
+};
+
+/**
+ * Whether a carrier passes datagrams.
+ *
+ * Measured rather than assumed — Psiphon answers a SOCKS5 UDP ASSOCIATE with
+ * "command not supported", which is why it reads false here despite having
+ * shipped as true once. A chain carries UDP only if every hop does.
+ */
+const CARRIES_UDP: Record<CarrierKind, boolean> = { aether: true, psiphon: false, tor: false };
+
+/** One choice in either hop picker. */
+function CarrierButton({
+  label,
+  detail,
+  on,
+  onClick,
+}: {
+  label: string;
+  detail: string;
+  on: boolean;
+  onClick: () => void;
+}) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      onClick={onClick}
+      className={`rounded-lg border p-3 text-left transition ${
+        on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
+      }`}
+    >
+      <div className="text-[13.5px] font-medium">{t(label)}</div>
+      <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">{t(detail)}</div>
+    </button>
+  );
+}
 
 /**
  * Where Tor's bridges come from.
@@ -394,8 +463,21 @@ function TorPanel({
   profile,
   onChange,
 }: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
   const set = (patch: Partial<ConnectionProfile["tor"]>) =>
     onChange({ ...profile, tor: { ...profile.tor, ...patch } });
+
+  // Bridges reach Tor where Tor is blocked. As the second hop that question is
+  // already answered by the carrier in front, so the backend renders a torrc
+  // with no transports at all -- and controls that quietly do nothing are worse
+  // than controls that are not there.
+  if (profile.carriers.second === "tor") {
+    return (
+      <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+        {t("Bridges are not used when Tor is the second hop: the carrier in front is what got out of this network, so Tor takes the direct relays.")}
+      </p>
+    );
+  }
 
   return (
     <>
@@ -514,6 +596,172 @@ function BridgeFetch({ onFetched }: { onFetched: (lines: string[]) => void }) {
  * is empty until the first successful connect — the field says "best available"
  * until then instead of offering countries it cannot promise.
  */
+/**
+ * The one action for someone who does not know which way out works.
+ *
+ * Its own card, and a filled button. As a `secondary` button tucked under the
+ * pickers it read as a caption beside them and was missed entirely -- which for
+ * the single control aimed at the person with no idea what to choose is the
+ * whole feature failing quietly.
+ */
+function WayOutSearch({
+  profile,
+  onChange,
+  available,
+}: Pick<AdvancedProps, "profile" | "onChange"> & { available: CarrierKind[] | null }) {
+  const t = useT();
+  const [attempts, setAttempts] = useState<SearchAttempt[]>([]);
+  const [searching, setSearching] = useState(false);
+  // Its own state rather than the exit country's `failure`: sharing one would
+  // let a stale region error read as a search result, and the region error is
+  // only rendered where Psiphon is in the chain, so a search that found
+  // nothing would have had nowhere to say so.
+  const [searchFailure, setSearchFailure] = useState<string | null>(null);
+  // Read by the loop between attempts, so Stop takes effect on the next one
+  // rather than after all nine. Held in a ref because the running loop closes
+  // over its own render's state and would never see a change to it.
+  const cancelled = useRef(false);
+
+  /**
+   * Tries each way out in turn and keeps the first that carries traffic.
+   *
+   * Drives the same `start_core` the Connect button does rather than
+   * orchestrating hops itself. Two orchestrators would be two copies of the
+   * startup order, and a second copy of a rule is what put seven faults in the
+   * chain path at once.
+   */
+  const search = async () => {
+    setSearching(true);
+    setSearchFailure(null);
+    cancelled.current = false;
+    const order = searchOrder(available);
+    setAttempts(order.map((candidate) => ({ chain: candidate, outcome: "pending" })));
+
+    // Whatever is up now is in the way: the supervisor refuses a second
+    // connection while one is claimed.
+    await stopCore().catch(() => {});
+
+    let settled = false;
+    for (const [index, candidate] of order.entries()) {
+      if (cancelled.current) break;
+      setAttempts((current) =>
+        current.map((entry, at) => (at === index ? { ...entry, outcome: "trying" } : entry)),
+      );
+
+      // The cap is enforced by stopping rather than by walking away: the
+      // supervisor checks between hops and unwinds, so a timed-out attempt
+      // leaves no process behind.
+      const timer = window.setTimeout(() => void stopCore().catch(() => {}), ATTEMPT_CAP_MS);
+      let failure: string | null = null;
+      try {
+        await startCore({ ...profile, carriers: candidate });
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      } finally {
+        window.clearTimeout(timer);
+      }
+
+      if (!failure) {
+        setAttempts((current) =>
+          current.map((entry, at) => (at === index ? { ...entry, outcome: "connected" } : entry)),
+        );
+        // Say what it settled on, and leave the profile holding it. Ending on
+        // one ordering while the screen still shows another is the whole
+        // failure this feature could introduce.
+        onChange({ ...profile, carriers: candidate });
+        settled = true;
+        break;
+      }
+
+      setAttempts((current) =>
+        current.map((entry, at) =>
+          at === index
+            ? { ...entry, outcome: isImpossible(failure) ? "skipped" : "failed", detail: failure }
+            : entry,
+        ),
+      );
+      await stopCore().catch(() => {});
+    }
+
+    if (!settled && !cancelled.current) {
+      setSearchFailure(
+        t("Nothing got out. Every way out was tried; the list above says how each one failed."),
+      );
+    }
+    setSearching(false);
+  };
+  return (
+    <Card className="border-primary/40 bg-primary/[0.06]">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-[15px]">{t("Not sure which one works?")}</CardTitle>
+        <CardDescription>
+          {t("Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 pt-0">
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant={searching ? "outline" : "default"}
+            onClick={() => {
+              if (searching) {
+                cancelled.current = true;
+                void stopCore().catch(() => {});
+                return;
+              }
+              void search();
+            }}
+          >
+            {searching ? t("Stop searching") : t("Find one that works")}
+          </Button>
+          {searching ? (
+            <p className="text-[12.5px] leading-snug text-muted-foreground">
+              {t("Each one gets up to 90 seconds. Stopping takes effect after the current attempt.")}
+            </p>
+          ) : null}
+        </div>
+
+        {searchFailure ? (
+          <p className="text-[12.5px] leading-snug text-destructive">{searchFailure}</p>
+        ) : null}
+
+        {attempts.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {attempts.map((entry) => {
+              const name = carrierChainLabel(entry.chain, (kind) => t(CARRIER_NAME[kind]));
+              const mark = {
+                pending: "·",
+                trying: "…",
+                connected: "✓",
+                failed: "✕",
+                skipped: "–",
+              }[entry.outcome];
+              const tone = {
+                pending: "text-muted-foreground/60",
+                trying: "text-foreground",
+                connected: "text-primary font-medium",
+                failed: "text-muted-foreground",
+                skipped: "text-muted-foreground/70",
+              }[entry.outcome];
+              return (
+                <li key={name} className={`text-[12.5px] leading-snug ${tone}`}>
+                  <span className="inline-block w-4">{mark}</span>
+                  {name}
+                  {entry.outcome === "connected" ? ` — ${t("carrying traffic")}` : null}
+                  {/* The backend's own words. A search that says "failed" and
+                      nothing else is a search nobody can act on. */}
+                  {entry.detail && entry.outcome !== "connected" ? (
+                    <span className="text-muted-foreground/70"> — {entry.detail}</span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 function CarrierPanel({
   profile,
   onChange,
@@ -526,7 +774,12 @@ function CarrierPanel({
   // Everything until the backend answers. A picker that starts empty and fills
   // in would flicker; one that starts full and removes a carrier is worse,
   // because someone may have clicked it already.
-  const [available, setAvailable] = useState<ConnectionProfile["carrier"][] | null>(null);
+  const [available, setAvailable] = useState<CarrierKind[] | null>(null);
+
+  const chain = profile.carriers;
+  const offered = CARRIERS.filter((option) => !available || available.includes(option.id));
+  // Weakest link: a chain passes datagrams only if every hop does.
+  const carriesUdp = CARRIES_UDP[chain.first] && (chain.second === null || CARRIES_UDP[chain.second]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -542,7 +795,7 @@ function CarrierPanel({
   }, []);
 
   useEffect(() => {
-    if (profile.carrier !== "psiphon" || !isDesktopRuntime()) return;
+    if (!carrierChainHas(profile.carriers, "psiphon") || !isDesktopRuntime()) return;
     let cancelled = false;
     const read = () =>
       psiphonStatus()
@@ -559,7 +812,7 @@ function CarrierPanel({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [profile.carrier]);
+  }, [profile.carriers.first, profile.carriers.second]);
 
   const chooseRegion = async (region: string) => {
     set({ psiphon: { ...profile.psiphon, egressRegion: region } });
@@ -578,37 +831,79 @@ function CarrierPanel({
   };
 
   return (
-    <Card>
+    <>
+      <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-[15px]">{t("Way out")}</CardTitle>
         <CardDescription>
-          {t("What carries your traffic off this network. Everything below applies to Aether only.")}
+          {t("What carries your traffic off this network. Add a second hop to change where it comes out.")}
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
+        <p className="pb-2 text-[12.5px] font-medium">{t("Leaves this network through")}</p>
         <div className="grid grid-cols-2 gap-2.5">
-          {CARRIERS.filter((option) => !available || available.includes(option.id)).map((option) => {
-            const on = profile.carrier === option.id;
-            return (
-              <button
-                key={option.id}
-                type="button"
-                aria-pressed={on}
-                onClick={() => set({ carrier: option.id })}
-                className={`rounded-lg border p-3 text-left transition ${
-                  on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
-                }`}
-              >
-                <div className="text-[13.5px] font-medium">{t(option.label)}</div>
-                <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">
-                  {t(option.detail)}
-                </div>
-              </button>
-            );
-          })}
+          {offered.map((option) => (
+            <CarrierButton
+              key={option.id}
+              label={option.label}
+              detail={option.detail}
+              on={chain.first === option.id}
+              // Keep the second hop across a change of the first unless that
+              // would chain a carrier to itself, which reaches the same
+              // network through itself for twice the delay.
+              onClick={() =>
+                set({
+                  carriers: { first: option.id, second: chain.second === option.id ? null : chain.second },
+                })
+              }
+            />
+          ))}
         </div>
 
-        {profile.carrier === "psiphon" ? (
+        <p className="pb-2 pt-4 text-[12.5px] font-medium">{t("Then out through")}</p>
+        <div className="grid grid-cols-2 gap-2.5">
+          <CarrierButton
+            label="Nothing further"
+            detail="One hop. Traffic comes out wherever the carrier above puts it."
+            on={chain.second === null}
+            onClick={() => set({ carriers: { first: chain.first, second: null } })}
+          />
+          {offered
+            .filter((option) => option.id !== chain.first)
+            .map((option) => (
+              <CarrierButton
+                key={option.id}
+                label={option.label}
+                detail={AS_EXIT[option.id]}
+                on={chain.second === option.id}
+                onClick={() => set({ carriers: { first: chain.first, second: option.id } })}
+              />
+            ))}
+        </div>
+
+        {/* The chain said back, in the order traffic travels, with what this
+            particular ordering does and does not get you. Two orderings look
+            alike in the pickers and differ entirely here. */}
+        <div className="mt-4 rounded-lg border border-border bg-muted/40 p-3">
+          <div className="text-[13.5px] font-medium">
+            {carrierChainLabel(chain, (kind) => t(CARRIER_NAME[kind]))}
+          </div>
+          <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">
+            {t(EXIT_NOTE[carrierChainLast(chain)])}
+          </div>
+          {chain.second === "aether" ? (
+            <div className="mt-1.5 text-[12.5px] leading-snug text-amber-600 dark:text-amber-500">
+              {t("Aether cannot register a new device through another carrier, so this ordering only works if Aether has connected on this machine before. It also comes out near you rather than abroad.")}
+            </div>
+          ) : null}
+          {chain.second && !carriesUdp ? (
+            <div className="mt-1.5 text-[12.5px] leading-snug text-muted-foreground">
+              {t("No UDP through this chain: QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.")}
+            </div>
+          ) : null}
+        </div>
+
+        {carrierChainHas(profile.carriers, "psiphon") ? (
           <>
             <Row title="Exit country" help="A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.">
               <select
@@ -646,7 +941,7 @@ function CarrierPanel({
           </>
         ) : null}
 
-        {profile.carrier === "tor" ? (
+        {carrierChainHas(profile.carriers, "tor") ? (
           <>
             <TorPanel profile={profile} onChange={onChange} />
             {/* Said plainly rather than left to be met as a fault. Tor carries
@@ -662,7 +957,10 @@ function CarrierPanel({
           </>
         ) : null}
       </CardContent>
-    </Card>
+      </Card>
+
+      <WayOutSearch profile={profile} onChange={onChange} available={available} />
+    </>
   );
 }
 
@@ -683,7 +981,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
   // work with Psiphon?" — with MASQUE H2 still highlighted as though it were
   // the answer. A control that saves and does nothing is worse than one that is
   // absent, so they are absent.
-  const aetherOnly = profile.carrier === "aether";
+  const aetherOnly = isLoneAether(profile.carriers);
 
   return (
     <>

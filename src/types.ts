@@ -18,6 +18,43 @@ export const ENDPOINT_MODES: Array<{ id: EndpointMode; label: string; detail: st
  */
 export type CarrierKind = "aether" | "psiphon" | "tor";
 
+/**
+ * An ordered pair of carriers.
+ *
+ * `first` leaves the local network; `second` decides the exit address.
+ * `second: null` is the single-carrier case — every session before chaining,
+ * and still the default.
+ */
+export interface CarrierChain {
+  first: CarrierKind;
+  second: CarrierKind | null;
+}
+
+/** What to call a chain on screen: the order traffic travels. */
+export function carrierChainLabel(chain: CarrierChain, name: (kind: CarrierKind) => string): string {
+  return chain.second ? `${name(chain.first)} → ${name(chain.second)}` : name(chain.first);
+}
+
+/** The hop that decides the exit address, and whose listener is dialled. */
+export function carrierChainLast(chain: CarrierChain): CarrierKind {
+  return chain.second ?? chain.first;
+}
+
+/**
+ * Whether a carrier appears anywhere in the chain.
+ *
+ * Settings belong to a carrier rather than to a position: an exit country is
+ * Psiphon's whether Psiphon is the first hop or the second.
+ */
+export function carrierChainHas(chain: CarrierChain, kind: CarrierKind): boolean {
+  return chain.first === kind || chain.second === kind;
+}
+
+/** The Aether engine on its own — the only case its own settings apply to. */
+export function isLoneAether(chain: CarrierChain): boolean {
+  return chain.first === "aether" && chain.second === null;
+}
+
 export interface PsiphonSettings {
   /**
    * A two-letter country to exit from, or empty for whichever Psiphon
@@ -189,10 +226,11 @@ export interface ConnectionProfile {
    * Which way out of the network to use.
    *
    * Everything else in this profile describes the Aether engine and applies
-   * only when this is "aether". A profile saved before carriers existed names
-   * none, which the backend reads as "aether".
+   * only when the chain ends at "aether". A profile saved before carriers
+   * existed names none, and one saved by 1.8.x carries a bare `carrier` string
+   * the backend migrates into a single-hop chain.
    */
-  carrier: CarrierKind;
+  carriers: CarrierChain;
   /** How the Psiphon carrier runs. Ignored unless `carrier` selects it. */
   psiphon: PsiphonSettings;
   /** How the Tor carrier runs. Ignored unless `carrier` selects it. */
@@ -283,7 +321,7 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   gateway: false,
   systemProxy: false,
   autoReconnect: true,
-  carrier: "aether",
+  carriers: { first: "aether", second: null },
   psiphon: { egressRegion: "" },
   tor: { bridges: "none", transport: "obfs4", customBridges: "" },
   chain: { enabled: false, throughTunnel: true, sources: [], manual: "", node: null },

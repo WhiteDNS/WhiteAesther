@@ -238,7 +238,12 @@ impl Tor {
     }
 
     /// Starts tor and waits for a circuit.
-    pub fn start(&self, app: &AppHandle, settings: &TorSettings) -> Result<SocketAddr, String> {
+    pub fn start(
+        &self,
+        app: &AppHandle,
+        settings: &TorSettings,
+        upstream: Option<SocketAddr>,
+    ) -> Result<SocketAddr, String> {
         settings.validate()?;
         self.stop();
 
@@ -271,7 +276,7 @@ impl Tor {
         let torrc = home.join("torrc");
         std::fs::write(
             &torrc,
-            render_torrc(settings, &home, &support, &control_port_file, &cookie_file)?,
+            render_torrc(settings, &home, &support, &control_port_file, &cookie_file, upstream)?,
         )
         .map_err(|error| format!("cannot write the Tor configuration: {error}"))?;
 
@@ -521,6 +526,7 @@ fn render_torrc(
     support: &Path,
     control_port_file: &Path,
     cookie_file: &Path,
+    upstream: Option<SocketAddr>,
 ) -> Result<String, String> {
     let mut config = String::new();
     // Both auto: a fixed port is one more thing that can already be taken on a
@@ -545,7 +551,30 @@ fn render_torrc(
     config.push_str(&std::process::id().to_string());
     config.push('\n');
 
-    if settings.bridges != BridgeMode::None {
+    // The hop in front, when there is one. Measured honouring this: with a
+    // proxy under our own control in front, tor's guard connections arrived
+    // there and it bootstrapped through them.
+    //
+    // Not quoted, and not a URL: unlike the paths above, tor takes this as a
+    // bare `host:port`.
+    if let Some(address) = upstream {
+        config.push_str(&format!("Socks5Proxy {address}\n"));
+    }
+
+    // Bridges exist to reach tor where tor itself is blocked. Behind another
+    // carrier that question is already answered -- the hop in front is what got
+    // us out -- so a chained tor takes the direct relays and leaves the
+    // transports alone.
+    //
+    // This is also the one combination `CARRIER-CHAINING.md` forbids shipping
+    // on the strength of a config check (finding 7): tor accepts `Socks5Proxy`
+    // and `ClientTransportPlugin` together, but whether lyrebird then dials its
+    // bridge *through* that proxy was never observed, and a pluggable transport
+    // that ignores it would reach for the bridge directly -- the one address on
+    // a censored network that must not be dialled in the clear. Not shipped
+    // unproven, and not refused either: dropped, because it has nothing to do.
+    let bridges_wanted = settings.bridges != BridgeMode::None && upstream.is_none();
+    if bridges_wanted {
         let lyrebird = support.join(LYREBIRD_FILENAME);
         if !lyrebird.is_file() {
             return Err("the pluggable transports are missing from this installation".into());
@@ -906,6 +935,7 @@ mod tests {
             &support,
             Path::new("/tmp/tor/control-port"),
             Path::new("/tmp/tor/cookie"),
+            None,
         )
         .unwrap();
 
@@ -925,6 +955,67 @@ mod tests {
     }
 
     #[test]
+    fn a_chained_tor_takes_the_direct_relays_and_no_transports() {
+        // The one combination `CARRIER-CHAINING.md` forbids shipping on a
+        // config check alone (finding 7). Bridges exist to reach tor where tor
+        // is blocked; behind another carrier the hop in front already answered
+        // that, so there is nothing for a transport to do -- and whether
+        // lyrebird would dial its bridge *through* the proxy or reach for it
+        // directly was never observed. Dropped rather than risked: reaching for
+        // a bridge address in the clear is the one thing this must not do.
+        //
+        // No lyrebird is staged in this test, so a chained tor that still
+        // wanted bridges would fail outright here rather than render.
+        let chained = render_torrc(
+            &TorSettings { bridges: BridgeMode::BuiltIn, ..TorSettings::default() },
+            Path::new("/tmp/tor"),
+            Path::new("/tmp/support-absent"),
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+            Some("127.0.0.1:64347".parse().unwrap()),
+        )
+        .expect("a chained tor renders without needing the transports");
+        assert!(chained.contains("
+Socks5Proxy 127.0.0.1:64347
+"), "{chained}");
+        assert!(!chained.contains("UseBridges"), "{chained}");
+        assert!(!chained.contains("ClientTransportPlugin"), "{chained}");
+        assert!(!chained.contains("
+Bridge "), "{chained}");
+    }
+
+    #[test]
+    fn a_hop_in_front_becomes_a_socks5_proxy_line() {
+        // Measured honouring this: tor's guard connections arrived at a proxy
+        // under our own control and it bootstrapped through them.
+        //
+        // A bare host:port, and unquoted -- unlike every path in this file. tor
+        // takes this one as an address rather than as a filename or a URL.
+        let chained = render_torrc(
+            &TorSettings::default(),
+            Path::new("/tmp/tor"),
+            Path::new("/tmp/support"),
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+            Some("127.0.0.1:64347".parse().unwrap()),
+        )
+        .unwrap();
+        assert!(chained.contains("\nSocks5Proxy 127.0.0.1:64347\n"), "{chained}");
+        assert!(!chained.contains("Socks5Proxy \""), "not a quoted path: {chained}");
+
+        let alone = render_torrc(
+            &TorSettings::default(),
+            Path::new("/tmp/tor"),
+            Path::new("/tmp/support"),
+            Path::new("/tmp/tor/control-port"),
+            Path::new("/tmp/tor/cookie"),
+            None,
+        )
+        .unwrap();
+        assert!(!alone.contains("Socks5Proxy"), "{alone}");
+    }
+
+    #[test]
     fn no_bridges_means_no_transport_plugin_line() {
         // A ClientTransportPlugin naming a binary we did not ship would stop
         // tor from starting at all, so it appears only when bridges do.
@@ -936,6 +1027,7 @@ mod tests {
             support,
             Path::new("/tmp/tor/control-port"),
             Path::new("/tmp/tor/cookie"),
+            None,
         )
         .unwrap();
         assert!(!config.contains("ClientTransportPlugin"), "{config}");
