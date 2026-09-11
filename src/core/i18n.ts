@@ -350,6 +350,7 @@ const FA: Record<string, string> = {
   "Three relays. The strongest against being identified, and the slowest. No UDP.":
     "سه بازپخش. قوی‌ترین گزینه در برابر شناسایی، و کندترین. UDP ندارد.",
   // -- the search that tries every way out ------------------------------
+  "Not sure which one works?": "نمی‌دانید کدام کار می‌کند؟",
   "Find one that works": "یکی که کار می‌کند را پیدا کن",
   "Stop searching": "توقف جستجو",
   "Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.":

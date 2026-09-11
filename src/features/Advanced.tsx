@@ -596,25 +596,20 @@ function BridgeFetch({ onFetched }: { onFetched: (lines: string[]) => void }) {
  * is empty until the first successful connect — the field says "best available"
  * until then instead of offering countries it cannot promise.
  */
-function CarrierPanel({
+/**
+ * The one action for someone who does not know which way out works.
+ *
+ * Its own card, and a filled button. As a `secondary` button tucked under the
+ * pickers it read as a caption beside them and was missed entirely -- which for
+ * the single control aimed at the person with no idea what to choose is the
+ * whole feature failing quietly.
+ */
+function WayOutSearch({
   profile,
   onChange,
-}: Pick<AdvancedProps, "profile" | "onChange">) {
+  available,
+}: Pick<AdvancedProps, "profile" | "onChange"> & { available: CarrierKind[] | null }) {
   const t = useT();
-  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
-  const [regions, setRegions] = useState<string[]>([]);
-  const [moving, setMoving] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-  // Everything until the backend answers. A picker that starts empty and fills
-  // in would flicker; one that starts full and removes a carrier is worse,
-  // because someone may have clicked it already.
-  const [available, setAvailable] = useState<CarrierKind[] | null>(null);
-
-  const chain = profile.carriers;
-  const offered = CARRIERS.filter((option) => !available || available.includes(option.id));
-  // Weakest link: a chain passes datagrams only if every hop does.
-  const carriesUdp = CARRIES_UDP[chain.first] && (chain.second === null || CARRIES_UDP[chain.second]);
-
   const [attempts, setAttempts] = useState<SearchAttempt[]>([]);
   const [searching, setSearching] = useState(false);
   // Its own state rather than the exit country's `failure`: sharing one would
@@ -673,7 +668,7 @@ function CarrierPanel({
         // Say what it settled on, and leave the profile holding it. Ending on
         // one ordering while the screen still shows another is the whole
         // failure this feature could introduce.
-        set({ carriers: candidate });
+        onChange({ ...profile, carriers: candidate });
         settled = true;
         break;
       }
@@ -695,6 +690,96 @@ function CarrierPanel({
     }
     setSearching(false);
   };
+  return (
+    <Card className="border-primary/40 bg-primary/[0.06]">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-[15px]">{t("Not sure which one works?")}</CardTitle>
+        <CardDescription>
+          {t("Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 pt-0">
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant={searching ? "outline" : "default"}
+            onClick={() => {
+              if (searching) {
+                cancelled.current = true;
+                void stopCore().catch(() => {});
+                return;
+              }
+              void search();
+            }}
+          >
+            {searching ? t("Stop searching") : t("Find one that works")}
+          </Button>
+          {searching ? (
+            <p className="text-[12.5px] leading-snug text-muted-foreground">
+              {t("Each one gets up to 90 seconds. Stopping takes effect after the current attempt.")}
+            </p>
+          ) : null}
+        </div>
+
+        {searchFailure ? (
+          <p className="text-[12.5px] leading-snug text-destructive">{searchFailure}</p>
+        ) : null}
+
+        {attempts.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {attempts.map((entry) => {
+              const name = carrierChainLabel(entry.chain, (kind) => t(CARRIER_NAME[kind]));
+              const mark = {
+                pending: "·",
+                trying: "…",
+                connected: "✓",
+                failed: "✕",
+                skipped: "–",
+              }[entry.outcome];
+              const tone = {
+                pending: "text-muted-foreground/60",
+                trying: "text-foreground",
+                connected: "text-primary font-medium",
+                failed: "text-muted-foreground",
+                skipped: "text-muted-foreground/70",
+              }[entry.outcome];
+              return (
+                <li key={name} className={`text-[12.5px] leading-snug ${tone}`}>
+                  <span className="inline-block w-4">{mark}</span>
+                  {name}
+                  {entry.outcome === "connected" ? ` — ${t("carrying traffic")}` : null}
+                  {/* The backend's own words. A search that says "failed" and
+                      nothing else is a search nobody can act on. */}
+                  {entry.detail && entry.outcome !== "connected" ? (
+                    <span className="text-muted-foreground/70"> — {entry.detail}</span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CarrierPanel({
+  profile,
+  onChange,
+}: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  const [regions, setRegions] = useState<string[]>([]);
+  const [moving, setMoving] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  // Everything until the backend answers. A picker that starts empty and fills
+  // in would flicker; one that starts full and removes a carrier is worse,
+  // because someone may have clicked it already.
+  const [available, setAvailable] = useState<CarrierKind[] | null>(null);
+
+  const chain = profile.carriers;
+  const offered = CARRIERS.filter((option) => !available || available.includes(option.id));
+  // Weakest link: a chain passes datagrams only if every hop does.
+  const carriesUdp = CARRIES_UDP[chain.first] && (chain.second === null || CARRIES_UDP[chain.second]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -746,7 +831,8 @@ function CarrierPanel({
   };
 
   return (
-    <Card>
+    <>
+      <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-[15px]">{t("Way out")}</CardTitle>
         <CardDescription>
@@ -817,69 +903,6 @@ function CarrierPanel({
           ) : null}
         </div>
 
-        {/* For the network where the answer is not knowable in advance. Tries
-            the cheap ways out first and the pairs only after every single has
-            failed -- see `carrierSearch.ts` for why that order. */}
-        <div className="mt-4 flex items-center gap-2.5">
-          <Button
-            variant={searching ? "outline" : "secondary"}
-            size="sm"
-            onClick={() => {
-              if (searching) {
-                cancelled.current = true;
-                void stopCore().catch(() => {});
-                return;
-              }
-              void search();
-            }}
-          >
-            {searching ? t("Stop searching") : t("Find one that works")}
-          </Button>
-          <p className="text-[12.5px] leading-snug text-muted-foreground">
-            {searching
-              ? t("Each one gets up to 90 seconds. Stopping takes effect after the current attempt.")
-              : t("Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.")}
-          </p>
-        </div>
-
-        {searchFailure ? (
-          <p className="mt-2 text-[12.5px] leading-snug text-destructive">{searchFailure}</p>
-        ) : null}
-
-        {attempts.length > 0 ? (
-          <ul className="mt-3 flex flex-col gap-1">
-            {attempts.map((entry) => {
-              const name = carrierChainLabel(entry.chain, (kind) => t(CARRIER_NAME[kind]));
-              const mark = {
-                pending: "·",
-                trying: "…",
-                connected: "✓",
-                failed: "✕",
-                skipped: "–",
-              }[entry.outcome];
-              const tone = {
-                pending: "text-muted-foreground/60",
-                trying: "text-foreground",
-                connected: "text-primary font-medium",
-                failed: "text-muted-foreground",
-                skipped: "text-muted-foreground/70",
-              }[entry.outcome];
-              return (
-                <li key={name} className={`text-[12.5px] leading-snug ${tone}`}>
-                  <span className="inline-block w-4">{mark}</span>
-                  {name}
-                  {entry.outcome === "connected" ? ` — ${t("carrying traffic")}` : null}
-                  {/* The backend's own words. A search that says "failed" and
-                      nothing else is a search nobody can act on. */}
-                  {entry.detail && entry.outcome !== "connected" ? (
-                    <span className="text-muted-foreground/70"> — {entry.detail}</span>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        ) : null}
-
         {carrierChainHas(profile.carriers, "psiphon") ? (
           <>
             <Row title="Exit country" help="A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.">
@@ -934,7 +957,10 @@ function CarrierPanel({
           </>
         ) : null}
       </CardContent>
-    </Card>
+      </Card>
+
+      <WayOutSearch profile={profile} onChange={onChange} available={available} />
+    </>
   );
 }
 
