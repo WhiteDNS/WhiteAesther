@@ -65,6 +65,30 @@ second hop, and say so plainly when it cannot — a fresh install whose first
 action is `Psiphon → Aether` will otherwise fail with a message about
 registration that names nothing the user can act on.
 
+**Read afterwards in the pinned engine source, and it makes the guard more
+important than it looked.** `account.rs::http_client` does honour
+`AETHER_UPSTREAM` — it asks `upstream::configured()` for a proxy and attaches
+it. But `aether/Cargo.toml` builds reqwest without the `socks` feature, so a
+`socks5://` proxy cannot be constructed; the error is caught, logged as `the api
+calls could not be sent through the proxy`, and **the client is then built
+without a proxy at all**. The registration request goes out *directly*.
+
+That is not a failure to register. It is a fresh install, with a carrier in
+front of it precisely because the network is hostile, making an unproxied
+request to Cloudflare's API at the moment it is trying not to be seen. The
+`aether_identity_exists` refusal is what stands between a user and that, so it
+stays until the engine either gains the feature or refuses the dial itself.
+
+Two more facts from the same reading, both about `AETHER_UPSTREAM`:
+
+- `upstream.rs` caches it in a `OnceLock`, so it is read once per process. This
+  costs us nothing only because every connect spawns a fresh engine — the value
+  is set on the `Command` and never mutated under a running one. It would bite
+  immediately if a long-lived engine were ever reused across carrier restarts.
+- `--startup-secs` becomes `AETHER_MASQUE_STARTUP_SECS`, which wraps `ready_rx`
+  — the tunnel handshake *after* a gateway has been chosen. It does not bound
+  the gateway scan ahead of it. See `scan_deadline`.
+
 ### 2. Any chain containing Psiphon or Tor is TCP-only — measured
 
 Psiphon's SOCKS5 refuses `UDP ASSOCIATE` with `0x07 COMMAND NOT SUPPORTED`. Tor
@@ -77,6 +101,17 @@ and both must reach the screen rather than being discovered:
 - Aether in such a chain can only use **MASQUE H2**. H3 rides QUIC and WireGuard
   is UDP; both die at the TCP-only hop. Those options must be disabled, not
   merely annotated.
+
+  Disabling them on the screen turned out not to be enough, and the reason is
+  worth keeping: `Routes` hides the transport picker whenever the engine is not
+  alone, but hiding a control does not clear what it last stored. Someone who
+  chose WireGuard while Aether was on its own and then put Psiphon in front of
+  it still had `wg` in the profile, and `start_aether_hop` launched the engine
+  with it — so the hop did not fail over to something slower, it dialled the
+  gateway directly, past the carrier the chain existed for. The search made it
+  routine rather than rare: it tries six chained orderings with whatever the
+  profile holds. Pinned in `pin_to_masque_h2`, in the supervisor, where the
+  chain is actually built.
 - The `udp: false` declaration and the `NETWORK,udp,REJECT` rule already written
   for Tor now apply to any chain with a TCP-only hop.
 
@@ -256,15 +291,58 @@ from a hang.
 
 ## The "find one that works" button
 
-Six orderings plus three single carriers is nine attempts, and at three minutes
-each that is half an hour. That is not a button, it is abandoning the app.
+Six orderings plus three single carriers is nine attempts, and giving each
+carrier the time it actually needs makes a sweep where nothing answers run for
+the better part of an hour. That is the honest cost of not cutting a search that
+was about to succeed, so the screen says the number before anyone commits to it
+and counts a clock while it runs — minutes of silence is what people give up on.
+Ordering is what keeps the usual case to seconds.
 
 - **Singles first, in order of measured speed:** Aether (~25s), Psiphon (~40s),
   Tor (~60s). On most networks the first one answers and the search ends.
 - **Chains only after every single has failed**, which is the situation the
   search exists for.
-- **A hard cap per attempt**, around 90 seconds — long enough for a legitimately
-  slow Psiphon, short enough that nine of them stay bounded.
+- **A cap per attempt, taken from the deadline the carrier already enforces on
+  itself** — `AETHER_HOP_TIMEOUT` (150s), `ESTABLISH_TIMEOUT` (315s),
+  `BOOTSTRAP_TIMEOUT` (180s), added up across the hops of a chain.
+
+  Aether's share is not one number: it scans to `prober.rs`'s own deadline,
+  which runs from 45s in `turbo` to 330s in `thorough`, and only then starts the
+  handshake `--startup-secs` bounds. `aether_hop_timeout` adds those rather than
+  assuming either contains the other — the flat 150s it replaced was below the
+  *default* mode's own window, so a chained engine that was still scanning came
+  back as "did not connect".
+
+  This was one flat 90 seconds, which was shorter than all three. A cap below a
+  carrier's own deadline does not bound the search, it *replaces* that deadline
+  and always wins: every attempt was cut before the thing it was waiting for
+  could answer. Psiphon was the worst of it — a first run has no tactics, so
+  in-proxy is not available yet and reaching it can take tunnel-core's full 300s
+  window, which is the whole reason `ESTABLISH_TIMEOUT` is what it is. The one
+  feature aimed at someone who does not know what works could never find it.
+
+  The cap is a safety net, not the deadline. Each carrier fails its own attempt
+  at its own deadline and says why, and that reason is what the list shows.
+
+- **A route counts only once a request has made the round trip through it.**
+  Reaching `connected` says the processes are up and the handshakes finished. It
+  does not say anything went through. A carrier that completes its handshake and
+  then carries nothing is the worst thing a search can settle on: it looks like
+  success on every screen and fails everything the person tries next. `settle`
+  asks `probe_latency` — a real SOCKS5 CONNECT and a byte back — and treats a
+  connected route that never answers as a failure, named as one so it is not
+  confused with never connecting.
+
+- **Wait for the snapshot, not for `start_core` to return.** That call answers
+  at two different moments: on the chained path it has already waited for a hop
+  to be carrying traffic, and on the engine path it returns the instant the
+  process is spawned, with the state reading `starting`. Taking the return as
+  the verdict settled every sweep on Aether alone on the strength of a process
+  having started — the six chained orderings below it were never reached on any
+  machine where the engine binary exists, which is all of them. `verdictFor`
+  reads the state instead: `connected` is the answer, `error` and `idle` are
+  failures, and `reconnecting` is the engine between its own attempts and not
+  yet either.
 - **Skip what cannot work:** with no Aether identity, every `X → Aether` is
   skipped rather than attempted (finding 1). With a manual `upstreamProxy` set,
   chains are skipped (finding 8).

@@ -2347,6 +2347,62 @@ fn retry_delay(attempt: u32) -> Duration {
     Duration::from_secs((BASE_RETRY_SECS << shift).min(MAX_RETRY_SECS))
 }
 
+/// Mirrors the diagnostics stream to a file, in debug builds only.
+///
+/// The log lives in memory and is shown in the window, which is enough while
+/// someone is looking at the window. It is not enough for the two cases that
+/// matter most: a crash or a freeze takes the buffer with it, and a run that
+/// has to be watched while something else is being done cannot be watched at
+/// all. A file survives the first and can be tailed for the second.
+///
+/// Debug builds only, and deliberately: these lines carry gateway addresses,
+/// listener ports and the shape of someone's chain. In a release build that is
+/// a file on disk describing how a person gets out of their network, written
+/// whether or not they ever ask for a diagnostics report -- which is the
+/// opposite of what keeping it in memory is for. The report they *do* ask for
+/// is composed and redacted in the window before it is ever saved.
+///
+/// Truncated once per run, so the file answers "what happened this time"
+/// rather than growing without limit. Every failure here is swallowed: a
+/// diagnostic aid that can break the thing it is diagnosing is worse than none.
+#[cfg(debug_assertions)]
+fn mirror_to_debug_file(event: &CoreLogEvent) {
+    use std::io::Write;
+    use std::sync::OnceLock;
+
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+
+    let handle = FILE.get_or_init(|| {
+        let path = std::env::temp_dir().join("whiteaesther-debug.log");
+        match std::fs::File::create(&path) {
+            Ok(file) => {
+                // Printed rather than logged: this runs from inside `push_log`,
+                // and logging it here would be the first thing it recursed on.
+                eprintln!("[whiteaesther] diagnostics are mirrored to {}", path.display());
+                Some(Mutex::new(file))
+            }
+            Err(error) => {
+                eprintln!("[whiteaesther] no debug log file ({error})");
+                None
+            }
+        }
+    });
+
+    if let Some(file) = handle {
+        let mut file = lock(file);
+        let _ = writeln!(
+            file,
+            "{} {:>5} {:<10} {}",
+            event.timestamp, event.level, event.stream, event.message
+        );
+        let _ = file.flush();
+    }
+}
+
+/// Release builds keep the diagnostics log in memory and nowhere else.
+#[cfg(not(debug_assertions))]
+fn mirror_to_debug_file(_event: &CoreLogEvent) {}
+
 fn push_log(inner: &SupervisorInner, stream: &str, level: &str, message: String) {
     let event = CoreLogEvent {
         timestamp: now_millis(),
@@ -2354,6 +2410,7 @@ fn push_log(inner: &SupervisorInner, stream: &str, level: &str, message: String)
         level: level.into(),
         message,
     };
+    mirror_to_debug_file(&event);
     {
         let mut logs = lock(&inner.logs);
         if logs.len() == MAX_LOGS {
@@ -2816,11 +2873,56 @@ fn start_hop(
     }
 }
 
+/// The engine's own deadline for finding a gateway, per scan mode.
+///
+/// Read out of `prober.rs` in the pinned engine revision: `overall_deadline`
+/// plus `quiet_after_first`, which is the extra it spends after its first hit
+/// before settling. These are the numbers the engine enforces on itself, and
+/// this table is a mirror of them.
+///
+/// | mode     | deadline | quiet |
+/// | ---      | ---      | ---   |
+/// | turbo    | 45s      | 0s    |
+/// | balanced | 120s     | 20s   |
+/// | thorough | 300s     | 30s   |
+/// | stealth  | 180s     | 25s   |
+/// | ironclad | 180s     | 15s   |
+fn scan_deadline(scan_mode: &str) -> Duration {
+    let secs = match scan_mode {
+        "turbo" => 45,
+        "thorough" => 300 + 30,
+        "stealth" => 180 + 25,
+        "ironclad" => 180 + 15,
+        // Balanced is the default here and in the engine, so it is also what an
+        // unknown mode gets rather than the shortest window.
+        _ => 120 + 20,
+    };
+    Duration::from_secs(secs)
+}
+
+/// Work that happens either side of the scan: spawning the process, reading the
+/// identity, the registration and API calls that the doc comment in `prober.rs`
+/// notes come on top of the scan deadline.
+const AETHER_HOP_OVERHEAD: Duration = Duration::from_secs(20);
+
 /// How long to wait for the engine to come up as one hop of a chain.
 ///
-/// Its own `startup_secs` governs the scan; this bounds the whole thing so a
-/// chain reports failure rather than sitting on "connecting" forever.
-const AETHER_HOP_TIMEOUT: Duration = Duration::from_secs(150);
+/// Derived from what the engine was actually asked to do, rather than one
+/// number for every scan mode. This was a flat 150s, on the belief -- stated in
+/// the comment that used to be here -- that `startup_secs` governed the scan.
+/// It does not: `--startup-secs` becomes `AETHER_MASQUE_STARTUP_SECS`, which
+/// wraps only the tunnel handshake *after* a gateway has been chosen. The scan
+/// ahead of it runs to `prober.rs`'s own deadline and knows nothing about it.
+///
+/// So 150s cut the default `balanced` mode short -- 140s of scanning plus a 30s
+/// handshake is 170s -- and cut `thorough` almost in half. Both failed as "did
+/// not connect" while the engine was still working, which is the one thing
+/// finding 4 of the Android notes says never to do to a search.
+fn aether_hop_timeout(profile: &CoreProfile) -> Duration {
+    scan_deadline(&profile.scan_mode)
+        + Duration::from_secs(profile.startup_secs)
+        + AETHER_HOP_OVERHEAD
+}
 
 /// The engine as one hop, brought up and waited for.
 ///
@@ -2850,6 +2952,19 @@ fn start_aether_hop(
             );
         }
         hop.upstream_proxy = format!("socks5://{address}");
+
+        if let Some(was) = pin_to_masque_h2(&mut hop) {
+            supervisor_log(
+                inner,
+                "info",
+                format!(
+                    "Aether runs as {was} on its own; behind another carrier it is pinned to \
+                     MASQUE H2, because QUIC and WireGuard would dial straight past the hop \
+                     in front of it"
+                ),
+            );
+        }
+
         // Measured: the engine never resolves Cloudflare's API by name, it
         // dials raw edge addresses with a spoofed SNI so DNS cannot be
         // blocked -- and that fails through a SOCKS proxy. Registration
@@ -2868,7 +2983,10 @@ fn start_aether_hop(
 
     launch(app, inner, &hop, 0, generation, false)?;
 
-    let deadline = Instant::now() + AETHER_HOP_TIMEOUT;
+    // Taken from the hop's own profile, which is what the engine was told to
+    // do -- not from the session's, which a retry may have moved on from.
+    let budget = aether_hop_timeout(&hop);
+    let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
         if !inner.is_current(generation) {
             return Err("the connection was stopped while it was starting".into());
@@ -2889,8 +3007,34 @@ fn start_aether_hop(
     }
     Err(format!(
         "Aether did not connect in {}s",
-        AETHER_HOP_TIMEOUT.as_secs()
+        budget.as_secs()
     ))
+}
+
+/// Forces a chained engine onto the one framing a SOCKS5 hop can carry.
+///
+/// Returns what it was, when it had to change anything, so the caller can say
+/// so -- and `None` when the profile already asked for MASQUE H2.
+///
+/// H3 rides QUIC and WireGuard is UDP. A hop in front carries neither, so the
+/// engine does not fall back to something slower: it dials the gateway
+/// *directly*, and the session leaves by the address the chain exists to hide.
+/// That is the one failure here that is worse than not connecting at all.
+///
+/// Pinned in the supervisor rather than in the screen. `Routes` hides the
+/// transport picker whenever the engine is not alone, but hiding a control does
+/// not change what it last stored: someone who chose WireGuard while Aether was
+/// on its own and then put Psiphon in front of it still has `wg` in the
+/// profile, and the way-out search tries six chained orderings with whatever
+/// the profile holds. See finding 2 in `CARRIER-CHAINING.md`.
+fn pin_to_masque_h2(hop: &mut CoreProfile) -> Option<&'static str> {
+    let was = transport_label(hop);
+    if was == "masque-h2" {
+        return None;
+    }
+    hop.protocol = "masque".into();
+    hop.masque_transport = "h2".into();
+    Some(was)
 }
 
 /// Whether the engine already has a device identity on disk.
@@ -3804,6 +3948,86 @@ mod tests {
             assert_eq!(attempted.protocol, "wg");
             assert_eq!(attempted.masque_transport, profile.masque_transport);
         }
+    }
+
+    #[test]
+    fn a_chained_engine_is_pinned_to_the_framing_the_hop_can_carry() {
+        // Both of these leave by UDP, which a SOCKS5 hop does not carry -- so
+        // the engine would reach the gateway directly, past the carrier the
+        // chain exists for.
+        for leaves_by_udp in ["wg", "gool"] {
+            let mut hop = CoreProfile::default();
+            hop.protocol = leaves_by_udp.into();
+            assert!(pin_to_masque_h2(&mut hop).is_some(), "{leaves_by_udp}");
+            assert_eq!(transport_label(&hop), "masque-h2");
+        }
+
+        let mut h3 = CoreProfile::default();
+        h3.masque_transport = "h3".into();
+        assert_eq!(pin_to_masque_h2(&mut h3), Some("masque-h3"));
+        assert_eq!(transport_label(&h3), "masque-h2");
+
+        // And the arguments follow, which is the whole point: `--h2` is what
+        // the engine reads, and it is only pushed for MASQUE H2.
+        let args = h3.args(Path::new("identity.toml"));
+        assert!(args.contains(&"--masque".to_string()), "{args:?}");
+        assert!(args.contains(&"--h2".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn a_chained_engine_is_given_the_time_its_own_scan_mode_takes() {
+        // The engine's `overall_deadline` plus `quiet_after_first`, from
+        // `prober.rs`. A hop timeout below these fails an engine that is still
+        // working, which is the one thing a search must not do.
+        for (mode, scan_secs) in [
+            ("turbo", 45),
+            ("balanced", 140),
+            ("thorough", 330),
+            ("stealth", 205),
+            ("ironclad", 195),
+        ] {
+            let mut profile = CoreProfile::default();
+            profile.scan_mode = mode.into();
+            let budget = aether_hop_timeout(&profile);
+            assert!(
+                budget >= Duration::from_secs(scan_secs + profile.startup_secs),
+                "{mode} gets {budget:?}, which cuts its own scan short"
+            );
+        }
+
+        // The flat 150s this replaced was below the default mode's own window,
+        // which is how an engine that was still scanning came back as "did not
+        // connect".
+        let balanced = aether_hop_timeout(&CoreProfile::default());
+        assert!(balanced > Duration::from_secs(150), "{balanced:?}");
+
+        // A longer handshake deadline is the user asking for more patience, and
+        // it has to reach the wait rather than only the engine.
+        let mut patient = CoreProfile::default();
+        patient.startup_secs = 120;
+        assert!(aether_hop_timeout(&patient) > balanced);
+    }
+
+    #[test]
+    fn an_unknown_scan_mode_gets_the_default_window_rather_than_the_shortest() {
+        // A profile saved by a newer build, or a mode added to the engine
+        // first. Falling to `turbo`'s 45s would fail it before it had looked.
+        let mut future = CoreProfile::default();
+        future.scan_mode = "something-new".into();
+        assert_eq!(
+            aether_hop_timeout(&future),
+            aether_hop_timeout(&CoreProfile::default())
+        );
+    }
+
+    #[test]
+    fn pinning_a_profile_that_already_asked_for_h2_says_nothing() {
+        // The log line exists to explain a choice being overridden. Saying it
+        // where nothing was overridden would read as a fault on every ordinary
+        // chained connect.
+        let mut hop = CoreProfile::default();
+        assert_eq!(transport_label(&hop), "masque-h2");
+        assert_eq!(pin_to_masque_h2(&mut hop), None);
     }
 
     #[test]
