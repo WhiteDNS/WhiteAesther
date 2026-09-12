@@ -17,7 +17,9 @@ import {
   carriersAvailable,
   fetchBridges,
   isDesktopRuntime,
+  getCoreStatus,
   lanShareStatus,
+  probeLatency,
   psiphonStatus,
   saveReport,
   setLanShare,
@@ -26,7 +28,8 @@ import {
   stopCore,
 } from "@/core/api";
 import {
-  ATTEMPT_CAP_MS, isImpossible, searchOrder, type SearchAttempt,
+  SETTLE_POLL_MS, attemptCapMs, isImpossible, searchBudgetMs, searchOrder, verdictFor,
+  type SearchAttempt,
 } from "./carrierSearch";
 import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
 import { Chain } from "./Chain";
@@ -37,7 +40,8 @@ import { transportName } from "./Simple";
 // that. The same text is installed beside the executable under licences/.
 import notices from "../../THIRD_PARTY_NOTICES.md?raw";
 import {
-  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, isLoneAether, type CarrierKind,
+  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, isLoneAether,
+  type CarrierKind,
   type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
 } from "@/types";
 
@@ -604,6 +608,76 @@ function BridgeFetch({ onFetched }: { onFetched: (lines: string[]) => void }) {
  * the single control aimed at the person with no idea what to choose is the
  * whole feature failing quietly.
  */
+/**
+ * Waits for one attempt to reach an answer, and says what the answer was.
+ *
+ * `null` means it is carrying traffic; a string is the reason it is not.
+ *
+ * Asked of the supervisor rather than inferred from `start_core` returning.
+ * That call answers at two different moments — after a hop is carrying traffic
+ * on the chained path, and the instant the process is spawned on the engine
+ * path — so treating it as the verdict settled the whole sweep on Aether alone
+ * wherever the engine binary merely existed, and the chained orderings below it
+ * were never tried at all.
+ *
+ * The cap is a safety net and not the deadline: each carrier fails its own
+ * attempt at its own deadline and says why, which is the answer worth showing.
+ * It is enforced by stopping rather than by walking away — the supervisor
+ * checks between hops and unwinds, so a timed-out attempt leaves nothing
+ * running.
+ */
+async function settle(
+  cap: number,
+  deadline: number,
+  cancelled: () => boolean,
+  t: (key: string) => string,
+): Promise<string | null> {
+  // Remembered so the timeout can say which half of the wait ran out. "Did not
+  // connect" and "connected and then carried nothing" send someone to look in
+  // completely different places.
+  let everConnected = false;
+  while (!cancelled()) {
+    // A status call that fails says nothing about the attempt — the window is
+    // closing, or the backend is busy — so it waits rather than convicting.
+    const snapshot = await getCoreStatus().catch(() => null);
+    if (snapshot) {
+      const verdict = verdictFor(snapshot.state);
+      if (verdict === "connected") {
+        everConnected = true;
+        // The last question, and the only one that is asked of the route rather
+        // than of the processes making it: has a request been through it and
+        // come back? A carrier that finishes its handshake and then carries
+        // nothing is the worst thing a search can settle on — it looks like
+        // success on every screen and fails everything the person then tries.
+        //
+        // `null` is not yet a verdict. A route measured in its first moment is
+        // often still settling, so it goes round again until the cap.
+        if ((await probeLatency().catch(() => null)) !== null) return null;
+      } else if (verdict === "failed") {
+        // The backend's own words when it has them. Those arrive in English
+        // from the supervisor, as every other failure on this list does.
+        return snapshot.lastError ?? t("stopped without saying why");
+      }
+    }
+    if (Date.now() >= deadline) {
+      // The seconds go in brackets at the end rather than inside the sentence:
+      // there is no interpolation in the dictionary, and a number spliced into
+      // the middle of a Persian sentence would have to be a different sentence.
+      const spent = ` (${Math.round(cap / 1000)}s)`;
+      return everConnected
+        ? t("connected, but nothing made the round trip through it") + spent
+        : t("did not connect within its own deadline") + spent;
+    }
+    await new Promise((resume) => window.setTimeout(resume, SETTLE_POLL_MS));
+  }
+  return t("the search was stopped");
+}
+
+/** `m:ss`, for a wait measured in minutes rather than hours. */
+function formatDuration(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 function WayOutSearch({
   profile,
   onChange,
@@ -621,6 +695,18 @@ function WayOutSearch({
   // rather than after all nine. Held in a ref because the running loop closes
   // over its own render's state and would never see a change to it.
   const cancelled = useRef(false);
+  // A clock, because the waits are now as long as the carriers themselves need
+  // and minutes of silence is what people give up on. A screen that is visibly
+  // counting is a screen that is visibly working.
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (startedAt === null) return;
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(tick);
+  }, [startedAt]);
+
+  const order = useMemo(() => searchOrder(available), [available]);
 
   /**
    * Tries each way out in turn and keeps the first that carries traffic.
@@ -634,7 +720,8 @@ function WayOutSearch({
     setSearching(true);
     setSearchFailure(null);
     cancelled.current = false;
-    const order = searchOrder(available);
+    setStartedAt(Date.now());
+    setNow(Date.now());
     setAttempts(order.map((candidate) => ({ chain: candidate, outcome: "pending" })));
 
     // Whatever is up now is in the way: the supervisor refuses a second
@@ -648,18 +735,32 @@ function WayOutSearch({
         current.map((entry, at) => (at === index ? { ...entry, outcome: "trying" } : entry)),
       );
 
-      // The cap is enforced by stopping rather than by walking away: the
-      // supervisor checks between hops and unwinds, so a timed-out attempt
-      // leaves no process behind.
-      const timer = window.setTimeout(() => void stopCore().catch(() => {}), ATTEMPT_CAP_MS);
+      // One deadline for the whole attempt, armed before it starts. The two
+      // paths spend it in different places -- a chained `start_core` blocks
+      // inside the call while the engine path returns at once and does its
+      // waiting in `settle` -- so anchoring both to the same moment is what
+      // keeps an attempt from being given the budget twice.
+      const cap = attemptCapMs(candidate, profile);
+      const deadline = Date.now() + cap;
+      const net = window.setTimeout(() => void stopCore().catch(() => {}), cap);
       let failure: string | null = null;
       try {
         await startCore({ ...profile, carriers: candidate });
+        // And then wait for it to actually carry traffic. `start_core` answers
+        // at two different moments: on the chained path it has already waited
+        // for a hop to carry traffic, and on the engine path it returns the
+        // instant the process is spawned. Only the snapshot tells them apart.
+        failure = await settle(cap, deadline, () => cancelled.current, t);
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
       } finally {
-        window.clearTimeout(timer);
+        window.clearTimeout(net);
       }
+
+      // Stopped part-way through this attempt. It has no verdict, so it keeps
+      // none: marking it failed would put a carrier on the list as ruled out
+      // here when all that happened is that nobody waited for it.
+      if (cancelled.current) break;
 
       if (!failure) {
         setAttempts((current) =>
@@ -689,7 +790,11 @@ function WayOutSearch({
       );
     }
     setSearching(false);
+    setStartedAt(null);
   };
+
+  const elapsed = startedAt === null ? 0 : Math.max(0, Math.round((now - startedAt) / 1000));
+  const budgetMinutes = Math.ceil(searchBudgetMs(order, profile) / 60_000);
   return (
     <Card className="border-primary/40 bg-primary/[0.06]">
       <CardHeader className="pb-3">
@@ -713,11 +818,22 @@ function WayOutSearch({
           >
             {searching ? t("Stop searching") : t("Find one that works")}
           </Button>
+          {/* The real number, before anyone commits to waiting for it. Each
+              carrier is given the time it actually needs to answer, which is
+              what makes the worst case long — and someone who was told that
+              waits, where someone who was not stops at two minutes believing
+              the app has hung. */}
           {searching ? (
             <p className="text-[12.5px] leading-snug text-muted-foreground">
-              {t("Each one gets up to 90 seconds. Stopping takes effect after the current attempt.")}
+              {t("Searching")} · {formatDuration(elapsed)} ·{" "}
+              {t("each carrier is given the time it needs. Stopping takes effect after the current attempt.")}
             </p>
-          ) : null}
+          ) : (
+            <p className="text-[12.5px] leading-snug text-muted-foreground">
+              {t("Worst case")} {budgetMinutes}{" "}
+              {t("minutes, if nothing gets out at all — and seconds when the first one does.")}
+            </p>
+          )}
         </div>
 
         {searchFailure ? (
@@ -937,6 +1053,16 @@ function CarrierPanel({
                 anything here. */}
             <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
               {t("Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.")}
+            </p>
+            {/* Said before it happens rather than left to be met as a hang. A
+                fresh Psiphon data directory has no tactics, so the path that
+                matters on a filtered network — in-proxy, which is brokered over
+                WebRTC before any tunnel exists — is not available yet, and
+                reaching it can take tunnel-core's full establish window. That
+                is minutes of a screen doing nothing visible, and minutes of
+                silence is what people stop. */}
+            <p className="pt-1 text-[12.5px] leading-snug text-muted-foreground">
+              {t("The first connect on a hard network can take several minutes: Psiphon has to fetch its own settings before it can use the routes that work there. Later connects are much faster.")}
             </p>
           </>
         ) : null}

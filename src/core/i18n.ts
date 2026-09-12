@@ -339,6 +339,8 @@ const FA: Record<string, string> = {
     "فهرست کشورها را خود سایفون می‌دهد و پس از نخستین اتصال می‌رسد.",
   "The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.":
     "تنظیمات ترابرد، جستجو و ضدمسدودسازی به موتور Aether مربوط‌اند. برای دیدنشان بالا Aether را انتخاب کنید.",
+  "The first connect on a hard network can take several minutes: Psiphon has to fetch its own settings before it can use the routes that work there. Later connects are much faster.":
+    "اولین اتصال روی یک شبکهٔ سخت می‌تواند چند دقیقه طول بکشد: سایفون باید اول تنظیمات خودش را بگیرد تا بتواند از مسیرهایی که آنجا کار می‌کنند استفاده کند. اتصال‌های بعدی خیلی سریع‌ترند.",
   "Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.":
     "زیر سایفون، پویشگر نقطهٔ پایانی، نقطهٔ پایانی ثابت‌شده و انتخاب ترابرد هیچ کاری نمی‌کنند — سایفون مسیر خودش را پیدا می‌کند.",
 
@@ -355,9 +357,17 @@ const FA: Record<string, string> = {
   "Stop searching": "توقف جستجو",
   "Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.":
     "هر راه خروج را به‌ترتیب امتحان می‌کند و اولی که ترافیک حمل کند نگه می‌دارد. اول تک‌ها، و جفت‌ها فقط اگر هیچ‌کدام بیرون نرفت.",
-  "Each one gets up to 90 seconds. Stopping takes effect after the current attempt.":
-    "به هرکدام تا ۹۰ ثانیه فرصت داده می‌شود. توقف بعد از تلاش فعلی اعمال می‌شود.",
+  "each carrier is given the time it needs. Stopping takes effect after the current attempt.":
+    "به هر حامل همان‌قدر که لازم دارد وقت داده می‌شود. توقف بعد از تلاش فعلی اعمال می‌شود.",
+  "Worst case": "بدترین حالت",
+  "minutes, if nothing gets out at all — and seconds when the first one does.":
+    "دقیقه، اگر هیچ راهی بیرون نرود — و چند ثانیه، وقتی اولی جواب بدهد.",
   "carrying traffic": "در حال حمل ترافیک",
+  "did not connect within its own deadline": "در مهلت خودش وصل نشد",
+  "connected, but nothing made the round trip through it":
+    "وصل شد، ولی هیچ درخواستی از آن رد نشد و برنگشت",
+  "stopped without saying why": "بدون گفتن دلیل متوقف شد",
+  "the search was stopped": "جستجو متوقف شد",
   "Nothing got out. Every way out was tried; the list above says how each one failed.":
     "هیچ‌چیز بیرون نرفت. همهٔ راه‌های خروج امتحان شد؛ فهرست بالا می‌گوید هرکدام چطور شکست خورد.",
 
