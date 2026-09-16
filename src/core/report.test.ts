@@ -11,6 +11,7 @@ function report(overrides: Partial<Parameters<typeof buildReport>[0]> = {}): str
   return buildReport({
     appVersion: "1.0.0",
     engineVersion: "aether 1.8.0",
+    engineAvailable: true,
     system: "windows · x86_64",
     snapshot: IDLE_SNAPSHOT,
     profile: DEFAULT_PROFILE,
@@ -131,4 +132,18 @@ test("the file name is a plain name the backend will accept", () => {
   assert.equal(name, "whiteaesther-20260812-140301.txt");
   // Mirrors sanitize_report_name in core_supervisor.rs.
   assert.match(name, /^[A-Za-z0-9][A-Za-z0-9._-]*\.txt$/);
+});
+
+test("an engine that is simply not in use is not reported as missing", () => {
+  // `probe_core` skips the version check when the chosen way out does not run
+  // the engine, so the version is null while nothing at all is wrong. Printing
+  // that as "unavailable" sent whoever read the report after a fault that was
+  // never there — and it happens on every report taken over Psiphon or Tor,
+  // which is exactly when someone is most likely to be collecting one.
+  const carried = report({ engineVersion: null, engineAvailable: true });
+  assert.match(carried, /engine not used by this way out/);
+  assert.doesNotMatch(carried, /engine unavailable/);
+
+  // And a genuinely missing engine still says so.
+  assert.match(report({ engineVersion: null, engineAvailable: false }), /engine unavailable/);
 });

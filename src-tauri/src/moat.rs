@@ -19,14 +19,10 @@
 use std::{
     io::{Read, Write},
     net::SocketAddr,
-    sync::Arc,
     time::Duration,
 };
 
-use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-
-use crate::http_bridge::socks5_connect;
+use crate::tls::connect_verified;
 
 const HOST: &str = "bridges.torproject.org";
 const PATH: &str = "/moat/circumvention/settings";
@@ -106,35 +102,10 @@ fn bridge_lines(parsed: &serde_json::Value) -> Vec<String> {
 
 /// One HTTPS POST, over a carrier's SOCKS listener when there is one.
 fn post(body: &str, carrier: Option<SocketAddr>) -> Result<String, String> {
-    let tcp = match carrier {
-        // Domain-name addressing, so the name is resolved at the far end of the
-        // carrier rather than here -- a lookup made locally would name the host
-        // to the network this is trying to get around.
-        Some(address) => socks5_connect(address, HOST, 443, TIMEOUT)
-            .map_err(|error| format!("the carrier refused the connection: {error}"))?,
-        None => {
-            let stream = std::net::TcpStream::connect((HOST, 443))
-                .map_err(|error| format!("cannot reach {HOST}: {error}"))?;
-            stream
-                .set_read_timeout(Some(TIMEOUT))
-                .map_err(|error| error.to_string())?;
-            stream
-        }
-    };
-    tcp.set_read_timeout(Some(TIMEOUT))
-        .map_err(|error| error.to_string())?;
-
-    let roots = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let server = ServerName::try_from(HOST)
-        .map_err(|error| format!("{HOST} is not a valid server name: {error}"))?;
-    let connection = ClientConnection::new(Arc::new(config), server)
-        .map_err(|error| format!("cannot start TLS: {error}"))?;
-    let mut tls = StreamOwned::new(connection, tcp);
+    // Through the carrier by name, and the answer authenticated against it.
+    // Both of those rules live in `tls`, which is also what judges a route in
+    // `carrier_probe` -- one place to get them right.
+    let mut tls = connect_verified(carrier, HOST, 443, TIMEOUT)?;
 
     let request = format!(
         "POST {PATH} HTTP/1.1\r\n\

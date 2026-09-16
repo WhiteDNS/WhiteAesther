@@ -301,6 +301,10 @@ const FA: Record<string, string> = {
     "چه چیزی ترافیک شما را از این شبکه بیرون می‌برد. برای عوض کردن محل خروج، یک پرش دوم اضافه کنید.",
   // The two pickers are one sentence broken in half, so the halves have to
   // read as a sentence in Persian too rather than as two labels.
+  "Find the way out for me": "راه خروج را برایم پیدا کن",
+  "Connect tries every way out at once and keeps the first that carries traffic. Off, it uses the one chosen below.":
+    "اتصال همهٔ راه‌های خروج را هم‌زمان امتحان می‌کند و اولی که ترافیک حمل کند نگه می‌دارد. خاموش که باشد، از همانی که پایین انتخاب شده استفاده می‌کند.",
+  "Used when the search finds nothing": "وقتی جستجو چیزی پیدا نکند، از این استفاده می‌شود",
   "Leaves this network through": "خروج از این شبکه با",
   "Then out through": "و سپس خروج از",
   "Nothing further": "هیچ‌چیز دیگر",
@@ -363,9 +367,10 @@ const FA: Record<string, string> = {
   "minutes, if nothing gets out at all — and seconds when the first one does.":
     "دقیقه، اگر هیچ راهی بیرون نرود — و چند ثانیه، وقتی اولی جواب بدهد.",
   "carrying traffic": "در حال حمل ترافیک",
+  "still running when another answered": "وقتی راه دیگری جواب داد، هنوز در حال اجرا بود",
   "did not connect within its own deadline": "در مهلت خودش وصل نشد",
-  "connected, but nothing made the round trip through it":
-    "وصل شد، ولی هیچ درخواستی از آن رد نشد و برنگشت",
+  "connected, but nothing proved who it was through it":
+    "وصل شد، ولی هیچ میزبانی از داخلش هویتش را ثابت نکرد",
   "stopped without saying why": "بدون گفتن دلیل متوقف شد",
   "the search was stopped": "جستجو متوقف شد",
   "Nothing got out. Every way out was tried; the list above says how each one failed.":

@@ -19,8 +19,9 @@ import {
   isDesktopRuntime,
   getCoreStatus,
   lanShareStatus,
-  probeLatency,
+  probeCarrier,
   psiphonStatus,
+  raceCarriers,
   saveReport,
   setLanShare,
   setPsiphonRegion,
@@ -636,6 +637,11 @@ async function settle(
   // connect" and "connected and then carried nothing" send someone to look in
   // completely different places.
   let everConnected = false;
+  // Why the last probe said no, so a route that came up and never proved itself
+  // is reported as that rather than as a bare timeout. "Connected but nothing
+  // got through" and "connected, and something that was not cloudflare-dns.com
+  // answered for it" send someone to very different places.
+  let lastRefusal: string | null = null;
   while (!cancelled()) {
     // A status call that fails says nothing about the attempt — the window is
     // closing, or the backend is busy — so it waits rather than convicting.
@@ -644,15 +650,22 @@ async function settle(
       const verdict = verdictFor(snapshot.state);
       if (verdict === "connected") {
         everConnected = true;
-        // The last question, and the only one that is asked of the route rather
-        // than of the processes making it: has a request been through it and
-        // come back? A carrier that finishes its handshake and then carries
-        // nothing is the worst thing a search can settle on — it looks like
-        // success on every screen and fails everything the person then tries.
+        // The last question, and the only one asked of the route rather than of
+        // the processes making it: did a host prove who it was through it? A
+        // carrier that finishes its handshake and then carries nothing is the
+        // worst thing a search can settle on — it looks like success on every
+        // screen and fails everything the person tries next.
         //
-        // `null` is not yet a verdict. A route measured in its first moment is
-        // often still settling, so it goes round again until the cap.
-        if ((await probeLatency().catch(() => null)) !== null) return null;
+        // Not "did bytes come back": an interception answers that too, and on a
+        // network that intercepts, the search would confidently pick the one
+        // route that is being read. `probeCarrier` asks a name the carrier has
+        // to resolve and checks the certificate that comes back is for it.
+        //
+        // A reason is not yet a verdict. A route asked in its first moment is
+        // often still settling, so it goes round again until the cap, and only
+        // the cap turns the last reason into a failure.
+        lastRefusal = await probeCarrier().catch(() => "the probe could not run");
+        if (lastRefusal === null) return null;
       } else if (verdict === "failed") {
         // The backend's own words when it has them. Those arrive in English
         // from the supervisor, as every other failure on this list does.
@@ -664,9 +677,10 @@ async function settle(
       // there is no interpolation in the dictionary, and a number spliced into
       // the middle of a Persian sentence would have to be a different sentence.
       const spent = ` (${Math.round(cap / 1000)}s)`;
-      return everConnected
-        ? t("connected, but nothing made the round trip through it") + spent
-        : t("did not connect within its own deadline") + spent;
+      if (!everConnected) return t("did not connect within its own deadline") + spent;
+      return lastRefusal
+        ? `${t("connected, but nothing proved who it was through it")} — ${lastRefusal}${spent}`
+        : t("connected, but nothing proved who it was through it") + spent;
     }
     await new Promise((resume) => window.setTimeout(resume, SETTLE_POLL_MS));
   }
@@ -728,9 +742,72 @@ function WayOutSearch({
     // connection while one is claimed.
     await stopCore().catch(() => {});
 
+    // The single carriers run together rather than in turn, because trying them
+    // in turn means the wait is the sum of the ones that failed first. On a
+    // network where the engine cannot get out but Psiphon can, that was minutes
+    // of the engine's budget before Psiphon was even started.
+    //
+    // The pairs below stay sequential and that is not a shortcut: every pair
+    // uses two of the three carriers, so no two of them can run at once.
+    const singles = order.filter((chain) => chain.second === null);
+    const pairs = order.filter((chain) => chain.second !== null);
     let settled = false;
-    for (const [index, candidate] of order.entries()) {
-      if (cancelled.current) break;
+
+    if (singles.length > 0 && !cancelled.current) {
+      setAttempts((current) =>
+        current.map((entry) => (entry.chain.second === null ? { ...entry, outcome: "trying" } : entry)),
+      );
+      const report = await raceCarriers(profile).catch((error) => {
+        setSearchFailure(error instanceof Error ? error.message : String(error));
+        return null;
+      });
+      const winner = report?.winner ?? null;
+
+      // What each way out actually did, in its own words. A lane that was still
+      // running when another answered first is not one that was ruled out, and
+      // the list says which is which.
+      if (report) {
+        const said = new Map(report.lanes.map((lane) => [lane.carrier, lane]));
+        setAttempts((current) =>
+          current.map((entry) => {
+            if (entry.chain.second !== null) return entry;
+            const lane = said.get(entry.chain.first);
+            if (!lane) {
+              return { ...entry, outcome: "pending", detail: t("still running when another answered") };
+            }
+            return {
+              ...entry,
+              outcome: lane.outcome === "carried" ? "connected" : "failed",
+              detail: lane.detail ?? undefined,
+            };
+          }),
+        );
+      }
+
+      if (!cancelled.current && winner) {
+        // The race proved the carrier and, for the engine, which framing did
+        // it. Both have to reach the profile, or the search proves one thing
+        // and the session that follows runs another.
+        const chosen: ConnectionProfile = {
+          ...profile,
+          carriers: { first: winner.carrier, second: null },
+          masqueTransport: winner.masqueTransport ?? profile.masqueTransport,
+        };
+        // Started on the ordinary path, not adopted from the race. The race
+        // stops everything it started, the winner included — so what is running
+        // afterwards is a session the connect path built, with a snapshot, a
+        // routing engine and a system proxy behind it.
+        await startCore(chosen).catch(() => {});
+        onChange(chosen);
+        settled = true;
+      }
+    }
+
+    for (const [position, candidate] of pairs.entries()) {
+      if (settled || cancelled.current) break;
+      // The attempts list is built from `order`, where the pairs sit after the
+      // singles, so a pair's place in it is not its place in `pairs`.
+      const index = singles.length + position;
       setAttempts((current) =>
         current.map((entry, at) => (at === index ? { ...entry, outcome: "trying" } : entry)),
       );
@@ -956,7 +1033,24 @@ function CarrierPanel({
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
-        <p className="pb-2 text-[12.5px] font-medium">{t("Leaves this network through")}</p>
+        {/* On by default, and the first thing on this card, because it decides
+            what every other control here means. Someone who reaches down and
+            picks a carrier has chosen one, and choosing turns this off — which
+            is the only reading of "I picked Tor" that is not a lie. */}
+        <Row
+          title="Find the way out for me"
+          help="Connect tries every way out at once and keeps the first that carries traffic. Off, it uses the one chosen below."
+        >
+          <Switch
+            checked={profile.autoRoute}
+            onCheckedChange={(autoRoute) => set({ autoRoute })}
+          />
+        </Row>
+        <Separator className="mb-3" />
+
+        <p className="pb-2 text-[12.5px] font-medium">
+          {profile.autoRoute ? t("Used when the search finds nothing") : t("Leaves this network through")}
+        </p>
         <div className="grid grid-cols-2 gap-2.5">
           {offered.map((option) => (
             <CarrierButton
@@ -1696,6 +1790,7 @@ function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVer
       buildReport({
         appVersion,
         engineVersion: probe.version,
+        engineAvailable: probe.available,
         system: runtime,
         snapshot,
         profile,
