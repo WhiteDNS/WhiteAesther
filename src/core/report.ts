@@ -10,6 +10,18 @@ export interface ReportOptions {
 export interface ReportInput {
   appVersion: string;
   engineVersion: string | null;
+  /**
+   * Whether the engine could be found at all, which is not the same as knowing
+   * its version.
+   *
+   * `probe_core` deliberately skips the version check when the chosen carrier
+   * does not use the engine — asking a binary nothing is going to run for its
+   * version is work for nothing. That leaves the version null while everything
+   * is fine, and the header used to print that as "engine unavailable". A
+   * report that invents a fault sends whoever reads it after a problem that was
+   * never there, which is worse than a report that says less.
+   */
+  engineAvailable: boolean;
   system: string;
   snapshot: CoreSnapshot;
   profile: ConnectionProfile;
@@ -66,11 +78,14 @@ export function reportFilename(now: Date = new Date()): string {
  * user having to audit it line by line.
  */
 export function buildReport(input: ReportInput): string {
-  const { appVersion, engineVersion, system, snapshot, profile, logs, options } = input;
+  const { appVersion, engineVersion, engineAvailable, system, snapshot, profile, logs, options } = input;
   // Version numbers are dotted quads often enough that running them through the
   // IPv4 pattern would redact them, so the header is composed separately and
   // never redacted. Everything below it can carry an address.
-  const header = [`app ${appVersion}`, `engine ${engineVersion ?? "unavailable"}`];
+  const header = [
+    `app ${appVersion}`,
+    `engine ${engineVersion ?? (engineAvailable ? "not used by this way out" : "unavailable")}`,
+  ];
   const body: string[] = [];
 
   if (options.includeSystem) body.push(`system ${system}`);

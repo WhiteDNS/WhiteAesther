@@ -157,7 +157,17 @@ export function attemptCapMs(chain: CarrierChain, profile?: SearchProfile): numb
  * app has hung. See "Show a clock and ask for patience".
  */
 export function searchBudgetMs(order: CarrierChain[], profile?: SearchProfile): number {
-  return order.reduce((total, chain) => total + attemptCapMs(chain, profile), 0);
+  // The singles run together, so they cost the slowest of them rather than all
+  // of them added up. The pairs still cost their sum: every pair uses two of
+  // the three carriers, so there is no fourth carrier to run a second pair
+  // with, and they can only go in turn.
+  const singles = order.filter((chain) => chain.second === null);
+  const raced = singles.length
+    ? Math.max(...singles.map((chain) => attemptCapMs(chain, profile)))
+    : 0;
+  return order
+    .filter((chain) => chain.second !== null)
+    .reduce((total, chain) => total + attemptCapMs(chain, profile), raced);
 }
 
 /** How often to ask the supervisor what the current attempt is doing. */

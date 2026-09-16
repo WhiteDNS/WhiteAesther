@@ -95,12 +95,24 @@ test("a chain waits for its hops added up, not for the longest of them", () => {
   assert.ok(attemptCapMs({ first: "tor", second: "psiphon" }) > Math.max(tor, psiphon));
 });
 
-test("the budget shown to the user is every attempt the sweep would make", () => {
+test("the budget counts the singles once, because they run together", () => {
+  // Racing them means the singles cost the slowest of them, not all of them
+  // added up. The pairs still cost their sum: every pair uses two of the three
+  // carriers, so there is no fourth carrier to run a second pair with.
   const order = searchOrder(null);
-  assert.equal(
-    searchBudgetMs(order),
-    order.reduce((total, chain) => total + attemptCapMs(chain), 0),
+  const singles = order.filter((chain) => chain.second === null);
+  const pairs = order.filter((chain) => chain.second !== null);
+
+  const expected = Math.max(...singles.map((chain) => attemptCapMs(chain)))
+    + pairs.reduce((total, chain) => total + attemptCapMs(chain), 0);
+  assert.equal(searchBudgetMs(order), expected);
+
+  // And it is strictly less than trying everything in turn, which is the whole
+  // reason the race exists.
+  assert.ok(
+    searchBudgetMs(order) < order.reduce((total, chain) => total + attemptCapMs(chain), 0),
   );
+
   // One carrier installed means one attempt, and the budget is that attempt.
   assert.equal(searchBudgetMs(searchOrder(["tor"])), attemptCapMs({ first: "tor", second: null }));
 });

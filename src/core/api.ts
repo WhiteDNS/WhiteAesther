@@ -134,6 +134,67 @@ export async function probeLatency(): Promise<number | null> {
   return invoke("probe_latency");
 }
 
+/**
+ * Whether the live route carries traffic to a host that proved who it is.
+ *
+ * `null` means it does — or that there was nothing connected to ask about,
+ * which is ordinary while a route is still coming up. A string is the reason it
+ * did not, ready to show beside the attempt it rules out.
+ *
+ * Distinct from `probeLatency`, which measures a route already trusted. This
+ * one decides whether to trust it: a TLS handshake to a name the carrier
+ * resolves, verified against that name, because a reply on its own is something
+ * an interception can produce just as promptly as the real host.
+ */
+export async function probeCarrier(): Promise<string | null> {
+  requireDesktop();
+  return invoke("probe_carrier");
+}
+
+export interface RaceWinner {
+  /** The carrier that proved itself, named as the profile names it. */
+  carrier: CarrierKind;
+  /** Which MASQUE framing won, when the winner was the engine. */
+  masqueTransport: "h2" | "h3" | null;
+  seconds: number;
+}
+
+/** What one way out did, whether or not it won. */
+export interface LaneOutcome {
+  carrier: CarrierKind;
+  transport: string | null;
+  outcome: "carried" | "failed";
+  detail: string | null;
+  seconds: number;
+}
+
+/**
+ * The winner, and what everything else did.
+ *
+ * The lanes matter as much as the winner. A search that ends with "nothing got
+ * out" and no record of what each way out actually did cannot be checked — and
+ * on a network with severe disruption, the failure worth catching is a working
+ * route being discarded, which leaves no trace unless the attempt writes one.
+ */
+export interface RaceReport {
+  winner: RaceWinner | null;
+  lanes: LaneOutcome[];
+}
+
+/**
+ * Starts every single carrier at once and returns the first that carries
+ * traffic, or `null` when none of them does.
+ *
+ * The backend owns this rather than the window, because a race has to bring
+ * carriers up and take them down again and there is one supervisor to claim.
+ * What comes back is the *identity* of a way out; starting it for real is still
+ * `startCore`, on the same path the Connect button uses.
+ */
+export async function raceCarriers(profile: ConnectionProfile): Promise<RaceReport> {
+  requireDesktop();
+  return invoke("race_carriers", { profile });
+}
+
 export interface SpeedResult {
   mbps: number;
   bytes: number;

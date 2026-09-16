@@ -298,10 +298,30 @@ was about to succeed, so the screen says the number before anyone commits to it
 and counts a clock while it runs — minutes of silence is what people give up on.
 Ordering is what keeps the usual case to seconds.
 
-- **Singles first, in order of measured speed:** Aether (~25s), Psiphon (~40s),
-  Tor (~60s). On most networks the first one answers and the search ends.
+- **The singles run together, not in turn** (`race.rs`). Trying them in turn
+  makes the wait the *sum of the ones that failed first*: on a network where the
+  engine cannot get out but Psiphon can, that was the engine's whole budget —
+  minutes — before Psiphon was even started. Raced, the wait is the fastest
+  carrier rather than the slowest path to it.
+
+  The lanes are **carriers, not routes**, and that is what makes it possible
+  here at all. `Psiphon` and `Tor` are one managed instance each and `start`
+  on either begins by stopping whatever it was doing, so nothing may ever ask
+  for two Psiphons. The engine is the exception: a trial engine is an ordinary
+  child process on a private port, so both MASQUE framings run at once — which
+  is the point, since H2 and H3 are not interchangeable per network.
+
+  A trial is a question, not a session. It claims no snapshot, applies no system
+  proxy and starts no routing engine, and the race stops everything it started
+  including the winner. What comes back is the *identity* of a way out, and the
+  ordinary connect path starts it from scratch. That costs the winner one more
+  connect and buys something worth more: the code that decides where a person's
+  traffic actually goes is untouched by any of this.
+
 - **Chains only after every single has failed**, which is the situation the
-  search exists for.
+  search exists for — and they stay sequential, which is not a shortcut. Every
+  pair uses two of the three carriers, so there is no fourth carrier to run a
+  second pair with.
 - **A cap per attempt, taken from the deadline the carrier already enforces on
   itself** — `AETHER_HOP_TIMEOUT` (150s), `ESTABLISH_TIMEOUT` (315s),
   `BOOTSTRAP_TIMEOUT` (180s), added up across the hops of a chain.
@@ -324,14 +344,31 @@ Ordering is what keeps the usual case to seconds.
   The cap is a safety net, not the deadline. Each carrier fails its own attempt
   at its own deadline and says why, and that reason is what the list shows.
 
-- **A route counts only once a request has made the round trip through it.**
+- **A route counts only once a host has proved who it is through it.**
   Reaching `connected` says the processes are up and the handshakes finished. It
   does not say anything went through. A carrier that completes its handshake and
   then carries nothing is the worst thing a search can settle on: it looks like
-  success on every screen and fails everything the person tries next. `settle`
-  asks `probe_latency` — a real SOCKS5 CONNECT and a byte back — and treats a
-  connected route that never answers as a failure, named as one so it is not
-  confused with never connecting.
+  success on every screen and fails everything the person tries next.
+
+  1.9.1 settled it with `probe_latency` — a SOCKS5 CONNECT to `1.1.1.1:80` and a
+  byte back. That was right about bytes moving and wrong about what it proved.
+  It asks a literal address over plain HTTP, so a transparent interception
+  answers it exactly as promptly as Cloudflare does, and on a network that
+  intercepts, the search would confidently settle on the one route being read.
+  Bytes coming back is not evidence of who sent them.
+
+  `settle` now asks `probe_carrier` (`carrier_probe.rs`): a TLS handshake to a
+  **name**, resolved at the far end of the carrier, verified against a pinned
+  set of public roots. A certificate for the name asked for is something only
+  the real host can present. Two independent operators are tried, either being
+  enough — rejecting a working carrier is a real cost when the whole feature
+  exists for someone who cannot get out otherwise, so a confident "no" needs
+  both to have refused. The reason the last one gave is carried into the failure
+  the search shows, because "nothing got through" and "something that was not
+  that host answered for it" send someone to very different places.
+
+  `probe_latency` stays what it always was: the measurement for a route already
+  trusted, which is what the status screen charts.
 
 - **Wait for the snapshot, not for `start_core` to return.** That call answers
   at two different moments: on the chained path it has already waited for a hop

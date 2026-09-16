@@ -39,12 +39,18 @@ const option = (name) => {
  *
  * This one expires, unlike the others. `dist.torproject.org/torbrowser/` keeps
  * only the current release -- 15.0.21 was pinned here and staging began failing
- * with a plain 404 the day 15.0.22 replaced it. A pin protects against the
- * asset changing under us; it cannot keep the asset alive. Expect to bump this
- * on roughly Tor Browser's release cadence, and note that a green build says
- * nothing about tomorrow.
+ * with a plain 404 the day 15.0.22 replaced it, and then 15.0.22 went the same
+ * way. A pin protects against the asset changing under us; it cannot keep the
+ * asset alive. Expect to bump this on roughly Tor Browser's release cadence,
+ * and note that a green build says nothing about tomorrow.
+ *
+ * The digests below did not change between 15.0.22 and 15.0.23: the expert
+ * bundle is byte-identical across those two, so only the version in the URL
+ * moved. Worth checking rather than assuming on the next bump -- if the sums
+ * *do* change, that is the pin doing its job and the new ones have to come from
+ * Tor's manifest, never from whatever arrived.
  */
-const VERSION = "15.0.22";
+const VERSION = "15.0.23";
 
 /**
  * Rust target triple to the bundle that serves it, with the SHA-256 Tor

@@ -223,6 +223,16 @@ export interface ConnectionProfile {
   /** Keep retrying after a route drops, rather than leaving it dead. */
   autoReconnect: boolean;
   /**
+   * Find the way out rather than taking the one in `carriers`.
+   *
+   * On by default, and that is the point. Almost nobody opens Advanced — they
+   * press Connect, and if it does not connect they stop using the app. They do
+   * not go looking for a carrier picker they have never heard of to discover
+   * that Psiphon would have worked. Connect has to be the thing that finds a
+   * way out, not the thing that tries one.
+   */
+  autoRoute: boolean;
+  /**
    * Which way out of the network to use.
    *
    * Everything else in this profile describes the Aether engine and applies
@@ -321,6 +331,7 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   gateway: false,
   systemProxy: false,
   autoReconnect: true,
+  autoRoute: true,
   carriers: { first: "aether", second: null },
   psiphon: { egressRegion: "" },
   tor: { bridges: "none", transport: "obfs4", customBridges: "" },

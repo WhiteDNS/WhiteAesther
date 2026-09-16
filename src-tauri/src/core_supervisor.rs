@@ -132,6 +132,18 @@ pub struct CoreProfile {
     /// Keep trying after a route drops. Off, a session that dies is left dead
     /// rather than retried, which is what someone debugging a network wants.
     pub auto_reconnect: bool,
+    /// Find the way out rather than taking the one in `carriers`.
+    ///
+    /// **On by default, and that is the whole point of it.** Almost nobody
+    /// opens Advanced. They press Connect, and if it does not connect they stop
+    /// using the app -- they do not go looking for a carrier picker they have
+    /// never heard of to discover that Psiphon would have worked. Connect has
+    /// to be the thing that finds a way out, not the thing that tries one.
+    ///
+    /// Off means the carrier in `carriers` is used as chosen, which is what
+    /// someone who went and chose one meant by choosing it.
+    #[serde(default = "yes")]
+    pub auto_route: bool,
     /// The second hop, and where its nodes come from.
     pub chain: ChainSettings,
     /// How the Psiphon carrier should run. Ignored unless `carrier` selects it.
@@ -185,6 +197,7 @@ impl Default for CoreProfile {
             performance_profile: "auto".into(),
             keepalive_secs: 25,
             auto_reconnect: true,
+            auto_route: true,
             chain: ChainSettings::default(),
             psiphon: crate::psiphon::PsiphonSettings::default(),
             tor: crate::tor::TorSettings::default(),
@@ -217,7 +230,7 @@ impl Default for CoreProfile {
 }
 
 impl CoreProfile {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         require_one_of("protocol", &self.protocol, &["masque", "wg", "gool"])?;
         require_one_of("MASQUE transport", &self.masque_transport, &["h2", "h3"])?;
         require_one_of(
@@ -557,6 +570,40 @@ impl CoreSupervisor {
                 snapshot_dirty: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Says on screen what the search is doing, without claiming a session.
+    ///
+    /// The race starts nothing the snapshot owns -- no child, no chain, no
+    /// system proxy -- but it can take minutes, and a Connect button that does
+    /// nothing visible for minutes is the exact thing people give up on. So it
+    /// writes the one field the screen reads for progress and nothing else.
+    ///
+    /// `searching` false puts the snapshot back to idle, which is where it was:
+    /// a search that ends without a winner must not leave the screen looking
+    /// like something is still coming.
+    pub fn show_search(&self, searching: bool, message: Option<String>) {
+        let mut snapshot = lock(&self.inner.snapshot);
+        // Never over a live session. Nothing should be racing while one is up,
+        // and if one somehow is, its state is the truth.
+        if snapshot.state == "connected" {
+            return;
+        }
+        snapshot.state = if searching { "scanning".into() } else { "idle".into() };
+        snapshot.status_message = message;
+        mark_snapshot_dirty(&self.inner);
+    }
+
+    /// Writes a line into the diagnostics log from outside this module.
+    ///
+    /// The race is the caller that needs this. A search that ends with "nothing
+    /// got out" and no record of what each way out actually did is a search
+    /// nobody can check -- and on a network with severe disruption, the failure
+    /// that matters is a working route being discarded, which leaves no trace
+    /// at all unless the attempt writes one. The report a person sends back is
+    /// built from this log, so the evidence has to be in it.
+    pub fn log(&self, level: &str, message: String) {
+        supervisor_log(&self.inner, level, message);
     }
 
     /// The listener to measure through, or `None` when nothing is connected.
@@ -1015,16 +1062,19 @@ fn start_carrier_blocking(
 /// upstream -- measured at 1340 attempts from Psiphon against a refusing proxy
 /// -- so the chain owns recovery instead, as one unit. See finding 4 in
 /// `CARRIER-CHAINING.md`.
-fn launch(
+/// The exact command that runs an engine, arguments and environment both.
+///
+/// One builder, because the race in `race.rs` starts engines too and an engine
+/// started differently is not the engine being tested. The credentials, the
+/// user's own upstream proxy and the two behaviour switches all have to reach a
+/// trial run, or the race would measure a configuration nobody is going to
+/// connect with. `--bind` comes from the profile, so a caller that wants a
+/// private listener hands in a profile that says so.
+pub(crate) fn engine_command(
     app: &AppHandle,
-    inner: &Arc<SupervisorInner>,
     profile: &CoreProfile,
-    attempt: u32,
-    generation: u64,
-    supervised: bool,
-) -> Result<(), String> {
-    let core_path = resolve_core_path(app, profile.core_path.as_deref())?;
-    let version = core_version(&core_path)?;
+    core_path: &Path,
+) -> Result<Command, String> {
     let config_dir = app
         .path()
         .app_config_dir()
@@ -1049,7 +1099,7 @@ fn launch(
         effective_profile.routes_file = Some(generated.to_string_lossy().into_owned());
     }
 
-    let mut command = Command::new(&core_path);
+    let mut command = Command::new(core_path);
     command
         .args(effective_profile.args(&identity_path))
         .current_dir(&config_dir)
@@ -1100,7 +1150,20 @@ fn launch(
     }
 
     hide_console_window(&mut command);
+    Ok(command)
+}
 
+fn launch(
+    app: &AppHandle,
+    inner: &Arc<SupervisorInner>,
+    profile: &CoreProfile,
+    attempt: u32,
+    generation: u64,
+    supervised: bool,
+) -> Result<(), String> {
+    let core_path = resolve_core_path(app, profile.core_path.as_deref())?;
+    let version = core_version(&core_path)?;
+    let mut command = engine_command(app, profile, &core_path)?;
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start Aether core: {error}"))?;
@@ -2918,7 +2981,7 @@ const AETHER_HOP_OVERHEAD: Duration = Duration::from_secs(20);
 /// handshake is 170s -- and cut `thorough` almost in half. Both failed as "did
 /// not connect" while the engine was still working, which is the one thing
 /// finding 4 of the Android notes says never to do to a search.
-fn aether_hop_timeout(profile: &CoreProfile) -> Duration {
+pub(crate) fn aether_hop_timeout(profile: &CoreProfile) -> Duration {
     scan_deadline(&profile.scan_mode)
         + Duration::from_secs(profile.startup_secs)
         + AETHER_HOP_OVERHEAD
@@ -3503,7 +3566,7 @@ fn stop_inner(inner: &SupervisorInner, app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_core_path(app: &AppHandle, requested: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_core_path(app: &AppHandle, requested: Option<&str>) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Some(path) = non_empty(requested) {
         candidates.push(PathBuf::from(path));

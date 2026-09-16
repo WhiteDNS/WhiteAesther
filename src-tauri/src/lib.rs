@@ -1,4 +1,5 @@
 mod carrier;
+mod carrier_probe;
 mod chain;
 mod core_supervisor;
 mod elevation;
@@ -8,8 +9,10 @@ mod lan_share;
 mod latency;
 mod moat;
 mod psiphon;
+mod race;
 mod scanner;
 mod system_proxy;
+mod tls;
 mod tor;
 
 use chain::Chain;
@@ -96,12 +99,23 @@ fn tor_log(tor: tauri::State<'_, tor::Tor>) -> Vec<String> {
 /// is absent.
 #[tauri::command]
 fn carriers_available(app: AppHandle) -> Vec<String> {
-    let mut available = vec!["aether".to_string()];
-    if psiphon::is_available(&app) {
-        available.push("psiphon".into());
+    carriers_installed(&app)
+        .into_iter()
+        .map(|kind| kind.proxy_name().to_string())
+        .collect()
+}
+
+/// What this build actually ships, as the kinds the rest of the crate speaks.
+///
+/// The screen reads the string form above; the race reads this. One answer
+/// behind both, so a carrier the picker hides can never be one a race starts.
+pub(crate) fn carriers_installed(app: &AppHandle) -> Vec<carrier::CarrierKind> {
+    let mut available = vec![carrier::CarrierKind::Aether];
+    if psiphon::is_available(app) {
+        available.push(carrier::CarrierKind::Psiphon);
     }
-    if tor::is_available(&app) {
-        available.push("tor".into());
+    if tor::is_available(app) {
+        available.push(carrier::CarrierKind::Tor);
     }
     available
 }
@@ -325,6 +339,8 @@ pub fn run() {
             scanner::test_endpoint,
             scanner::cancel_scan,
             latency::probe_latency,
+            carrier_probe::probe_carrier,
+            race::race_carriers,
             latency::speed_test,
             latency::exit_info,
             chain_status,

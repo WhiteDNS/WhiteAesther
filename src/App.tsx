@@ -16,7 +16,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getCoreLogs, getCoreStatus, isDesktopRuntime, loadProfile, probeCore, probeLatency, runtimeInfo,
   NEEDS_ADMINISTRATOR, fullTunnelIsPermitted, restartAsAdministrator, resumingFullTunnel,
-  saveProfile as persistProfile, setFullTunnel, setSystemProxy, startCore, stopCore, subscribeCore,
+  raceCarriers, saveProfile as persistProfile, setFullTunnel, setSystemProxy, startCore, stopCore,
+  subscribeCore,
   subscribeTrayActions,
 } from "@/core/api";
 import { withNormalizedEndpoint } from "@/core/endpoint";
@@ -205,7 +206,30 @@ export default function App() {
       const latest = await probeCore(effective);
       setProbe(latest);
       if (!latest.available) throw new Error(latest.message);
-      setSnapshot(await startCore(effective));
+
+      // Connect finds a way out rather than trying one. Almost nobody opens
+      // Advanced: they press this button, and if it does not connect they stop
+      // using the app — they do not go looking for a carrier picker they have
+      // never heard of to discover that Psiphon would have worked here.
+      //
+      // The race says so on screen while it runs, so the minutes it can take on
+      // a hard network are minutes of something visibly happening.
+      let chosen = effective;
+      if (effective.autoRoute) {
+        const report = await raceCarriers(effective);
+        if (report.winner) {
+          chosen = {
+            ...effective,
+            carriers: { first: report.winner.carrier, second: null },
+            masqueTransport: report.winner.masqueTransport ?? effective.masqueTransport,
+          };
+        }
+        // No winner is not a reason to refuse to try. The configured carrier
+        // still gets its ordinary attempt, with the supervisor's own retries
+        // and a real error at the end of them — which is more use to somebody
+        // than a search that shrugs.
+      }
+      setSnapshot(await startCore(chosen));
     } catch (error) {
       showError(error);
     }
