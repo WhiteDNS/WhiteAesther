@@ -154,8 +154,10 @@ export async function probeCarrier(): Promise<string | null> {
 export interface RaceWinner {
   /** The carrier that proved itself, named as the profile names it. */
   carrier: CarrierKind;
-  /** Which MASQUE framing won, when the winner was the engine. */
+  /** Which MASQUE framing won, when the winner was the engine on one. */
   masqueTransport: "h2" | "h3" | null;
+  /** The protocol the winning lane ran, when it differs from the profile's. */
+  protocol: ConnectionProfile["protocol"] | null;
   seconds: number;
 }
 

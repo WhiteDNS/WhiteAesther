@@ -231,7 +231,7 @@ impl Default for CoreProfile {
 
 impl CoreProfile {
     pub(crate) fn validate(&self) -> Result<(), String> {
-        require_one_of("protocol", &self.protocol, &["masque", "wg", "gool"])?;
+        require_one_of("protocol", &self.protocol, &["masque", "wg", "gool", "mim"])?;
         require_one_of("MASQUE transport", &self.masque_transport, &["h2", "h3"])?;
         require_one_of(
             "scan mode",
@@ -3681,6 +3681,7 @@ fn transport_label(profile: &CoreProfile) -> &'static str {
         ("masque", "h2") => "masque-h2",
         ("masque", _) => "masque-h3",
         ("wg", _) => "wireguard",
+        ("mim", _) => "masque-in-masque",
         _ => "warp-in-warp",
     }
 }

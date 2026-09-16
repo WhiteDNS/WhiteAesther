@@ -355,6 +355,12 @@ const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: Co
   { id: "h2", label: "MASQUE H2", detail: "TCP. Survives networks that block UDP.", protocol: "masque", transport: "h2" },
   { id: "h3", label: "MASQUE H3", detail: "QUIC. Lower overhead where UDP gets through.", protocol: "masque", transport: "h3" },
   { id: "wg", label: "WireGuard", detail: "UDP, with an obfuscation profile sweep.", protocol: "wg" },
+  // Two nested MASQUE hops. For a network that has learnt to recognise one --
+  // which is the case this whole app exists for, so it belongs in the picker
+  // rather than behind a flag. Desktop only: every protocol on Android needs an
+  // embedded variant that hands its stack to the app instead of binding
+  // listeners, and this one has none.
+  { id: "mim", label: "MASQUE in MASQUE", detail: "Two nested hops. Slower, for networks that spot a single one.", protocol: "mim" },
   { id: "gool", label: "WARP in WARP", detail: "Nested tunnel. Slower, harder to classify.", protocol: "gool" },
 ];
 
@@ -791,6 +797,7 @@ function WayOutSearch({
         const chosen: ConnectionProfile = {
           ...profile,
           carriers: { first: winner.carrier, second: null },
+          protocol: winner.protocol ?? profile.protocol,
           masqueTransport: winner.masqueTransport ?? profile.masqueTransport,
         };
         // Started on the ordinary path, not adopted from the race. The race
@@ -1187,8 +1194,12 @@ function CarrierPanel({
 function Routes({ profile, onChange }: AdvancedProps) {
   const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  // MASQUE is the only protocol with a second axis, so it is the only one whose
+  // id is not simply the protocol. A chain of ternaries that ended in "gool"
+  // silently claimed every unknown protocol was WARP-in-WARP, which is how a
+  // new one shows up in the picker with the wrong button lit.
   const active =
-    profile.protocol === "masque" ? profile.masqueTransport : profile.protocol === "wg" ? "wg" : "gool";
+    profile.protocol === "masque" ? profile.masqueTransport : profile.protocol;
   const isMasque = profile.protocol === "masque";
   const isH2 = isMasque && profile.masqueTransport === "h2";
 

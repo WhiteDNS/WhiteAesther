@@ -221,6 +221,7 @@ export default function App() {
           chosen = {
             ...effective,
             carriers: { first: report.winner.carrier, second: null },
+            protocol: report.winner.protocol ?? effective.protocol,
             masqueTransport: report.winner.masqueTransport ?? effective.masqueTransport,
           };
         }

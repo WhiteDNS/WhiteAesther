@@ -1195,12 +1195,13 @@ fn wait_until_tun_is_up(api: SocketAddr, secret: &str) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    Err(
-        "the full-tunnel device did not come up. Creating a network adapter needs permission \
-         this copy was not started with -- switch Full tunnel on again and accept the restart \
-         when it is offered."
-            .into(),
-    )
+    // The remedy is per-platform and only Windows can offer to fix itself, so
+    // the sentence comes from `elevation` rather than being written here. See
+    // `how_to_get_permission`.
+    Err(format!(
+        "the full-tunnel device did not come up. {}",
+        crate::elevation::how_to_get_permission()
+    ))
 }
 
 /// Whether mihomo reports a live TUN device in its own configuration dump.
