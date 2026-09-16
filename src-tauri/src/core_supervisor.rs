@@ -984,6 +984,10 @@ fn start_carrier_blocking(
             chain.listener()
         ),
     );
+    // The network has just proved it reaches the outside, which is the only
+    // moment the second MASQUE-in-MASQUE device can be registered at all. See
+    // `mim_identity`.
+    crate::mim_identity::arm_in_background(app, profile);
     let tun = tun_is_possible(inner, profile.full_tunnel);
     // `engine`, not `chain`: the mihomo instance, as distinct from the carrier
     // chain it is being pointed at.
@@ -2510,6 +2514,9 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
         .as_ref()
         .is_none_or(|session| session.profile.carriers.is_lone_aether());
 
+    // Whether this line is the one that turned a search into a connection, as
+    // opposed to any of the many that arrive while it stays one.
+    let mut newly_connected = false;
     let connected = {
         let mut snapshot = lock(&inner.snapshot);
         // Once the core is gone, buffered lines still draining from the pipe must
@@ -2526,6 +2533,7 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
             if connected {
                 snapshot.attempt = 0;
                 snapshot.status_message = None;
+                newly_connected = !matches!(before.state.as_str(), "connected");
             }
             // Most log lines change nothing. Emitting regardless meant two IPC
             // messages and a full re-render for every line the core printed.
@@ -2546,6 +2554,17 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
     // worth more than a second identical pass.
     if !connected && sweep_exhausted(&message) {
         end_fruitless_sweep(inner);
+    }
+
+    // The network has just proved it reaches the outside, which is the only
+    // moment the second MASQUE-in-MASQUE device can be registered at all. Once
+    // per transition, not once per log line -- a connected engine prints
+    // plenty, and this must not be asked of every one of them. See
+    // `mim_identity`, which guards itself too.
+    if newly_connected {
+        if let Some(session) = lock(&inner.session).as_ref() {
+            crate::mim_identity::arm_in_background(app, &session.profile);
+        }
     }
 
     // A tunnel that came up has spent its failures. Anything after this is a

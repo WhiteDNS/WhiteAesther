@@ -7,6 +7,7 @@ mod http_bridge;
 mod iran_routes;
 mod lan_share;
 mod latency;
+mod mim_identity;
 mod moat;
 mod psiphon;
 mod race;
