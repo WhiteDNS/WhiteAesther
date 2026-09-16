@@ -107,10 +107,14 @@ pub struct RaceReport {
 pub struct RaceWinner {
     /// The carrier that proved itself, as the profile names it.
     pub carrier: String,
-    /// Which MASQUE framing won, when the winner was the engine. The profile
-    /// has to carry this into the connect that follows, or the race proves one
-    /// thing and the session runs another.
+    /// Which MASQUE framing won, when the winner was the engine on one. The
+    /// profile has to carry this into the connect that follows, or the race
+    /// proves one thing and the session runs another.
     pub masque_transport: Option<String>,
+    /// The protocol the winning lane ran, when it is not the one the profile
+    /// already holds. `mim` is its own protocol rather than a MASQUE framing,
+    /// so a winner on it changes this instead of the field above.
+    pub protocol: Option<String>,
     /// How long it took to answer, for the line that says so on screen.
     pub seconds: u64,
 }
@@ -147,6 +151,13 @@ fn lanes(profile: &CoreProfile, available: &[CarrierKind]) -> Vec<Lane> {
         if profile.protocol == "masque" {
             lanes.push(Lane { kind: CarrierKind::Aether, transport: Some("h2") });
             lanes.push(Lane { kind: CarrierKind::Aether, transport: Some("h3") });
+            // Two nested MASQUE hops, raced last among the engine's lanes
+            // because it is the slowest and the most work. It exists for the
+            // network that has learnt to recognise a single MASQUE hop, and on
+            // that network it is the only engine lane that can get out -- so it
+            // has to be tried without anybody knowing to ask for it. Nobody
+            // opens Advanced.
+            lanes.push(Lane { kind: CarrierKind::Aether, transport: Some("mim") });
         } else {
             lanes.push(Lane { kind: CarrierKind::Aether, transport: None });
         }
@@ -205,9 +216,15 @@ fn run_lane(
     let (listener, _engine) = match lane.kind {
         CarrierKind::Aether => {
             let mut trial = profile.clone();
-            if let Some(transport) = lane.transport {
-                trial.protocol = "masque".into();
-                trial.masque_transport = transport.into();
+            match lane.transport {
+                // Its own protocol rather than a MASQUE framing, so it sets
+                // `protocol` and leaves `masque_transport` alone.
+                Some("mim") => trial.protocol = "mim".into(),
+                Some(transport) => {
+                    trial.protocol = "masque".into();
+                    trial.masque_transport = transport.into();
+                }
+                None => {}
             }
             // Its own listener, so two engine lanes and whatever the user
             // already has running never contend for one port.
@@ -340,7 +357,15 @@ pub async fn race_carriers(
             if carried {
                 winner = Some(RaceWinner {
                     carrier: lane.kind.proxy_name().into(),
-                    masque_transport: lane.transport.map(str::to_string),
+                    masque_transport: match lane.transport {
+                        Some("mim") | None => None,
+                        Some(framing) => Some(framing.to_string()),
+                    },
+                    protocol: match lane.transport {
+                        Some("mim") => Some("mim".into()),
+                        Some(_) => Some("masque".into()),
+                        None => None,
+                    },
                     seconds: started.elapsed().as_secs(),
                 });
                 break;
@@ -434,6 +459,12 @@ mod tests {
             vec![
                 (CarrierKind::Aether, Some("h2")),
                 (CarrierKind::Aether, Some("h3")),
+                // Last of the engine's lanes: the slowest, and the one that
+                // exists for a network that has learnt to recognise a single
+                // MASQUE hop. Raced rather than offered, because on that
+                // network it is the only engine lane that gets out and nobody
+                // opens Advanced to ask for it.
+                (CarrierKind::Aether, Some("mim")),
                 (CarrierKind::Psiphon, None),
                 (CarrierKind::Tor, None),
             ]
@@ -465,7 +496,8 @@ mod tests {
         let profile = CoreProfile::default();
         let lanes = lanes(&profile, &[CarrierKind::Aether, CarrierKind::Psiphon]);
         assert!(lanes.iter().all(|lane| lane.kind != CarrierKind::Tor));
-        assert_eq!(lanes.len(), 3);
+        // Three engine framings plus Psiphon.
+        assert_eq!(lanes.len(), 4);
 
         assert!(lanes_for_nothing_installed().is_empty());
     }

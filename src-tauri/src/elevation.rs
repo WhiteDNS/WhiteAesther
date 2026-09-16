@@ -57,6 +57,46 @@ pub fn is_elevated() -> bool {
     true
 }
 
+/// What a person actually has to do when the full-tunnel device will not come
+/// up, which is not the same sentence on every platform.
+///
+/// Windows can ask for the permission itself, so it says so. Nothing else can:
+/// [`is_elevated`] reports true there because the permission lives on the
+/// binary or the service manager rather than on the session, and the app has no
+/// way to grant it — so a message offering a restart describes something that
+/// is never going to be offered. Issue #37 is exactly that: a Linux user told
+/// to accept a prompt that cannot appear, on a build where the feature simply
+/// cannot work as installed.
+///
+/// The alternative is named because it is a real one rather than a
+/// consolation. "Whole machine" sets the system proxy, which every ordinary
+/// application honours; what it misses is the programs that ignore proxy
+/// settings, and that is the whole of the difference for most people.
+pub fn how_to_get_permission() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Creating a network adapter needs permission this copy was not started with -- switch \
+         Full tunnel on again and accept the restart when it is offered."
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Creating a network adapter needs a permission this copy does not have. Start it with \
+         sudo, or give the binary CAP_NET_ADMIN, and the device will come up. \"Whole machine\" \
+         needs no permission and covers every application that honours the system proxy."
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Creating a network adapter needs a permission this copy does not have, and macOS only \
+         grants it to a privileged helper this build does not install yet. Use \"Whole machine\", \
+         which needs no permission and covers every application that honours the system proxy."
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        "Creating a network adapter needs a permission this copy does not have. \"Whole machine\" \
+         needs no permission and covers every application that honours the system proxy."
+    }
+}
+
 /// Starts this same executable again, elevated, and reports whether the prompt
 /// was accepted.
 ///
@@ -155,6 +195,23 @@ pub fn allow_launches_from_an_ordinary_user(_identifier: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_remedy_offered_is_one_this_platform_can_actually_perform() {
+        let said = how_to_get_permission();
+        // Only Windows restarts itself with permission. Anywhere else, telling
+        // someone to accept a restart describes a prompt that never appears --
+        // which is issue #37, a Linux user sent after a thing that cannot
+        // happen on a build where the feature cannot work as installed.
+        if cfg!(windows) {
+            assert!(said.contains("restart"), "{said}");
+        } else {
+            assert!(!said.contains("restart"), "{said}");
+            // And it names the thing that does work, because "you cannot have
+            // this" without "here is what covers most of it" is not help.
+            assert!(said.contains("Whole machine"), "{said}");
+        }
+    }
 
     #[test]
     fn the_resume_flag_is_recognised_only_when_it_is_actually_passed() {

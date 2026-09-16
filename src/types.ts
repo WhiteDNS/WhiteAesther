@@ -157,7 +157,7 @@ export interface LanSettings {
 
 export interface ConnectionProfile {
   name: string;
-  protocol: "masque" | "wg" | "gool";
+  protocol: "masque" | "wg" | "gool" | "mim";
   masqueTransport: "h2" | "h3";
   scanMode: "turbo" | "balanced" | "thorough" | "stealth" | "ironclad";
   ipFamily: "v4" | "v6" | "both";
@@ -258,7 +258,7 @@ export interface CoreSnapshot {
   pid: number | null;
   corePath: string | null;
   version: string | null;
-  transport: "masque-h2" | "masque-h3" | "wireguard" | "warp-in-warp" | null;
+  transport: "masque-h2" | "masque-h3" | "wireguard" | "warp-in-warp" | "masque-in-masque" | null;
   endpoint: string | null;
   socksAddress: string;
   latencyMs: number | null;
