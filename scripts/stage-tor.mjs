@@ -130,6 +130,8 @@ const supportDir = join(binariesDir, "tor");
 const destination = join(supportDir, `tor${extension}`);
 await mkdir(supportDir, { recursive: true });
 
+let stagedVersion = VERSION;
+
 const staged = [
   destination,
   join(supportDir, `lyrebird${extension}`),
@@ -141,22 +143,78 @@ const staged = [
 if (await allPresent(staged)) {
   console.log(`Tor ${VERSION} already staged for ${target}`);
 } else {
-  const url = `https://dist.torproject.org/torbrowser/${VERSION}/${bundle.asset}`;
-  console.log(`Fetching ${bundle.asset}`);
-  const response = await fetch(url);
+  // What is actually being fetched, which is the pin until the pin is gone.
+  let { version, asset, sha256: expected } = { version: VERSION, ...bundle };
+
+  let url = `https://dist.torproject.org/torbrowser/${version}/${asset}`;
+  console.log(`Fetching ${asset}`);
+  let response = await fetch(url);
+
+  // A 404 is not the pin failing. It is the pinned release having been deleted,
+  // which `dist.torproject.org` does to every version the moment the next one
+  // lands -- so this happens on their schedule, not ours, and it has broken the
+  // build twice now with a bare status code and no hint of what to do.
+  //
+  // The distinction below is the whole design, and it must not blur: a bundle
+  // whose *digest* does not match is the pin catching something and always
+  // fails, no matter what. Only a bundle that is *not there at all* is followed
+  // forward, and then only to a newer version, verified against the digest Tor
+  // publishes for that version.
+  //
+  // That is a real if narrow loss: the pinned digest was read by a person from
+  // Tor's manifest and committed, and a followed one is whatever the manifest
+  // says today. It is the same manifest over the same TLS the tarball comes
+  // over, so it is not a new trust root -- but it is one fewer pair of eyes.
+  // Hence the warning, and hence it prints the lines to paste: the point is to
+  // get the pin back at the next commit, not to live without one.
+  if (response.status === 404) {
+    const current = await currentVersion();
+    if (!current || compareVersions(current, version) <= 0) {
+      throw new Error(
+        `${url} returned 404 and no newer release was found to follow.\n` +
+          `Check https://dist.torproject.org/torbrowser/ by hand.`,
+      );
+    }
+    const published = await publishedDigest(current, asset.replace(version, current));
+    if (!published) {
+      throw new Error(
+        `${url} returned 404, and ${current} publishes no ${asset.replace(version, current)}.\n` +
+          `Tor may have stopped building this target; check by hand.`,
+      );
+    }
+    console.warn(
+      `\n  !! Tor ${version} has been removed from dist.torproject.org.\n` +
+        `  !! Following to ${current} and verifying against the digest it publishes.\n` +
+        `  !! Re-pin this in scripts/stage-tor.mjs -- the pin is a person having\n` +
+        `  !! read the manifest, and following it forward skips that:\n` +
+        `  !!     const VERSION = "${current}";\n` +
+        `  !!     ${target} sha256: "${published}"\n`,
+    );
+    version = current;
+    asset = asset.replace(VERSION, current);
+    expected = published;
+    url = `https://dist.torproject.org/torbrowser/${version}/${asset}`;
+    response = await fetch(url);
+  }
+
+  // After the 404 branch, so it reports what was staged rather than what was
+  // asked for -- the two differ exactly when a release has been deleted, which
+  // is the moment somebody most needs to be told which one they actually got.
+  stagedVersion = version;
+
   if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-  const archive = join(binariesDir, `${bundle.asset}.download`);
+  const archive = join(binariesDir, `${asset}.download`);
   await writeFile(archive, Buffer.from(await response.arrayBuffer()));
 
   // Checked before a single file is unpacked. The alternative -- extract, then
   // verify what came out -- has already run an archive of unknown provenance
   // through a decompressor by the time it decides whether to trust it.
   const actual = await sha256(archive);
-  if (actual !== bundle.sha256) {
+  if (actual !== expected) {
     await rm(archive, { force: true });
     throw new Error(
-      `${bundle.asset} does not match the digest Tor published for it.\n` +
-        `  expected ${bundle.sha256}\n` +
+      `${asset} does not match the digest Tor published for it.\n` +
+        `  expected ${expected}\n` +
         `  actual   ${actual}`,
     );
   }
@@ -170,7 +228,7 @@ if (await allPresent(staged)) {
   // path contains a drive colon, and every tar reads `E:\...` as `host:path`
   // and tries to fetch it over rsh. The failure is an unrecoverable status 128
   // that says nothing about why.
-  execFileSync("tar", ["-xzf", `${bundle.asset}.download`, "-C", "tor-unpack"], {
+  execFileSync("tar", ["-xzf", `${asset}.download`, "-C", "tor-unpack"], {
     cwd: binariesDir,
     stdio: "inherit",
   });
@@ -212,7 +270,7 @@ if (await allPresent(staged)) {
 }
 
 const bridges = await countBridges(join(supportDir, "pt_config.json"));
-console.log(`Staged Tor ${VERSION} for ${target}`);
+console.log(`Staged Tor ${stagedVersion} for ${target}`);
 console.log(`  ${destination}  (${((await stat(destination)).size / 1048576).toFixed(1)} MB)`);
 console.log(`  ${supportDir}`);
 console.log(`  built-in bridges: ${bridges}`);
@@ -233,6 +291,63 @@ async function countBridges(path) {
   } catch (error) {
     return `unreadable (${error.message})`;
   }
+}
+
+/**
+ * The newest release `dist.torproject.org` is currently serving.
+ *
+ * Read from the directory index, because there is no API and the index is what
+ * the 404 is telling us about. Returns null rather than throwing: a lookup that
+ * fails leaves the caller to report the original 404, which is the more useful
+ * of the two errors.
+ */
+async function currentVersion() {
+  try {
+    const response = await fetch("https://dist.torproject.org/torbrowser/");
+    if (!response.ok) return null;
+    const body = await response.text();
+    const versions = [...body.matchAll(/href="(\d+\.\d+\.\d+)\//g)].map((match) => match[1]);
+    if (versions.length === 0) return null;
+    return versions.sort(compareVersions).at(-1);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The SHA-256 Tor published for one asset, from that release's own manifest.
+ *
+ * `sha256sums-signed-build.txt` is the same file the pinned digests were copied
+ * out of by hand. There is an `.asc` beside it that signs it, and checking that
+ * signature needs a key and a GPG dependency this script does not have -- so
+ * this is trusted at the level of the TLS connection that fetched it, exactly
+ * as the tarball is. Said plainly rather than implied: it is weaker than a
+ * signature check, and it is why following a version forward prints a warning.
+ */
+async function publishedDigest(version, asset) {
+  try {
+    const response = await fetch(
+      `https://dist.torproject.org/torbrowser/${version}/sha256sums-signed-build.txt`,
+    );
+    if (!response.ok) return null;
+    const line = (await response.text())
+      .split(/\r?\n/)
+      .find((row) => row.trim().endsWith(` ${asset}`));
+    return line ? line.trim().split(/\s+/)[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Numeric, so 15.0.9 sorts below 15.0.23 rather than above it. */
+function compareVersions(left, right) {
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const difference = (a[i] ?? 0) - (b[i] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 async function allPresent(paths) {
