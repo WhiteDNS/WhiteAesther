@@ -997,6 +997,7 @@ fn start_carrier_blocking(
         &ChainRequest {
             carriers: Some(chain),
             settings: &profile.chain,
+            listen: listen_port(&profile.socks_address),
             bypass_iran_sites: profile.bypass_iran_sites,
             tun,
         },
@@ -1496,6 +1497,7 @@ pub async fn set_full_tunnel(
         &ChainRequest {
             carriers: Some(carriers),
             settings: &chain_settings,
+            listen: configured_listen_port(inner),
             bypass_iran_sites,
             tun: enabled,
         },
@@ -1569,6 +1571,7 @@ pub async fn set_chain(
             &ChainRequest {
                 carriers: carriers.clone(),
                 settings: &settings,
+                listen: configured_listen_port(inner),
                 bypass_iran_sites,
                 tun,
             },
@@ -2631,6 +2634,7 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
                 &ChainRequest {
                     carriers: carriers.clone(),
                     settings: &chain_settings,
+                    listen: configured_listen_port(inner),
                     bypass_iran_sites,
                     tun: full_tunnel,
                 },
@@ -3020,6 +3024,16 @@ fn start_aether_hop(
     generation: u64,
 ) -> Result<Carrier, String> {
     let mut hop = profile.clone();
+
+    // A hop is plumbing, not the address anyone uses. mihomo takes the port the
+    // profile names, because mihomo is what applications talk to once a chain
+    // exists -- so an engine standing in the middle has to get out of its way
+    // or the two contend for one port and whichever loses lands somewhere
+    // random. That is the shape of the bug this fixes, seen from the other end.
+    if let Ok(port) = spare_port() {
+        hop.socks_address = format!("127.0.0.1:{port}");
+    }
+
     if let Some(address) = upstream {
         // The user's own upstream proxy wins, and a chain alongside one is
         // refused rather than silently overwriting it. Quietly replacing a
@@ -3092,6 +3106,46 @@ fn start_aether_hop(
         budget.as_secs()
     ))
 }
+
+/// The port the live session was configured with, for a chain being restarted
+/// after it is already up.
+///
+/// Read from the session rather than from the snapshot: once a chain is
+/// carrying, the snapshot holds *mihomo's* address, so asking it would feed the
+/// answer back into itself and drift a little further on every restart.
+fn configured_listen_port(inner: &SupervisorInner) -> u16 {
+    lock(&inner.session)
+        .as_ref()
+        .map_or(DEFAULT_LISTEN_PORT, |session| listen_port(&session.profile.socks_address))
+}
+
+/// A local port nothing is listening on, for a hop that needs one of its own.
+fn spare_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| format!("no free local port: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("no free local port: {error}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+/// The port out of a configured `host:port`, or the default when it will not
+/// parse.
+///
+/// A profile that cannot be read here must not silently become an ephemeral
+/// port -- that is the failure being fixed, arrived at by another road.
+pub(crate) fn listen_port(address: &str) -> u16 {
+    address
+        .parse::<SocketAddr>()
+        .map(|parsed| parsed.port())
+        .unwrap_or(DEFAULT_LISTEN_PORT)
+}
+
+/// What the profile ships with, and what the screen shows when nothing else is
+/// known.
+pub(crate) const DEFAULT_LISTEN_PORT: u16 = 1819;
 
 /// Forces a chained engine onto the one framing a SOCKS5 hop can carry.
 ///
@@ -4031,6 +4085,32 @@ mod tests {
             assert_eq!(attempted.protocol, "wg");
             assert_eq!(attempted.masque_transport, profile.masque_transport);
         }
+    }
+
+    #[test]
+    fn the_port_applications_are_pointed_at_comes_from_the_profile() {
+        // It used to be derived as one above the last hop's own listener. That
+        // read as a pair while the engine held its configured port, and became
+        // nonsense the moment a carrier owned the route: Psiphon and Tor take
+        // ephemeral ports, so the address the screen told people to use moved
+        // on every single connect. Reported from the field after 1.9.2 turned
+        // the search on by default and carriers started winning.
+        assert_eq!(listen_port("127.0.0.1:1819"), 1819);
+        assert_eq!(listen_port("127.0.0.1:9999"), 9999);
+        assert_eq!(listen_port("0.0.0.0:1080"), 1080);
+
+        // An address that will not parse must not quietly become whatever was
+        // free -- that is the same failure arrived at from the other side.
+        assert_eq!(listen_port(""), DEFAULT_LISTEN_PORT);
+        assert_eq!(listen_port("not an address"), DEFAULT_LISTEN_PORT);
+        assert_eq!(listen_port("127.0.0.1"), DEFAULT_LISTEN_PORT);
+
+        // And it is what the shipped profile actually says, so the default is
+        // not a second opinion that could drift from it.
+        assert_eq!(
+            listen_port(&CoreProfile::default().socks_address),
+            DEFAULT_LISTEN_PORT
+        );
     }
 
     #[test]

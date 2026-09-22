@@ -123,6 +123,14 @@ pub struct ChainRequest<'a> {
     /// rendered config. See [`crate::carrier::RunningChain`].
     pub carriers: Option<RunningChain>,
     pub settings: &'a ChainSettings,
+    /// The port a person points applications at, from the profile.
+    ///
+    /// Passed in rather than derived, because deriving it is what made it move.
+    /// This used to be one above the last hop's own listener -- fine when that
+    /// hop was the engine on its configured port, and nonsense the moment a
+    /// carrier owned it, because Psiphon and Tor take ephemeral ports. The
+    /// address the screen tells people to use then changed on every connect.
+    pub listen: u16,
     /// Let Iranian sites go straight out. See [`crate::iran_routes`].
     pub bypass_iran_sites: bool,
     /// Capture every application's traffic through a TUN device, including the
@@ -276,9 +284,12 @@ impl Chain {
         // to be the same one tomorrow. An ephemeral port meant every launch
         // moved it, and anything configured against the last run quietly went
         // out past the hop with the old exit address.
-        let mixed = preferred_port(
-            carriers.map_or(DEFAULT_MIXED_PORT, |chain| next_port(chain.listener())),
-        )?;
+        // The profile's own port, whichever carrier happens to have won. When
+        // mihomo is in the path it *is* the route, so it takes the address the
+        // screen promises and the person has configured their applications
+        // with -- and an engine running as a hop is moved out of the way rather
+        // than contending for it. See `start_aether_hop`.
+        let mixed = preferred_port(request.listen)?;
         // The API stays ephemeral: only this process ever speaks to it.
         let api = free_port()?;
         let secret = secret();
@@ -1071,11 +1082,6 @@ fn locate(app: &AppHandle) -> Result<PathBuf, String> {
 /// ports -- collides with whatever else the machine is already running.
 /// The mixed port used when there is no tunnel to derive one from.
 const DEFAULT_MIXED_PORT: u16 = 1820;
-
-/// One above the tunnel's own port, so the two read as a pair.
-fn next_port(tunnel: SocketAddr) -> u16 {
-    tunnel.port().checked_add(1).unwrap_or(DEFAULT_MIXED_PORT)
-}
 
 /// The cache file a subscription's nodes are kept in, named after the URL.
 ///
@@ -2226,14 +2232,6 @@ mod tests {
         let wire = format!("{:x}\r\n", MAX_BODY + 1);
         let mut reader = BufReader::new(wire.as_bytes());
         assert!(read_chunked(&mut reader).is_err());
-    }
-
-    #[test]
-    fn the_mixed_port_sits_next_to_the_tunnel() {
-        // A person configures this one in a browser, so it has to be derivable
-        // and the same on the next launch rather than whatever was free.
-        assert_eq!(next_port("127.0.0.1:1819".parse().unwrap()), 1820);
-        assert_eq!(next_port("127.0.0.1:65535".parse().unwrap()), DEFAULT_MIXED_PORT);
     }
 
     #[test]
