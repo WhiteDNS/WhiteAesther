@@ -175,8 +175,39 @@ async fn chain_select(chain: tauri::State<'_, Chain>, node: String) -> Result<()
     chain.select(&node)
 }
 
+/// Shrinks the window to the screen when the screen is smaller than it.
+///
+/// The configured size is what suits a desktop monitor, and nothing clamps it
+/// to the display it actually opens on -- so on a 720x1280 panel the window
+/// opened at 1340 wide with half of it off the edge, and a `minWidth` of 960
+/// meant it could not be dragged back (#51). The minimum is lower now, but a
+/// window that opens wrong and has to be resized by hand every launch is still
+/// a window that opens wrong.
+///
+/// Only ever shrinks. Growing a window someone has sized themselves is not this
+/// function's business, and the margin leaves room for a taskbar or a panel
+/// that `monitor.size()` does not account for.
+fn fit_to_screen(window: &tauri::WebviewWindow) {
+    const MARGIN: u32 = 80;
+
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let screen = monitor.size();
+    let width = size.width.min(screen.width.saturating_sub(MARGIN));
+    let height = size.height.min(screen.height.saturating_sub(MARGIN));
+    if width < size.width || height < size.height {
+        let _ = window.set_size(tauri::PhysicalSize::new(width, height));
+        let _ = window.center();
+    }
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        fit_to_screen(&window);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -193,8 +224,40 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
+/// Stops WebKitGTK trying to render through DMABUF, which on several Linux
+/// setups produces a window that never draws.
+///
+/// The symptom is a white or blank window and, if anything reaches the
+/// terminal, `Could not create default EGL display: EGL_BAD_PARAMETER`. It is
+/// not our rendering: WebKitGTK's DMABUF path does not work against some
+/// driver and compositor combinations, and Arch-based distributions hit it
+/// often enough that two of the three blank-window reports here came from them
+/// (#48 on CachyOS, #53 on Arch) with a third that reads the same (#44).
+///
+/// Set here rather than written in the install notes, because a person whose
+/// window is blank has nothing to read the notes *in*. An environment variable
+/// they would have to know to export is not a fix, it is a fact they have to
+/// discover -- and the ones who do not simply conclude the app is broken.
+///
+/// Only ever set when the variable is absent, so anyone deliberately testing
+/// the other path still can. Linux only: the variable means nothing elsewhere,
+/// and WebKitGTK is not what draws the window there.
+#[cfg(target_os = "linux")]
+fn keep_the_window_from_going_blank() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn keep_the_window_from_going_blank() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the builder, because the webview reads this when it is created and
+    // setting it afterwards would be setting it too late.
+    keep_the_window_from_going_blank();
+
     tauri::Builder::default()
         // Before anything else, so a second launch never reaches setup(). Its
         // proxy recovery would revert the settings the running copy applied,
