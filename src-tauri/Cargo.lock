@@ -4396,7 +4396,7 @@ dependencies = [
 
 [[package]]
 name = "whiteaesther"
-version = "1.9.8"
+version = "1.9.9"
 dependencies = [
  "getrandom 0.3.4",
  "rustls",
