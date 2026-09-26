@@ -21,10 +21,14 @@
 //! The adapter the default route leaves by: its gateway and its resolvers, and
 //! the search domain or the gateway's hardware address where the platform
 //! gives one. Hashed and cut short, so the file names networks without saying
-//! where they are. A laptop tethered to a phone is on a different network from
+//! where they are. Only the IPv4 side when there is one: the IPv6 gateways and
+//! resolvers an adapter lists come and go with router advertisements, and on
+//! the first machine this ran on the same Wi-Fi had two different keys two
+//! hours apart. A laptop tethered to a phone is on a different network from
 //! the office Wi-Fi, and this makes it look different.
 
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -242,7 +246,22 @@ fn key_of(parts: &[String]) -> Option<String> {
 /// The network this machine is on now, or `None` when it cannot be told --
 /// in which case nothing is remembered and nothing is recalled.
 pub fn current_network() -> Option<String> {
-    key_of(&platform::identity()?)
+    key_of(&stable_parts(platform::identity()?))
+}
+
+/// Leaves out every IPv6 address when there is an IPv4 gateway to go by.
+fn stable_parts(parts: Vec<String>) -> Vec<String> {
+    let address = |part: &String| part.split_whitespace().nth(1).map(str::to_string);
+    let has_ipv4_gateway = parts.iter().any(|part| {
+        part.starts_with("gw ") && address(part).is_some_and(|a| a.parse::<Ipv4Addr>().is_ok())
+    });
+    if !has_ipv4_gateway {
+        return parts;
+    }
+    parts
+        .into_iter()
+        .filter(|part| !address(part).is_some_and(|a| a.parse::<Ipv6Addr>().is_ok()))
+        .collect()
 }
 
 /// `nameserver` and `search` lines, which is all of resolv.conf that says
@@ -616,6 +635,25 @@ mod tests {
             None
         );
         assert_eq!(Remedy::named_in("connect-ip refused"), None);
+    }
+
+    #[test]
+    fn the_key_does_not_move_when_the_ipv6_entries_do() {
+        // As GetAdaptersAddresses listed them on a home Wi-Fi.
+        let listed: Vec<String> = [
+            "gw fe80::1",
+            "gw 192.168.1.1",
+            "dns 192.168.1.1",
+            "dns 2001:fb0:100::207:29",
+            "dns 2001:fb0:100::207:49",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let fewer: Vec<String> = listed[1..3].to_vec();
+        assert_eq!(key_of(&stable_parts(listed.clone())), key_of(&stable_parts(fewer)));
+        // An IPv6-only network still has a key.
+        let v6_only = vec!["gw fe80::1".to_string(), "dns 2001:fb0:100::207:29".to_string()];
+        assert_eq!(stable_parts(v6_only.clone()), v6_only);
     }
 
     #[test]
