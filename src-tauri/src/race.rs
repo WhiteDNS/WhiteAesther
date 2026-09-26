@@ -65,6 +65,23 @@ fn lane_budget(kind: CarrierKind, profile: &CoreProfile) -> Duration {
     }
 }
 
+/// How long a carrier that answered first waits for an engine lane still
+/// running, before it wins.
+///
+/// Measured on a network where both got out: Psiphon answered first by
+/// milliseconds, and on the next connect first by two seconds, because it
+/// reuses the server it had. After one win it would win every race there,
+/// and the engine -- the faster way out once up, and the only one whose
+/// tactic is worth remembering -- would never be chosen. A few seconds is
+/// enough to settle a tie and short enough not to hold up a network where
+/// the engine is still scanning.
+const ENGINE_GRACE: Duration = Duration::from_secs(3);
+
+/// Whether a lane that just carried should wait for the engine first.
+fn waits_for_engine(carried: &Lane, engine_lanes_running: usize) -> bool {
+    carried.kind != CarrierKind::Aether && engine_lanes_running > 0
+}
+
 /// How often a lane asks whether what it started is carrying traffic yet.
 const POLL: Duration = Duration::from_secs(1);
 
@@ -446,14 +463,6 @@ fn route_memory_path(app: &AppHandle) -> Option<std::path::PathBuf> {
         .map(|dir| dir.join("route-memory.json"))
 }
 
-/// How many engine lanes a race on this profile starts.
-fn expected_engine_lanes(profile: &CoreProfile, available: &[CarrierKind]) -> usize {
-    lanes(profile, available)
-        .iter()
-        .filter(|lane| lane.kind == CarrierKind::Aether)
-        .count()
-}
-
 /// Reads an engine's log to its end, keeping the last remedy a failure named.
 fn watch_for_remedy(stream: impl Read, remedy: &Mutex<Option<Remedy>>) {
     for line in BufReader::new(stream).lines() {
@@ -527,6 +536,7 @@ pub async fn race_carriers(
             ),
         );
 
+        let engine_ran = lanes.iter().filter(|lane| lane.kind == CarrierKind::Aether).count();
         // One per lane: the last failure each engine named as fixable.
         let mut remedies: Vec<Arc<Mutex<Option<Remedy>>>> = Vec::with_capacity(expected);
         for lane in lanes {
@@ -549,11 +559,19 @@ pub async fn race_carriers(
         // outlive the sends.
         drop(sender);
 
-        let mut winner = None;
-        let mut winner_route: Option<Route> = None;
+        let mut chosen: Option<Lane> = None;
+        // A carrier that answered first while the engine was still going: it
+        // wins unless an engine lane carries within the grace.
+        let mut provisional: Option<(Lane, Instant)> = None;
         let mut outcomes: Vec<LaneOutcome> = Vec::with_capacity(expected);
         while outcomes.len() < expected {
-            let Ok((lane, result, seconds)) = receiver.recv() else {
+            let received = match &provisional {
+                Some((_, since)) => receiver
+                    .recv_timeout((*since + ENGINE_GRACE).saturating_duration_since(Instant::now()))
+                    .ok(),
+                None => receiver.recv().ok(),
+            };
+            let Some((lane, result, seconds)) = received else {
                 break;
             };
             let carried = result.is_ok();
@@ -574,31 +592,54 @@ pub async fn race_carriers(
                 detail: result.err(),
                 seconds,
             });
-            if carried {
-                // What the lane actually ran, which is what the session has to
-                // run and what this network should remember.
-                let trial = trial_profile(&profile, &lane);
-                let engine = lane.kind == CarrierKind::Aether;
-                winner_route = Some(route_of(lane.kind, &trial));
-                winner = Some(RaceWinner {
-                    carrier: lane.kind.proxy_name().into(),
-                    masque_transport: match lane.transport {
-                        Some("mim") | None => None,
-                        Some(framing) => Some(framing.to_string()),
-                    },
-                    protocol: match lane.transport {
-                        Some("mim") => Some("mim".into()),
-                        Some(_) => Some("masque".into()),
-                        None => None,
-                    },
-                    fragment_client_hello: engine.then_some(trial.fragment_client_hello),
-                    ech: if engine { trial.ech.clone() } else { None },
-                    endpoint_mode: if engine { session_endpoint_mode(&profile) } else { None },
-                    seconds: started.elapsed().as_secs(),
-                });
+            if carried && provisional.is_none() {
+                let engine_running =
+                    engine_ran - outcomes.iter().filter(|o| o.carrier == "aether").count();
+                if waits_for_engine(&lane, engine_running) {
+                    supervisor.log(
+                        "info",
+                        format!(
+                            "searching: {} answered first; giving the engine {}s to answer too",
+                            lane.name(),
+                            ENGINE_GRACE.as_secs()
+                        ),
+                    );
+                    provisional = Some((lane, Instant::now()));
+                    continue;
+                }
+            }
+            if carried && (provisional.is_none() || lane.kind == CarrierKind::Aether) {
+                chosen = Some(lane);
                 break;
             }
         }
+        let chosen = chosen.or(provisional.map(|(lane, _)| lane));
+
+        // What the winning lane actually ran, which is what the session has to
+        // run and what this network should remember.
+        let winner_route = chosen
+            .as_ref()
+            .map(|lane| route_of(lane.kind, &trial_profile(&profile, lane)));
+        let winner = chosen.as_ref().map(|lane| {
+            let trial = trial_profile(&profile, lane);
+            let engine = lane.kind == CarrierKind::Aether;
+            RaceWinner {
+                carrier: lane.kind.proxy_name().into(),
+                masque_transport: match lane.transport {
+                    Some("mim") | None => None,
+                    Some(framing) => Some(framing.to_string()),
+                },
+                protocol: match lane.transport {
+                    Some("mim") => Some("mim".into()),
+                    Some(_) => Some("masque".into()),
+                    None => None,
+                },
+                fragment_client_hello: engine.then_some(trial.fragment_client_hello),
+                ech: if engine { trial.ech.clone() } else { None },
+                endpoint_mode: if engine { session_endpoint_mode(&profile) } else { None },
+                seconds: started.elapsed().as_secs(),
+            }
+        });
 
         stop.store(true, Ordering::SeqCst);
 
@@ -608,7 +649,6 @@ pub async fn race_carriers(
             // has not failed, and marking it would keep a working engine out of
             // the lead for hours.
             let engine_lanes = outcomes.iter().filter(|o| o.carrier == "aether").count();
-            let engine_ran = expected_engine_lanes(&profile, &available);
             let engine_failed = engine_ran > 0
                 && engine_lanes == engine_ran
                 && outcomes
@@ -847,6 +887,17 @@ mod tests {
             route_of(CarrierKind::Aether, &trial_profile(&profile, &h2)).ech,
             None
         );
+    }
+
+    #[test]
+    fn another_carrier_answering_first_waits_for_an_engine_still_running() {
+        let psiphon = Lane::plain(CarrierKind::Psiphon, None);
+        let h2 = Lane::plain(CarrierKind::Aether, Some("h2"));
+        assert!(waits_for_engine(&psiphon, 2));
+        // Nothing to wait for once every engine lane has reported.
+        assert!(!waits_for_engine(&psiphon, 0));
+        // The engine itself never waits.
+        assert!(!waits_for_engine(&h2, 2));
     }
 
     #[test]
