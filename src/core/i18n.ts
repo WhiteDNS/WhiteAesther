@@ -236,6 +236,8 @@ const FA: Record<string, string> = {
   "Where the SOCKS5 listener binds.": "جایی که شنوندهٔ SOCKS5 روی آن بالا می‌آید.",
   "DNS resolvers": "سرورهای DNS",
   "One to eight addresses, comma separated.": "یک تا هشت آدرس، جداشده با کاما.",
+  "Full tunnel asks resolvers over DoH, which Cloudflare, Google and Quad9 offer. Other addresses are skipped there; with none left, it uses Cloudflare and Google.":
+    "تونل کامل نام‌ها را از طریق DoH می‌پرسد که Cloudflare و Google و Quad9 آن را دارند. آدرس‌های دیگر در این حالت کنار گذاشته می‌شوند و اگر چیزی نماند، از Cloudflare و Google استفاده می‌شود.",
   "Iranian sites bypass the tunnel": "سایت‌های ایرانی از تونل خارج شوند",
   "Filtering only applies to traffic that looks like it left Iran, so these sites gain nothing from the tunnel and only pay for the exit's bandwidth. The list ships with the app and is not fetched.": "فیلترینگ فقط روی ترافیکی اعمال می‌شود که به‌نظر از ایران خارج شده، پس این سایت‌ها از تونل چیزی به دست نمی‌آورند و فقط پهنای باند نود خروج را مصرف می‌کنند. لیست همراه خود برنامه می‌آید و دانلود نمی‌شود.",
   "Never send": "هرگز فرستاده نشود",

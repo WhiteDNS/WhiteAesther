@@ -138,6 +138,8 @@ pub struct ChainRequest<'a> {
     /// close a DNS leak, since a program that speaks to port 53 directly never
     /// consults a proxy.
     pub tun: bool,
+    /// The resolvers the user chose, from the profile. See [`doh_upstreams`].
+    pub resolvers: Vec<String>,
 }
 
 impl ChainRequest<'_> {
@@ -321,6 +323,7 @@ impl Chain {
             bypass_iran_sites: request.bypass_iran_sites,
             exit_chain: request.wants_exit_chain(),
             tun: request.tun,
+            resolvers: &request.resolvers,
         });
         let config_path = home.join("config.yaml");
         std::fs::write(&config_path, config)
@@ -745,6 +748,7 @@ struct RenderPlan<'a> {
     /// a TUN device in front of the carrier.
     exit_chain: bool,
     tun: bool,
+    resolvers: &'a [String],
 }
 
 impl Default for RenderPlan<'_> {
@@ -759,8 +763,36 @@ impl Default for RenderPlan<'_> {
             bypass_iran_sites: false,
             exit_chain: true,
             tun: false,
+            resolvers: &[],
         }
     }
+}
+
+/// The DoH endpoint of each resolver that has one, in the user's order.
+///
+/// Only resolvers whose operators serve DoH on the resolver's own address, with
+/// a certificate for that address -- checked for each of these -- so no
+/// hostname has to be looked up before the first query. An IPv6 address maps to
+/// the same operator's IPv4 endpoint: which family carries the query is the
+/// tunnel's business, and the operator is what the user chose.
+pub(crate) fn doh_upstreams(resolvers: &[String]) -> Vec<String> {
+    let mut upstreams: Vec<String> = Vec::new();
+    for resolver in resolvers {
+        let endpoint = match resolver.trim().trim_start_matches('[').trim_end_matches(']') {
+            "1.1.1.1" | "2606:4700:4700::1111" => "1.1.1.1",
+            "1.0.0.1" | "2606:4700:4700::1001" => "1.0.0.1",
+            "8.8.8.8" | "2001:4860:4860::8888" => "8.8.8.8",
+            "8.8.4.4" | "2001:4860:4860::8844" => "8.8.4.4",
+            "9.9.9.9" | "2620:fe::fe" => "9.9.9.9",
+            "149.112.112.112" | "2620:fe::9" => "149.112.112.112",
+            _ => continue,
+        };
+        let url = format!("https://{endpoint}/dns-query");
+        if !upstreams.contains(&url) {
+            upstreams.push(url);
+        }
+    }
+    upstreams
 }
 
 fn render(plan: &RenderPlan) -> String {
@@ -777,6 +809,7 @@ fn render(plan: &RenderPlan) -> String {
         bypass_iran_sites,
         exit_chain,
         tun,
+        resolvers,
         ..
     } = *plan;
     let mut config = String::new();
@@ -842,7 +875,20 @@ fn render(plan: &RenderPlan) -> String {
     // below. Without it a DoH URL written as a name cannot be looked up
     // without already having a resolver.
     config.push_str("  default-nameserver:\n    - 1.1.1.1\n    - 9.9.9.9\n");
-    config.push_str("  nameserver:\n    - https://1.1.1.1/dns-query\n    - https://dns.google/dns-query\n");
+    // The user's own resolvers where they can be asked over DoH, so the
+    // setting does what it says and a leak test shows the resolver they typed.
+    // Written as plain addresses they would move every lookup to UDP and undo
+    // DoH, so a resolver with no known DoH endpoint is left out -- and the
+    // screen says so -- rather than downgrading the rest.
+    let upstreams = doh_upstreams(resolvers);
+    config.push_str("  nameserver:\n");
+    if upstreams.is_empty() {
+        config.push_str("    - https://1.1.1.1/dns-query\n    - https://dns.google/dns-query\n");
+    } else {
+        for upstream in &upstreams {
+            config.push_str(&format!("    - {upstream}\n"));
+        }
+    }
     // Resolving the proxies' own hostnames cannot go through the proxies: that
     // is the same circle as fetching a subscription through the node it
     // describes.
@@ -1814,6 +1860,48 @@ mod tests {
     /// all three and none of them would fail an assertion about content.
     ///
     /// Update it deliberately when the rendering is meant to change.
+    fn nameservers(config: &str) -> Vec<String> {
+        let section = config.split("  nameserver:\n").nth(1).expect("a nameserver section");
+        section
+            .lines()
+            .take_while(|line| line.starts_with("    - "))
+            .map(|line| line.trim_start_matches("    - ").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_resolvers_the_user_chose_are_the_ones_asked() {
+        // A leak test used to show Cloudflare and Google whatever was typed.
+        let chosen = vec!["9.9.9.9".to_string(), "149.112.112.112".to_string()];
+        let config = render(&RenderPlan { carriers: tunnel(), tun: true, resolvers: &chosen, ..Default::default() });
+        assert_eq!(
+            nameservers(&config),
+            vec!["https://9.9.9.9/dns-query", "https://149.112.112.112/dns-query"]
+        );
+    }
+
+    #[test]
+    fn a_resolver_is_never_written_as_a_plain_address() {
+        // A plain nameserver moves every lookup to UDP and undoes DoH, so one
+        // with no known DoH endpoint is left out rather than written in.
+        let chosen = vec!["10.0.0.1".to_string(), "8.8.8.8".to_string()];
+        let config = render(&RenderPlan { carriers: tunnel(), tun: true, resolvers: &chosen, ..Default::default() });
+        assert_eq!(nameservers(&config), vec!["https://8.8.8.8/dns-query"]);
+
+        let unknown = vec!["10.0.0.1".to_string()];
+        let config = render(&RenderPlan { carriers: tunnel(), tun: true, resolvers: &unknown, ..Default::default() });
+        assert_eq!(
+            nameservers(&config),
+            vec!["https://1.1.1.1/dns-query", "https://dns.google/dns-query"]
+        );
+    }
+
+    #[test]
+    fn an_ipv6_resolver_is_asked_through_its_operator() {
+        let chosen = vec!["2606:4700:4700::1111".to_string(), "1.1.1.1".to_string()];
+        assert_eq!(doh_upstreams(&chosen), vec!["https://1.1.1.1/dns-query"]);
+    }
+
     #[test]
     fn the_aether_path_renders_exactly_what_it_did_before_carriers() {
         let source = ChainSource {
@@ -1832,6 +1920,7 @@ mod tests {
             bypass_iran_sites: false,
             exit_chain: true,
             tun: true,
+            resolvers: &[],
         });
         // The process name is the one line here that differs by platform --
         // `aether.exe` on Windows and `aether` everywhere else -- so it is

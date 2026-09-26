@@ -28,6 +28,7 @@ import {
   startCore,
   stopCore,
 } from "@/core/api";
+import { skippedByFullTunnel } from "@/core/doh";
 import { profileForWinner } from "@/core/winner";
 import {
   SETTLE_POLL_MS, attemptCapMs, isImpossible, searchBudgetMs, searchOrder, verdictFor,
@@ -1528,7 +1529,11 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProp
           <TextField
             label="DNS resolvers" mono value={profile.dns.join(", ")}
             onChange={(value) => set({ dns: value.split(",").map((item) => item.trim()).filter(Boolean) })}
-            help="One to eight addresses, comma separated."
+            help={
+              profile.fullTunnel && skippedByFullTunnel(profile.dns).length > 0
+                ? "Full tunnel asks resolvers over DoH, which Cloudflare, Google and Quad9 offer. Other addresses are skipped there; with none left, it uses Cloudflare and Google."
+                : "One to eight addresses, comma separated."
+            }
           />
         </CardContent>
       </Card>

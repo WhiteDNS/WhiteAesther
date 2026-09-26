@@ -1000,6 +1000,7 @@ fn start_carrier_blocking(
             listen: listen_port(&profile.socks_address),
             bypass_iran_sites: profile.bypass_iran_sites,
             tun,
+            resolvers: profile.dns.clone(),
         },
     ) {
         Ok(address) => {
@@ -1500,6 +1501,7 @@ pub async fn set_full_tunnel(
             listen: configured_listen_port(inner),
             bypass_iran_sites,
             tun: enabled,
+            resolvers: configured_resolvers(inner),
         },
     )?;
     supervisor_log(
@@ -1574,6 +1576,7 @@ pub async fn set_chain(
                 listen: configured_listen_port(inner),
                 bypass_iran_sites,
                 tun,
+                resolvers: configured_resolvers(inner),
             },
         )?;
         supervisor_log(
@@ -2637,6 +2640,7 @@ fn record_log(app: &AppHandle, inner: &SupervisorInner, stream: &str, message: S
                     listen: configured_listen_port(inner),
                     bypass_iran_sites,
                     tun: full_tunnel,
+                    resolvers: configured_resolvers(inner),
                 },
             ) {
                 Ok(address) => {
@@ -3117,6 +3121,13 @@ fn configured_listen_port(inner: &SupervisorInner) -> u16 {
     lock(&inner.session)
         .as_ref()
         .map_or(DEFAULT_LISTEN_PORT, |session| listen_port(&session.profile.socks_address))
+}
+
+/// The resolvers the running session was started with.
+fn configured_resolvers(inner: &SupervisorInner) -> Vec<String> {
+    lock(&inner.session)
+        .as_ref()
+        .map_or_else(Vec::new, |session| session.profile.dns.clone())
 }
 
 /// A local port nothing is listening on, for a hop that needs one of its own.
