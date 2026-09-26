@@ -5,6 +5,7 @@ mod core_supervisor;
 mod elevation;
 mod http_bridge;
 mod iran_routes;
+mod identity_backup;
 mod lan_share;
 mod latency;
 mod mim_identity;
@@ -267,6 +268,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(CoreSupervisor::new())
         .manage(Chain::new())
         .manage(psiphon::Psiphon::new())
@@ -406,6 +408,8 @@ pub fn run() {
             latency::probe_latency,
             carrier_probe::probe_carrier,
             race::race_carriers,
+            identity_backup::backup_identity,
+            identity_backup::restore_identity,
             latency::speed_test,
             latency::exit_info,
             chain_status,

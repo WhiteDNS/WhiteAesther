@@ -203,6 +203,25 @@ export async function raceCarriers(profile: ConnectionProfile): Promise<RaceRepo
   return invoke("race_carriers", { profile });
 }
 
+/** What a backup or restore did. Closing the picker is not an error. */
+export type BackupOutcome = "saved" | "restored" | "cancelled";
+
+/**
+ * Saves this install's identity to a file the user picks. The picker is
+ * opened by the backend and the file written there, so its contents — private
+ * keys — never reach this page.
+ */
+export async function backupIdentity(profile: ConnectionProfile): Promise<BackupOutcome> {
+  requireDesktop();
+  return invoke("backup_identity", { profile });
+}
+
+/** Restores an identity from a file the user picks. Refused while anything is running. */
+export async function restoreIdentity(profile: ConnectionProfile): Promise<BackupOutcome> {
+  requireDesktop();
+  return invoke("restore_identity", { profile });
+}
+
 export interface SpeedResult {
   mbps: number;
   bytes: number;

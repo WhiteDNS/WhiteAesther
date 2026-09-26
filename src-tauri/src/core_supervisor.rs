@@ -611,6 +611,13 @@ impl CoreSupervisor {
     /// Deliberately narrow: the latency probe needs one string and no more, and
     /// handing it the whole snapshot would let it read state it has no business
     /// acting on.
+    /// Whether nothing is running: no session and no search.
+    ///
+    /// A search counts, because its trial engines read the identity too.
+    pub fn is_idle(&self) -> bool {
+        matches!(lock(&self.inner.snapshot).state.as_str(), "idle" | "error")
+    }
+
     pub fn connected_socks(&self) -> Option<String> {
         let snapshot = lock(&self.inner.snapshot);
         (snapshot.state == "connected").then(|| snapshot.socks_address.clone())
@@ -4001,13 +4008,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[cfg(windows)]
-fn hide_console_window(command: &mut Command) {
+pub(crate) fn hide_console_window(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(0x08000000);
 }
 
 #[cfg(not(windows))]
-fn hide_console_window(_command: &mut Command) {}
+pub(crate) fn hide_console_window(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
