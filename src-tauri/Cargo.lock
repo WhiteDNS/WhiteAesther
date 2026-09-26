@@ -4329,12 +4329,13 @@ dependencies = [
 
 [[package]]
 name = "whiteaesther"
-version = "1.9.7"
+version = "1.9.8"
 dependencies = [
  "getrandom 0.3.4",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

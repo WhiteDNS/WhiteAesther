@@ -158,6 +158,12 @@ export interface RaceWinner {
   masqueTransport: "h2" | "h3" | null;
   /** The protocol the winning lane ran, when it differs from the profile's. */
   protocol: ConnectionProfile["protocol"] | null;
+  /** Whether the winning engine lane split its ClientHello. */
+  fragmentClientHello: boolean | null;
+  /** The ECH setting the winning engine lane ran with. */
+  ech: string | null;
+  /** The endpoint mode the session should run with, when not the profile's. */
+  endpointMode: ConnectionProfile["endpointMode"] | null;
   seconds: number;
 }
 

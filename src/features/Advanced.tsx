@@ -28,6 +28,8 @@ import {
   startCore,
   stopCore,
 } from "@/core/api";
+import { skippedByFullTunnel } from "@/core/doh";
+import { profileForWinner } from "@/core/winner";
 import {
   SETTLE_POLL_MS, attemptCapMs, isImpossible, searchBudgetMs, searchOrder, verdictFor,
   type SearchAttempt,
@@ -794,18 +796,15 @@ function WayOutSearch({
         // The race proved the carrier and, for the engine, which framing did
         // it. Both have to reach the profile, or the search proves one thing
         // and the session that follows runs another.
-        const chosen: ConnectionProfile = {
-          ...profile,
-          carriers: { first: winner.carrier, second: null },
-          protocol: winner.protocol ?? profile.protocol,
-          masqueTransport: winner.masqueTransport ?? profile.masqueTransport,
-        };
+        const chosen = profileForWinner(profile, winner);
         // Started on the ordinary path, not adopted from the race. The race
         // stops everything it started, the winner included — so what is running
         // afterwards is a session the connect path built, with a snapshot, a
         // routing engine and a system proxy behind it.
         await startCore(chosen).catch(() => {});
-        onChange(chosen);
+        // The endpoint setting stays the user's own on screen: a pin without a
+        // fallback is given one for this session only.
+        onChange({ ...chosen, endpointMode: profile.endpointMode });
         settled = true;
       }
     }
@@ -1530,7 +1529,11 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProp
           <TextField
             label="DNS resolvers" mono value={profile.dns.join(", ")}
             onChange={(value) => set({ dns: value.split(",").map((item) => item.trim()).filter(Boolean) })}
-            help="One to eight addresses, comma separated."
+            help={
+              profile.fullTunnel && skippedByFullTunnel(profile.dns).length > 0
+                ? "Full tunnel asks resolvers over DoH, which Cloudflare, Google and Quad9 offer. Other addresses are skipped there; with none left, it uses Cloudflare and Google."
+                : "One to eight addresses, comma separated."
+            }
           />
         </CardContent>
       </Card>
