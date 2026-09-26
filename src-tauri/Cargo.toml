@@ -51,6 +51,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # that travels with the build, so a request made through a carrier cannot be
 # read by a root someone added to this machine.
 webpki-roots = "1"
+# The save and open pickers for the identity backup. Used from Rust only, so
+# the file, which holds private keys, never passes through the webview.
+tauri-plugin-dialog = "2"
 
 # System proxy control. Both are already in the tree via Tauri; naming them here
 # only adds the dependency edge.

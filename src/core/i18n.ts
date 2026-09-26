@@ -495,7 +495,24 @@ const FA: Record<string, string> = {
   "Pin a specific gateway, or let the core find one.": "یک دروازهٔ مشخص را ثابت کنید، یا بگذارید هسته خودش پیدا کند.",
   "Send the tunnel's traffic on through a node of your own, so the address you appear from changes.": "ترافیک تونل را از یک نود متعلق به خودتان رد کنید، تا آدرسی که از آن دیده می‌شوید عوض شود.",
   "Where traffic goes once the tunnel is up.": "ترافیک بعد از بالا آمدن تونل کجا می‌رود.",
-  "Cloudflare Zero Trust enrolment.": "ثبت‌نام در Cloudflare Zero Trust.",
+  "Cloudflare Zero Trust enrolment, and a backup of this device's identity.":
+    "ثبت‌نام در Cloudflare Zero Trust، و پشتیبانی از شناسهٔ این دستگاه.",
+  "Back up your identity": "از شناسهٔ خود پشتیبان بگیرید",
+  "Uninstalling deletes it, and a new one is not always free to get.":
+    "حذف برنامه آن را پاک می‌کند، و گرفتن شناسهٔ تازه همیشه رایگان نیست.",
+  "Cloudflare limits how many identities one network can register. Reinstalling throws yours away, and after a few times it can refuse to issue another — which looks exactly like the app being broken. A backup skips all of that.":
+    "کلادفلر محدود می‌کند که یک شبکه چند شناسه بتواند ثبت کند. نصب دوباره شناسهٔ شما را دور می‌ریزد، و بعد از چند بار ممکن است دیگر شناسه‌ای ندهد — که دقیقاً شبیه خراب بودن برنامه به نظر می‌رسد. یک پشتیبان همهٔ این‌ها را کنار می‌زند.",
+  "Save a backup": "ذخیرهٔ پشتیبان",
+  "Write this device's identity to a file you keep": "شناسهٔ این دستگاه را در فایلی بنویس که خودتان نگه می‌دارید",
+  "Restore from a backup": "بازیابی از پشتیبان",
+  "Use an identity saved from this or another device": "از شناسه‌ای استفاده کن که از همین دستگاه یا دستگاه دیگری ذخیره شده",
+  "Treat the file like a password: anyone who has it can present as this device. It is not encrypted, so keep it somewhere you would keep a password, and do not send it over a channel you would not send one.":
+    "با این فایل مثل یک رمز عبور رفتار کنید: هر کس آن را داشته باشد می‌تواند خودش را این دستگاه جا بزند. رمزگذاری نشده است، پس جایی نگهش دارید که یک رمز را نگه می‌دارید، و از راهی نفرستیدش که یک رمز را نمی‌فرستید.",
+  "Identity saved. Keep it somewhere safe.": "شناسه ذخیره شد. جای امنی نگهش دارید.",
+  "Identity imported. Connect to use it.": "شناسه وارد شد. برای استفاده وصل شوید.",
+  "That did not work": "این کار نکرد",
+  "Disconnect before importing an identity": "پیش از وارد کردن شناسه، اتصال را قطع کنید",
+  "There is no identity to export yet": "هنوز شناسه‌ای برای ذخیره نیست",
   "The core executable, logging, and a report you can hand to someone.": "فایل اجرایی هسته، ثبت وقایع، و گزارشی که می‌توانید به کسی بدهید.",
   "What WhiteAesther is built on, under what terms, and where to get the source.": "وایت‌آستر بر چه چیزی ساخته شده، تحت چه شرایطی، و کد منبع از کجا گرفته می‌شود.",
 

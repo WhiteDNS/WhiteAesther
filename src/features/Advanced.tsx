@@ -21,7 +21,9 @@ import {
   lanShareStatus,
   probeCarrier,
   psiphonStatus,
+  backupIdentity,
   raceCarriers,
+  restoreIdentity,
   saveReport,
   setLanShare,
   setPsiphonRegion,
@@ -81,7 +83,7 @@ const BLURB: Record<SectionId, string> = {
   endpoint: "Pin a specific gateway, or let the core find one.",
   chain: "Send the tunnel's traffic on through a node of your own, so the address you appear from changes.",
   traffic: "Where traffic goes once the tunnel is up.",
-  identity: "Cloudflare Zero Trust enrolment.",
+  identity: "Cloudflare Zero Trust enrolment, and a backup of this device's identity.",
   diagnostics: "The core executable, logging, and a report you can hand to someone.",
   licences: "What WhiteAesther is built on, under what terms, and where to get the source.",
 };
@@ -1752,7 +1754,88 @@ function systemProxyHelp(runtime: string): string {
 
 // -------------------------------------------------------------------- identity
 
-function Identity({ profile, onChange }: AdvancedProps) {
+function Identity(props: AdvancedProps) {
+  return (
+    <>
+      <ZeroTrust {...props} />
+      <IdentityBackup {...props} />
+    </>
+  );
+}
+
+/**
+ * The two engine errors a person can act on, as sentences this interface
+ * translates. Anything else is the engine's own words.
+ */
+const BACKUP_ERRORS: Record<string, string> = {
+  "Disconnect before importing an identity": "Disconnect before importing an identity",
+  "there is no identity to export yet": "There is no identity to export yet",
+};
+
+function IdentityBackup({ profile, snapshot, onToast }: AdvancedProps) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  // Only while nothing runs: the backend refuses otherwise, and a button that
+  // is pressable and then says no is worse than one that says why up front.
+  const idle = snapshot.state === "idle" || snapshot.state === "error";
+
+  const run = async (action: () => Promise<string>, done: string) => {
+    setBusy(true);
+    try {
+      const outcome = await action();
+      if (outcome !== "cancelled") onToast(t("Back up your identity"), t(done));
+    } catch (error) {
+      const said = error instanceof Error ? error.message : String(error);
+      onToast(t("That did not work"), BACKUP_ERRORS[said] ? t(BACKUP_ERRORS[said]) : said, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-1">
+        <CardTitle className="text-[15px]">{t("Back up your identity")}</CardTitle>
+        <CardDescription>{t("Uninstalling deletes it, and a new one is not always free to get.")}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4 pt-2">
+        <p className="text-[13px] text-muted-foreground">
+          {t(
+            "Cloudflare limits how many identities one network can register. Reinstalling throws yours away, and after a few times it can refuse to issue another — which looks exactly like the app being broken. A backup skips all of that.",
+          )}
+        </p>
+        <Row first title="Save a backup" help="Write this device's identity to a file you keep">
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => void run(() => backupIdentity(profile), "Identity saved. Keep it somewhere safe.")}
+          >
+            {t("Save a backup")}
+          </Button>
+        </Row>
+        <Row
+          title="Restore from a backup"
+          help={idle ? "Use an identity saved from this or another device" : "Disconnect before importing an identity"}
+        >
+          <Button
+            variant="outline"
+            disabled={busy || !idle}
+            onClick={() => void run(() => restoreIdentity(profile), "Identity imported. Connect to use it.")}
+          >
+            {t("Restore from a backup")}
+          </Button>
+        </Row>
+        <p className="text-[13px] text-muted-foreground">
+          {t(
+            "Treat the file like a password: anyone who has it can present as this device. It is not encrypted, so keep it somewhere you would keep a password, and do not send it over a channel you would not send one.",
+          )}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ZeroTrust({ profile, onChange }: AdvancedProps) {
   const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   return (

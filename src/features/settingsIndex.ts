@@ -80,6 +80,7 @@ export const SETTINGS: SettingEntry[] = [
 
   { label: "Cloudflare Zero Trust", section: "identity", where: "Identity", keywords: "team access client id secret token enrolment organisation login" },
   { label: "Send web traffic to Gateway", section: "identity", where: "Identity", keywords: "gateway policy filtering organisation" },
+  { label: "Back up your identity", section: "identity", where: "Identity", keywords: "backup save restore import export reinstall device registration file" },
 
   { label: "Core executable", section: "diagnostics", where: "Diagnostics", keywords: "aether path binary engine location" },
   { label: "Log detail", section: "diagnostics", where: "Diagnostics", keywords: "log level verbose trace debug info warn error" },
