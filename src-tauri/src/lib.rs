@@ -11,6 +11,7 @@ mod mim_identity;
 mod moat;
 mod psiphon;
 mod race;
+mod route_memory;
 mod scanner;
 mod system_proxy;
 mod tls;

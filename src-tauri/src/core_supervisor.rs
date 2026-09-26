@@ -327,7 +327,7 @@ impl CoreProfile {
         }
     }
 
-    fn args(&self, identity_path: &Path) -> Vec<String> {
+    pub(crate) fn args(&self, identity_path: &Path) -> Vec<String> {
         let mut args = vec![
             format!("--{}", self.protocol),
             "--scan".into(),

@@ -20,6 +20,7 @@ import {
   subscribeCore,
   subscribeTrayActions,
 } from "@/core/api";
+import { profileForWinner } from "@/core/winner";
 import { withNormalizedEndpoint } from "@/core/endpoint";
 import {
   DEFAULT_PROFILE, IDLE_SNAPSHOT, type ConnectionProfile, type CoreLogEvent, type CoreProbe,
@@ -217,14 +218,7 @@ export default function App() {
       let chosen = effective;
       if (effective.autoRoute) {
         const report = await raceCarriers(effective);
-        if (report.winner) {
-          chosen = {
-            ...effective,
-            carriers: { first: report.winner.carrier, second: null },
-            protocol: report.winner.protocol ?? effective.protocol,
-            masqueTransport: report.winner.masqueTransport ?? effective.masqueTransport,
-          };
-        }
+        if (report.winner) chosen = profileForWinner(effective, report.winner);
         // No winner is not a reason to refuse to try. The configured carrier
         // still gets its ordinary attempt, with the supervisor's own retries
         // and a real error at the end of them — which is more use to somebody

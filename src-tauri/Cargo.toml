@@ -33,6 +33,10 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Naming a network in the route memory without saying which network it is.
+# Already in the tree through the TLS stack.
+sha2 = "0.10"
+
 # TLS, for exactly one request: asking Tor's circumvention service which bridges
 # work in a given country. That request has to go out through whichever carrier
 # is up, because the service is itself blocked in most of the places its answer
@@ -62,4 +66,9 @@ windows-sys = { version = "0.61", features = [
     # Letting an ordinary launch reach an elevated copy: see
     # elevation::allow_launches_from_an_ordinary_user.
     "Win32_UI_WindowsAndMessaging",
+    # Which network this is, for the route memory: the default adapter's
+    # gateway and resolvers.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
 ] }
