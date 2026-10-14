@@ -177,7 +177,7 @@ impl Lane {
             name.push_str("+fragment");
         }
         if let Some(ech) = &self.ech {
-            name.push_str(&format!("+ech {ech}"));
+            name.push_str(if ech == "auto" || ech == "require" { "+ech auto" } else { "+ech configured" });
         }
         name
     }
@@ -216,6 +216,11 @@ fn lanes(profile: &CoreProfile, available: &[CarrierKind]) -> Vec<Lane> {
             lanes.push(Lane::plain(CarrierKind::Aether, Some("h3")));
         }
     }
+    if available.contains(&CarrierKind::Aether) {
+        let mut encrypted = Lane::plain(CarrierKind::Aether, Some("h2"));
+        encrypted.ech = Some(profile.ech_setting().unwrap_or("auto").into());
+        lanes.push(encrypted);
+    }
     for kind in [CarrierKind::Psiphon, CarrierKind::Tor] {
         if available.contains(&kind) {
             lanes.push(Lane::plain(kind, None));
@@ -230,7 +235,7 @@ fn lanes(profile: &CoreProfile, available: &[CarrierKind]) -> Vec<Lane> {
 /// The race runs every lane at once, so "the remembered route goes first"
 /// means its lane runs with the tactic that got it out, instead of plain. And
 /// the remedy the engine's last failure here named goes to the lane that can
-/// act on it: ECH demanded, so H3 runs with ECH required; the server name
+/// act on it: ECH demanded, so H2/H3 run with ECH; the server name
 /// refused, so H2 splits its ClientHello. Nothing else is read from failure
 /// text.
 fn apply_recall(lanes: &mut [Lane], profile: &CoreProfile, recall: &Recall) -> bool {
@@ -243,10 +248,13 @@ fn apply_recall(lanes: &mut [Lane], profile: &CoreProfile, recall: &Recall) -> b
             // A protocol this profile no longer runs has no lane to lead.
             _ => Some("-"),
         };
-        if let Some(lane) = lanes
-            .iter_mut()
-            .find(|lane| lane.kind == CarrierKind::Aether && lane.transport == wanted)
-        {
+        // Prefer the separate encrypted H2 trial, but H3 and a selected
+        // nested protocol have one lane: give that lane its remembered ECH.
+        let matches = |lane: &Lane| lane.kind == CarrierKind::Aether && lane.transport == wanted;
+        let selected = lanes.iter().position(|lane| matches(lane) && route.ech.is_some() && lane.ech.is_some())
+            .or_else(|| lanes.iter().position(matches));
+        if let Some(index) = selected {
+            let lane = &mut lanes[index];
             lane.fragment |= route.fragment;
             if route.ech.is_some() {
                 lane.ech = route.ech.clone();
@@ -254,22 +262,15 @@ fn apply_recall(lanes: &mut [Lane], profile: &CoreProfile, recall: &Recall) -> b
             had_lead = true;
         }
     }
-    let (framing, remedy) = match recall.remedy {
-        Some(Remedy::Ech) => (Some("h3"), Remedy::Ech),
-        Some(Remedy::Fragment) => (Some("h2"), Remedy::Fragment),
-        None => return had_lead,
-    };
-    if let Some(lane) = lanes
-        .iter_mut()
-        .find(|lane| lane.kind == CarrierKind::Aether && lane.transport == framing)
-    {
-        match remedy {
-            Remedy::Ech => {
-                if lane.ech.is_none() {
-                    lane.ech = Some("require".into());
+    if let Some(remedy) = recall.remedy {
+        for lane in lanes.iter_mut().filter(|lane| lane.kind == CarrierKind::Aether) {
+            match remedy {
+                Remedy::Ech if matches!(lane.transport, Some("h2" | "h3")) => {
+                    if lane.ech.is_none() { lane.ech = Some("auto".into()); }
                 }
+                Remedy::Fragment if lane.transport == Some("h2") => lane.fragment = true,
+                _ => {}
             }
-            Remedy::Fragment => lane.fragment = true,
         }
     }
     had_lead
@@ -335,19 +336,15 @@ fn route_of(kind: CarrierKind, trial: &CoreProfile) -> Route {
             ech: None,
         };
     }
-    let masque = trial.protocol == "masque";
+    let masque = matches!(trial.protocol.as_str(), "masque" | "wom" | "mim");
     let h2 = masque && trial.masque_transport == "h2";
     Route {
         carrier: kind.proxy_name().into(),
         protocol: Some(trial.protocol.clone()),
         transport: masque.then(|| trial.masque_transport.clone()),
         fragment: h2 && trial.fragment_client_hello,
-        // HTTP/2 does not carry ECH, so on H2 the setting did nothing.
-        ech: trial
-            .ech
-            .clone()
-            .filter(|ech| !ech.trim().is_empty() && ech != "off")
-            .filter(|_| masque && !h2),
+        // ECH protects both MASQUE framings, including WOM’s outer hop.
+        ech: trial.ech_setting().filter(|_| masque).map(str::to_string),
     }
 }
 
@@ -766,6 +763,7 @@ mod tests {
                 // network it is the only engine lane that gets out and nobody
                 // opens Advanced to ask for it.
                 (CarrierKind::Aether, Some("mim")),
+                (CarrierKind::Aether, Some("h2")),
                 (CarrierKind::Psiphon, None),
                 (CarrierKind::Tor, None),
             ]
@@ -777,7 +775,7 @@ mod tests {
         // On a network that blocks WireGuard, a search that raced only
         // WireGuard had nothing else for the engine to try.
         let all = [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor];
-        for protocol in ["wg", "gool", "mim"] {
+        for protocol in ["wg", "gool", "mim", "wom"] {
             let mut profile = CoreProfile::default();
             profile.protocol = protocol.into();
             assert_eq!(
@@ -786,6 +784,7 @@ mod tests {
                     (CarrierKind::Aether, None),
                     (CarrierKind::Aether, Some("h2")),
                     (CarrierKind::Aether, Some("h3")),
+                    (CarrierKind::Aether, Some("h2")),
                     (CarrierKind::Psiphon, None),
                     (CarrierKind::Tor, None),
                 ],
@@ -821,18 +820,19 @@ mod tests {
         assert!(apply_recall(&mut raced, &profile, &recall));
         assert_eq!(
             tactics(&raced),
-            vec![(Some("h2"), true, None), (Some("h3"), false, None), (Some("mim"), false, None)]
+            vec![(Some("h2"), true, None), (Some("h3"), false, None), (Some("mim"), false, None), (Some("h2"), false, Some("auto".into()))]
         );
         // And the lane really runs it, whatever the profile says.
         assert!(trial_profile(&profile, &raced[0]).args(Path::new("i.toml")).contains(&"--fragment".into()));
     }
 
     #[test]
-    fn nothing_remembered_leaves_every_lane_plain() {
+    fn nothing_remembered_keeps_the_explicit_encrypted_h2_trial() {
         let profile = CoreProfile::default();
         let mut raced = lanes(&profile, &[CarrierKind::Aether]);
         assert!(!apply_recall(&mut raced, &profile, &Recall::default()));
-        assert!(raced.iter().all(|lane| !lane.fragment && lane.ech.is_none()));
+        assert!(raced[..3].iter().all(|lane| !lane.fragment && lane.ech.is_none()));
+        assert_eq!(raced[3].ech.as_deref(), Some("auto"));
     }
 
     #[test]
@@ -844,9 +844,10 @@ mod tests {
         assert_eq!(
             tactics(&raced),
             vec![
-                (Some("h2"), false, None),
-                (Some("h3"), false, Some("require".into())),
-                (Some("mim"), false, None)
+                (Some("h2"), false, Some("auto".into())),
+                (Some("h3"), false, Some("auto".into())),
+                (Some("mim"), false, None),
+                (Some("h2"), false, Some("auto".into()))
             ]
         );
 
@@ -858,7 +859,7 @@ mod tests {
         );
         assert_eq!(
             tactics(&raced),
-            vec![(Some("h2"), true, None), (Some("h3"), false, None), (Some("mim"), false, None)]
+            vec![(Some("h2"), true, None), (Some("h3"), false, None), (Some("mim"), false, None), (Some("h2"), true, Some("auto".into()))]
         );
     }
 
@@ -874,8 +875,7 @@ mod tests {
             engine_route("h2", true, None)
         );
 
-        // A setting the framing ignores is not part of what worked: H3 does
-        // not split, and H2 does not carry ECH.
+        // H3 does not split; both H2 and H3 retain the ECH proof.
         let mut profile = CoreProfile::default();
         profile.ech = Some("auto".into());
         let h3 = Lane::plain(CarrierKind::Aether, Some("h3"));
@@ -885,8 +885,37 @@ mod tests {
         );
         assert_eq!(
             route_of(CarrierKind::Aether, &trial_profile(&profile, &h2)).ech,
-            None
+            Some("auto".into())
         );
+    }
+
+    #[test]
+    fn a_remembered_h2_ech_route_reaches_the_trial_arguments() {
+        let profile = CoreProfile::default();
+        let mut raced = lanes(&profile, &[CarrierKind::Aether]);
+        let recall = Recall { engine_route: Some(engine_route("h2", true, Some("auto"))), remedy: None };
+        assert!(apply_recall(&mut raced, &profile, &recall));
+        let lane = raced.iter().find(|l| l.transport == Some("h2") && l.ech.is_some()).unwrap();
+        let trial = trial_profile(&profile, lane);
+        let args = trial.args(Path::new("identity.toml"));
+        assert!(args.contains(&"--h2".into()));
+        assert!(args.windows(2).any(|pair| pair == ["--ech", "auto"]));
+        assert_eq!(route_of(CarrierKind::Aether, &trial), engine_route("h2", true, Some("auto")));
+    }
+
+    #[test]
+    fn h3_and_nested_ech_routes_are_recalled_without_a_separate_encrypted_lane() {
+        for (protocol, transport) in [("masque", "h3"), ("wom", "h2"), ("mim", "h2")] {
+            let profile = CoreProfile { protocol: protocol.into(), masque_transport: transport.into(), ..Default::default() };
+            let mut raced = lanes(&profile, &[CarrierKind::Aether]);
+            let route = Route { protocol: Some(protocol.into()), ..engine_route(transport, false, Some("auto")) };
+            assert!(apply_recall(&mut raced, &profile, &Recall { engine_route: Some(route.clone()), remedy: None }));
+            let wanted = if protocol == "masque" { Some("h3") } else { None };
+            let lane = raced.iter().find(|lane| lane.transport == wanted).unwrap();
+            let trial = trial_profile(&profile, lane);
+            assert_eq!(route_of(CarrierKind::Aether, &trial).ech, route.ech);
+            assert!(trial.args(Path::new("identity.toml")).windows(2).any(|pair| pair == ["--ech", "auto"]));
+        }
     }
 
     #[test]
@@ -937,8 +966,8 @@ mod tests {
         let profile = CoreProfile::default();
         let lanes = lanes(&profile, &[CarrierKind::Aether, CarrierKind::Psiphon]);
         assert!(lanes.iter().all(|lane| lane.kind != CarrierKind::Tor));
-        // Three engine framings plus Psiphon.
-        assert_eq!(lanes.len(), 4);
+        // H2, H3, MIM and protected H2, plus Psiphon.
+        assert_eq!(lanes.len(), 5);
 
         assert!(lanes_for_nothing_installed().is_empty());
     }

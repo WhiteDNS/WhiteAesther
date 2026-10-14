@@ -133,6 +133,12 @@ function settingsLine(profile: ConnectionProfile): string {
     ["resolvers", profile.dns.length],
     ["logLevel", profile.logLevel],
     ["ech", profile.ech && profile.ech !== "off" ? "set" : "off"],
+    ["echResolver", Boolean(profile.echResolver?.trim())],
+    ["echDomain", Boolean(profile.echDomain?.trim())],
+    ["tlsCiphers", Boolean(profile.tlsCiphers?.trim())],
+    ["tlsGroups", Boolean(profile.tlsGroups?.trim())],
+    ["disableGrease", profile.disableGrease],
+    ["enrollAddress", Boolean(profile.enrollAddress?.trim())],
     ["routeRules", profile.routeBlock.trim().length > 0 || profile.routeDirect.trim().length > 0],
     ["fullTunnel", profile.fullTunnel],
     // Presence only. The URL may carry a password, and this file gets handed

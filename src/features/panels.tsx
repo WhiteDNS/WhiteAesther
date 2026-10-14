@@ -1,6 +1,7 @@
 import { useT } from "@/core/useT";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useId } from "react";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -77,10 +78,12 @@ export function TextField({
   error?: string | null;
 }) {
   const t = useT();
+  const inputId = useId();
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-[13.5px]">{t(label)}</Label>
+      <Label htmlFor={inputId} className="text-[13.5px]">{t(label)}</Label>
       <Input
+        id={inputId}
         type={type}
         className={mono ? "font-mono" : undefined}
         value={value}

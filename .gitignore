@@ -26,3 +26,7 @@ src-tauri/binaries/*
 *.njsproj
 *.sln
 *.sw?
+
+# UI test output
+test-results/
+playwright-report/

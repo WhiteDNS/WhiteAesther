@@ -147,3 +147,9 @@ test("an engine that is simply not in use is not reported as missing", () => {
   // And a genuinely missing engine still says so.
   assert.match(report({ engineVersion: null, engineAvailable: false }), /engine unavailable/);
 });
+
+test("TLS lookup and registration overrides are presence-only in diagnostics", () => {
+  const text = report({ profile: { ...DEFAULT_PROFILE, ech: "manual-private-list", echDomain: "private-keys.example", echResolver: "https://private-resolver.example/dns-query", enrollAddress: "private-registration.example:443", tlsCiphers: "private-cipher-input", tlsGroups: "private-group-input" } });
+  for (const value of ["manual-private-list", "private-keys.example", "private-resolver.example", "private-registration.example", "private-cipher-input", "private-group-input"]) assert.ok(!text.includes(value));
+  assert.ok(text.includes("echResolver=true") && text.includes("enrollAddress=true"));
+});

@@ -1,9 +1,10 @@
 import type { ConnectionProfile } from "../types";
 
 export function buildCoreCommand(profile: ConnectionProfile): string {
+  const echOn = Boolean(profile.ech?.trim()) && profile.ech?.trim().toLowerCase() !== "off";
   const args = [
-    profile.protocol === "masque" ? "--masque" : profile.protocol === "wg" ? "--wg" : "--gool",
-    profile.protocol === "masque" && profile.masqueTransport === "h2" ? "--h2" : "",
+    profile.protocol === "wom" ? "--wg-over-masque" : `--${profile.protocol}`,
+    (profile.protocol === "masque" || profile.protocol === "mim" || profile.protocol === "wom") && profile.masqueTransport === "h2" ? "--h2" : "",
     "--scan", profile.scanMode,
     "--ip", profile.ipFamily,
     "--bind", quote(profile.socksAddress),
@@ -13,17 +14,22 @@ export function buildCoreCommand(profile: ConnectionProfile): string {
     "--reconnect-secs", String(profile.reconnectSecs),
     "--dns", quote(profile.dns.join(",")),
     "--noize", profile.noize,
-    "--keepalive", String(profile.keepaliveSecs),
+    profile.keepaliveSecs > 0 ? `--keepalive ${profile.keepaliveSecs}` : "",
     "--log-level", processLogLevel(profile.logLevel),
     profile.dataCheck ? "" : "--no-data-check",
-    profile.fragmentClientHello && profile.protocol === "masque" && profile.masqueTransport === "h2"
+    profile.fragmentClientHello && ["masque", "mim", "wom"].includes(profile.protocol) && profile.masqueTransport === "h2"
       ? `--fragment --fragment-size ${quote(profile.fragmentSize)} --fragment-delay ${quote(profile.fragmentDelay)}` : "",
     profile.profileRetry ? "" : "--no-profile-retry",
     profile.endpointMode === "automatic" ? "" : option("--peer", profile.peer),
     option("--wg-peer", profile.wgPeer),
     option("--h2-peer", profile.h2Peer),
-    profile.ech && profile.ech !== "off" ? option("--ech", profile.ech) : "",
+    echOn ? option("--ech", profile.ech) : "",
+    echOn ? option("--ech-dns", profile.echResolver?.trim() || "https://1.1.1.1/dns-query") : "",
+    echOn ? option("--ech-domain", profile.echDomain) : "",
     option("--tls-groups", profile.tlsGroups),
+    option("--tls-ciphers", profile.tlsCiphers),
+    profile.disableGrease ? "--disable-grease" : "",
+    option("--enroll-address", profile.enrollAddress),
     profile.performanceProfile === "auto" ? "" : `--perf ${profile.performanceProfile}`,
     option("--route-block", profile.routeBlock),
     option("--route-direct", profile.routeDirect),

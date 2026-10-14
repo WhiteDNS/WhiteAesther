@@ -24,8 +24,11 @@ concurrency:
 
 env:
   # The fork adds the reporting modes the endpoint scanner needs. Pinned to a
-  # tag rather than a branch so a release is reproducible.
-  AETHER_REVISION: v2.0.0-whiteaesther.4
+  # commit rather than a branch so a release is reproducible.
+  AETHER_REVISION: 9d91b294f613d2e6961f04f3a1d5a01e3353615b
+  # BoringSSL's C++ runtime must not depend on a developer's installed VC DLLs.
+  # Target-specific: ignored by the macOS/Linux jobs; also applies to Tauri.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
   gate:
@@ -205,7 +208,7 @@ jobs:
           -o Acquire::Retries=3 -o Acquire::http::Timeout=20
           libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
           libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-          cmake ninja-build perl pkg-config clang rpm xdg-utils
+          cmake ninja-build perl pkg-config clang rpm rpm2cpio cpio xdg-utils
           libevent-2.1-7
 
       - name: Install pnpm
@@ -224,6 +227,10 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.98.0
+
+      - name: Install NASM for BoringSSL
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -246,11 +253,32 @@ jobs:
       - name: Test the frontend
         run: pnpm test
 
+      - name: Test the Aether core
+        run: cargo test --locked --manifest-path "aether-core/aether/Cargo.toml" --lib -- --test-threads=1
+
+      - name: Check core formatting
+        run: cargo fmt --manifest-path "aether-core/aether/Cargo.toml" -- --check
+
+      - name: Lint the Aether core
+        run: cargo clippy --locked --manifest-path "aether-core/aether/Cargo.toml" --all-targets
+
       - name: Compile the Aether core
+        env:
+          AETHER_BUILD_REVISION: ${{ env.AETHER_REVISION }}
         run: cargo build --release --locked --manifest-path aether-core/aether/Cargo.toml
 
       - name: Stage the target-specific Aether sidecar
         run: pnpm stage:core -- --source "${{ github.workspace }}/aether-core/aether/target/release/${{ matrix.core }}"
+
+      - name: Install UI test browser
+        if: runner.os == 'Windows'
+        run: pnpm exec playwright install chromium --only-shell
+
+      - name: Test rendered settings and delayed Save
+        if: runner.os == 'Windows'
+        env:
+          WHITEAESTHER_TEST_CORE: ${{ github.workspace }}/aether-core/aether/target/release/${{ matrix.core }}
+        run: pnpm test:ui
 
       # A released binary rather than something we build, pinned in the script
       # so a release cannot pick up whatever upstream published that morning.
@@ -299,11 +327,22 @@ jobs:
         # deployment chatter, and it named the missing library exactly.
         run: pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
 
+      - name: Execute the core extracted from every package
+        run: node scripts/verify-packaged-core.mjs --packages "src-tauri/target/release/bundle" --report "package-verification-${{ matrix.artifact }}.json"
+
       - name: Upload desktop packages
         uses: actions/upload-artifact@v7
         with:
           name: whiteaesther-${{ matrix.artifact }}
           path: ${{ matrix.packages }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload package verification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-verification-${{ matrix.artifact }}
+          path: package-verification-${{ matrix.artifact }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -332,6 +371,7 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+          pattern: whiteaesther-*
 
       # The pull request built and tested these exact files. Publishing them
       # rather than making them again is the difference between one full matrix
@@ -344,7 +384,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          gh run download "${{ needs.gate.outputs.reuse }}" --dir release-assets
+          gh run download "${{ needs.gate.outputs.reuse }}" --dir release-assets --pattern "whiteaesther-*"
           echo "reused the packages from run ${{ needs.gate.outputs.reuse }}"
 
       - name: Flatten package directories

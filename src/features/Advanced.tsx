@@ -358,6 +358,7 @@ function Licences() {
 const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: ConnectionProfile["protocol"]; transport?: "h2" | "h3" }> = [
   { id: "h2", label: "MASQUE H2", detail: "TCP. Survives networks that block UDP.", protocol: "masque", transport: "h2" },
   { id: "h3", label: "MASQUE H3", detail: "QUIC. Lower overhead where UDP gets through.", protocol: "masque", transport: "h3" },
+  { id: "wom", label: "WireGuard over MASQUE", detail: "WireGuard inside MASQUE. The outer hop can use H2 or H3.", protocol: "wom" },
   { id: "wg", label: "WireGuard", detail: "UDP, with an obfuscation profile sweep.", protocol: "wg" },
   // Two nested MASQUE hops. For a network that has learnt to recognise one --
   // which is the case this whole app exists for, so it belongs in the picker
@@ -1202,7 +1203,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
   const active =
     profile.protocol === "masque" ? profile.masqueTransport : profile.protocol;
   const isMasque = profile.protocol === "masque";
-  const isH2 = isMasque && profile.masqueTransport === "h2";
+  const isH2 = ["masque", "mim", "wom"].includes(profile.protocol) && profile.masqueTransport === "h2";
 
   // Everything below the carrier picker describes the Aether engine: which
   // transport it rides, how hard it searches for a Cloudflare gateway, how it
@@ -1260,6 +1261,7 @@ function Routes({ profile, onChange }: AdvancedProps) {
         </CardContent>
       </Card>
 
+      {profile.protocol === "wom" || profile.protocol === "mim" ? <Card><CardContent className="pt-4"><Row first title="Outer MASQUE framing"><Seg value={profile.masqueTransport} onChange={(masqueTransport) => set({ masqueTransport })} options={[["h2", "H2"], ["h3", "H3"]]} /></Row></CardContent></Card> : null}
       <Card>
         <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Search")}</CardTitle></CardHeader>
         <CardContent className="pt-0">
@@ -1267,9 +1269,10 @@ function Routes({ profile, onChange }: AdvancedProps) {
             <Seg
               value={profile.scanMode}
               onChange={(scanMode) => set({ scanMode })}
-              options={[["turbo", "turbo"], ["balanced", "balanced"], ["thorough", "thorough"], ["stealth", "stealth"], ["ironclad", "ironclad"]]}
+              options={[["turbo", "turbo"], ["balanced", "balanced"], ["thorough", "thorough"], ["stealth", "stealth"], ["verified", "Verified edges"], ["ironclad", "ironclad"]]}
             />
           </Row>
+          {profile.scanMode === "verified" ? <p className="pb-3 text-[13px] text-muted-foreground">{t("Prioritises known gateways and verifies the current path. Historical results do not guarantee reachability.")}</p> : null}
           <Row title="Addresses" help="Turn off IPv6 where the network handles it badly.">
             <Seg
               value={profile.ipFamily}
@@ -1314,14 +1317,14 @@ function Routes({ profile, onChange }: AdvancedProps) {
           <CardDescription>
             {isMasque
               ? t("Both cost a little on a healthy network and only matter on a filtered one.")
-              : t("Obfuscation applies to WireGuard; the TLS options are MASQUE H2 only.")}
+              : t("Obfuscation applies to WireGuard. Manual TLS and ECH settings also affect WARP registration.")}
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <Row
             first
             title="Split the TLS opening"
-            help={isH2 ? t("Defeats filtering that reads only the first packet.") : t("MASQUE H2 only — has no effect on the selected protocol.")}
+            help={isH2 ? t("Defeats filtering that reads only the first packet.") : t("Applies to MASQUE H2, including the outer H2 hop of nested transports.")}
           >
             <Switch
               disabled={!isH2}
@@ -1379,20 +1382,48 @@ function Routes({ profile, onChange }: AdvancedProps) {
               onCheckedChange={(autoReprovision) => set({ autoReprovision })}
             />
           </Row>
-          <Separator />
+
+        </CardContent>
+      </Card></>
+      ) : null}
+      {profile.autoRoute || carrierChainHas(profile.carriers, "aether") ? <AetherTlsSettings profile={profile} onChange={onChange} /> : null}
+    </>
+  );
+}
+
+function AetherTlsSettings({ profile, onChange }: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  return <Card><CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("TLS and ECH")}</CardTitle><CardDescription>{t("Applies to Aether handshakes and registration, including Aether hops in a carrier chain.")}</CardDescription></CardHeader><CardContent>
           <div className="grid grid-cols-2 gap-4 pt-4">
             <TextField
               label="Encrypted Client Hello" mono value={profile.ech ?? ""}
               placeholder="off, auto, or base64"
               onChange={(value) => set({ ech: value || null })}
-              help="Hides the hostname where the upstream supports it."
+              help="Hides the name on H2/H3 and WARP registration. A requested ECH attempt fails if no usable key is offered or accepted."
             />
             <TextField
               label="TLS groups" mono value={profile.tlsGroups ?? ""}
-              placeholder="Core default"
+              placeholder="X25519:P-256:P-384"
               onChange={(value) => set({ tlsGroups: value || null })}
-              help="Key exchange groups to offer, comma separated."
+              help="Key exchange groups in order, separated by ':'. Empty uses the core default."
             />
+            <TextField label="TLS 1.2 cipher suites" mono value={profile.tlsCiphers ?? ""}
+              placeholder="ECDHE-RSA-AES128-GCM-SHA256"
+              onChange={(value) => set({ tlsCiphers: value || null })}
+              help="BoringSSL names separated by ':'. Empty uses the core default. Does not select TLS 1.3 cipher suites." />
+            <TextField label="WARP registration address" mono value={profile.enrollAddress ?? ""}
+              placeholder="host:443"
+              onChange={(value) => set({ enrollAddress: value || null })}
+              help="Optional host/IP with a port; default 443. Changes registration's network destination while preserving its Host, SNI and certificate checks." />
+            <TextField label="ECH resolver" mono value={profile.echResolver ?? ""}
+              placeholder="https://1.1.1.1/dns-query"
+              onChange={(value) => set({ echResolver: value || null })}
+              help="udp://IP, tcp://IP or https:// DoH. Empty uses protected DoH through the upstream carrier. Saved while ECH is off, used only when on." />
+            <TextField label="ECH key domain" mono value={profile.echDomain ?? ""}
+              placeholder="cloudflare-ech.com"
+              onChange={(value) => set({ echDomain: value || null })}
+              help="Domain with the HTTPS record containing the ECH key. Empty uses cloudflare-ech.com." />
             <TextField
               label="Dial through a local proxy" mono value={profile.upstreamProxy}
               placeholder="socks5://host:port"
@@ -1400,11 +1431,8 @@ function Routes({ profile, onChange }: AdvancedProps) {
               help="The endpoint search goes through it too, so it never reveals the address the tunnel hides."
             />
           </div>
-        </CardContent>
-      </Card></>
-      ) : null}
-    </>
-  );
+          <Row title="Disable GREASE" help="Off by default: GREASE remains enabled. Does not disable encryption or certificate verification."><Switch checked={profile.disableGrease} onCheckedChange={(disableGrease) => set({ disableGrease })} /></Row>
+  </CardContent></Card>;
 }
 
 // -------------------------------------------------------------------- endpoint
