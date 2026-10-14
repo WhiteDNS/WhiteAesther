@@ -2,6 +2,16 @@
 
 Cross-platform desktop control surface for the Aether connection core.
 
+## Aether credits and support
+
+The [Aether connection core](https://github.com/CluvexStudio/Aether) was created by
+[CluvexStudio](https://github.com/CluvexStudio). Credit for the original core and its networking
+work belongs to CluvexStudio and the Aether contributors. WhiteAesther provides the desktop
+interface and integration around [our Aether fork](https://github.com/WhiteDNS/Aether).
+
+Please visit [CluvexStudio's Telegram channel](https://t.me/CluvexStudio) for updates and information
+on supporting the original developer's work. Thank you to CluvexStudio for developing Aether.
+
 ## Working features
 
 - Starts, monitors and stops a real Aether process from the Tauri backend
