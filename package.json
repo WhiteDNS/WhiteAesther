@@ -1,7 +1,7 @@
 {
   "name": "whiteaesther",
   "private": true,
-  "version": "1.9.9",
+  "version": "1.10.0",
   "prerelease": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -9,7 +9,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "check": "tsc --noEmit",
-    "test": "node --test \"src/**/*.test.ts\"",
+    "test": "node --test \"src/**/*.test.ts\" \"scripts/*.test.mjs\"",
     "preview": "vite preview",
     "stage:core": "node scripts/stage-core.mjs",
     "stage:chain": "node scripts/stage-chain.mjs",
@@ -18,7 +18,8 @@
     "desktop:build": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && tauri build",
     "tauri": "tauri",
     "stage:psiphon": "node scripts/stage-psiphon.mjs",
-    "stage:tor": "node scripts/stage-tor.mjs"
+    "stage:tor": "node scripts/stage-tor.mjs",
+    "test:ui": "playwright test"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
@@ -40,6 +41,7 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@tauri-apps/cli": "^2",
     "@types/node": "^26.2.0",
     "@types/react": "^19.1.8",

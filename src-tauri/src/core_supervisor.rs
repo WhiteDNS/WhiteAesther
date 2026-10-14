@@ -62,6 +62,11 @@ pub struct CoreProfile {
     pub h2_peer: Option<String>,
     pub ech: Option<String>,
     pub tls_groups: Option<String>,
+    pub tls_ciphers: Option<String>,
+    pub disable_grease: bool,
+    pub enroll_address: Option<String>,
+    pub ech_resolver: Option<String>,
+    pub ech_domain: Option<String>,
     pub performance_profile: String,
     pub keepalive_secs: u16,
     pub noize: String,
@@ -194,6 +199,11 @@ impl Default for CoreProfile {
             h2_peer: None,
             ech: None,
             tls_groups: None,
+            tls_ciphers: None,
+            disable_grease: false,
+            enroll_address: None,
+            ech_resolver: None,
+            ech_domain: None,
             performance_profile: "auto".into(),
             keepalive_secs: 25,
             auto_reconnect: true,
@@ -231,12 +241,12 @@ impl Default for CoreProfile {
 
 impl CoreProfile {
     pub(crate) fn validate(&self) -> Result<(), String> {
-        require_one_of("protocol", &self.protocol, &["masque", "wg", "gool", "mim"])?;
+        require_one_of("protocol", &self.protocol, &["masque", "wg", "gool", "mim", "wom"])?;
         require_one_of("MASQUE transport", &self.masque_transport, &["h2", "h3"])?;
         require_one_of(
             "scan mode",
             &self.scan_mode,
-            &["turbo", "balanced", "thorough", "stealth", "ironclad"],
+            &["turbo", "balanced", "thorough", "stealth", "verified", "ironclad"],
         )?;
         require_one_of("IP family", &self.ip_family, &["v4", "v6", "both"])?;
         require_one_of(
@@ -298,6 +308,11 @@ impl CoreProfile {
         validate_peer("HTTP/2 peer", self.h2_peer.as_deref())?;
         validate_optional_text("ECH configuration", self.ech.as_deref(), 32_768)?;
         validate_optional_text("TLS groups", self.tls_groups.as_deref(), 4_096)?;
+        validate_optional_text("TLS 1.2 ciphers", self.tls_ciphers.as_deref(), 4_096)?;
+        validate_optional_text("WARP registration address", self.enroll_address.as_deref(), 4_096)?;
+        validate_optional_text("ECH resolver", self.ech_resolver.as_deref(), 4_096)?;
+        validate_optional_text("ECH key domain", self.ech_domain.as_deref(), 253)?;
+        crate::tls_options::validate(self)?;
         validate_text("block rules", &self.route_block, 64_000)?;
         validate_text("direct rules", &self.route_direct, 64_000)?;
         validate_optional_text("routes file", self.routes_file.as_deref(), 4_096)?;
@@ -329,7 +344,7 @@ impl CoreProfile {
 
     pub(crate) fn args(&self, identity_path: &Path) -> Vec<String> {
         let mut args = vec![
-            format!("--{}", self.protocol),
+            if self.protocol == "wom" { "--wg-over-masque".into() } else { format!("--{}", self.protocol) },
             "--scan".into(),
             self.scan_mode.clone(),
             "--ip".into(),
@@ -357,7 +372,7 @@ impl CoreProfile {
         if self.keepalive_secs > 0 {
             args.extend(["--keepalive".into(), self.keepalive_secs.to_string()]);
         }
-        if self.protocol == "masque" && self.masque_transport == "h2" {
+        if matches!(self.protocol.as_str(), "masque" | "mim" | "wom") && self.masque_transport == "h2" {
             args.push("--h2".into());
         }
         if !self.data_check {
@@ -368,7 +383,7 @@ impl CoreProfile {
         } else {
             "--no-quick-reconnect".into()
         });
-        if self.fragment_client_hello && self.protocol == "masque" && self.masque_transport == "h2"
+        if self.fragment_client_hello && matches!(self.protocol.as_str(), "masque" | "mim" | "wom") && self.masque_transport == "h2"
         {
             args.extend([
                 "--fragment".into(),
@@ -395,12 +410,7 @@ impl CoreProfile {
         if let Some(peer) = non_empty(self.h2_peer.as_deref()) {
             args.extend(["--h2-peer".into(), peer.into()]);
         }
-        if let Some(ech) = non_empty(self.ech.as_deref()).filter(|value| *value != "off") {
-            args.extend(["--ech".into(), ech.into()]);
-        }
-        if let Some(groups) = non_empty(self.tls_groups.as_deref()) {
-            args.extend(["--tls-groups".into(), groups.into()]);
-        }
+        args.extend(self.tls_args());
         if self.performance_profile != "auto" {
             args.extend(["--perf".into(), self.performance_profile.clone()]);
         }
@@ -416,6 +426,26 @@ impl CoreProfile {
         if self.gateway {
             args.push("--gateway".into());
         }
+        args
+    }
+
+    pub(crate) fn ech_setting(&self) -> Option<&str> {
+        non_empty(self.ech.as_deref()).filter(|value| !value.eq_ignore_ascii_case("off"))
+    }
+
+    pub(crate) fn tls_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(ech) = self.ech_setting() {
+            args.extend(["--ech".into(), ech.into()]);
+            args.extend(["--ech-dns".into(), non_empty(self.ech_resolver.as_deref()).unwrap_or("https://1.1.1.1/dns-query").into()]);
+            if let Some(domain) = non_empty(self.ech_domain.as_deref()) {
+                args.extend(["--ech-domain".into(), domain.into()]);
+            }
+        }
+        for (flag, value) in [("--tls-groups", &self.tls_groups), ("--tls-ciphers", &self.tls_ciphers), ("--enroll-address", &self.enroll_address)] {
+            if let Some(value) = non_empty(value.as_deref()) { args.extend([flag.into(), value.into()]); }
+        }
+        if self.disable_grease { args.push("--disable-grease".into()); }
         args
     }
 }
@@ -1120,24 +1150,30 @@ pub(crate) fn engine_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    set_optional_env(&mut command, "AETHER_TEAM", profile.team.as_deref());
+    set_engine_environment(&mut command, profile);
+    hide_console_window(&mut command);
+    Ok(command)
+}
+
+pub(crate) fn set_engine_environment(command: &mut Command, profile: &CoreProfile) {
+    set_optional_env(command, "AETHER_TEAM", profile.team.as_deref());
     set_optional_env(
-        &mut command,
+        command,
         "AETHER_ACCESS_CLIENT_ID",
         profile.access_client_id.as_deref(),
     );
     set_optional_env(
-        &mut command,
+        command,
         "AETHER_ACCESS_CLIENT_SECRET",
         profile.access_client_secret.as_deref(),
     );
     set_optional_env(
-        &mut command,
+        command,
         "AETHER_ACCESS_EMAIL",
         profile.access_email.as_deref(),
     );
     set_optional_env(
-        &mut command,
+        command,
         "AETHER_ACCESS_TOKEN",
         profile.access_token.as_deref(),
     );
@@ -1146,24 +1182,17 @@ pub(crate) fn engine_command(
     // password in the URL, and a command line is readable by anything that can
     // list processes.
     set_optional_env(
-        &mut command,
+        command,
         "AETHER_UPSTREAM",
         non_empty(Some(profile.upstream_proxy.as_str())),
     );
 
-    // Both of these are on in the engine and are switched off by the literal
-    // "0", so the variable is worth setting only to turn one off. Leaving it
-    // unset keeps the single default where it belongs -- in the engine --
-    // instead of copying it here where the two could drift apart.
-    if !profile.route_sniff {
-        command.env("AETHER_ROUTE_SNIFF", "0");
-    }
-    if !profile.auto_reprovision {
-        command.env("AETHER_REPROVISION", "0");
-    }
+    // Set both directions explicitly so an inherited environment cannot
+    // contradict the profile the session or scanner was given.
+    command.env("AETHER_ROUTE_SNIFF", if profile.route_sniff { "1" } else { "0" });
+    command.env("AETHER_REPROVISION", if profile.auto_reprovision { "1" } else { "0" });
 
-    hide_console_window(&mut command);
-    Ok(command)
+    crate::tls_options::clear_inherited(command);
 }
 
 fn launch(
@@ -1743,6 +1772,13 @@ pub async fn save_profile(app: AppHandle, profile: CoreProfile) -> Result<CorePr
 
 fn save_profile_blocking(app: AppHandle, profile: CoreProfile) -> Result<CoreProfile, String> {
     profile.validate()?;
+    if profile.tls_groups.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || profile.tls_ciphers.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || profile.ech_setting().is_some()
+        || profile.enroll_address.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+        let core = resolve_core_path(&app, profile.core_path.as_deref())?;
+        crate::tls_options::check_with_core(&core, &profile)?;
+    }
     let mut stored = profile.clone();
     stored.access_client_secret = None;
     stored.access_token = None;
@@ -2989,6 +3025,7 @@ fn scan_deadline(scan_mode: &str) -> Duration {
         "turbo" => 45,
         "thorough" => 300 + 30,
         "stealth" => 180 + 25,
+        "verified" => 60 + 8,
         "ironclad" => 180 + 15,
         // Balanced is the default here and in the engine, so it is also what an
         // unknown mode gets rather than the shortest window.
@@ -3183,10 +3220,10 @@ pub(crate) const DEFAULT_LISTEN_PORT: u16 = 1819;
 /// the profile holds. See finding 2 in `CARRIER-CHAINING.md`.
 fn pin_to_masque_h2(hop: &mut CoreProfile) -> Option<&'static str> {
     let was = transport_label(hop);
-    if was == "masque-h2" {
+    if was == "masque-h2" || was == "wireguard-over-masque-h2" {
         return None;
     }
-    hop.protocol = "masque".into();
+    if hop.protocol != "wom" { hop.protocol = "masque".into(); }
     hop.masque_transport = "h2".into();
     Some(was)
 }
@@ -3283,11 +3320,12 @@ fn aether_carrier(inner: &SupervisorInner) -> Option<Carrier> {
         // Which transport actually came up, not which one was configured: a
         // profile set to MASQUE can fall back, and the 28-byte shortfall that
         // stops a QUIC handshake belongs to MASQUE alone.
-        carries_quic: !matches!(
-            snapshot.transport.as_deref(),
-            Some("masque-h2") | Some("masque-h3")
-        ),
+        carries_quic: transport_carries_quic(snapshot.transport.as_deref()),
     })
+}
+
+fn transport_carries_quic(transport: Option<&str>) -> bool {
+    !matches!(transport, Some("masque-h2" | "masque-h3" | "masque-in-masque" | "wireguard-over-masque-h2" | "wireguard-over-masque-h3"))
 }
 
 fn current_carrier(app: &AppHandle, inner: &SupervisorInner) -> Option<Carrier> {
@@ -3772,6 +3810,8 @@ fn transport_label(profile: &CoreProfile) -> &'static str {
         ("masque", "h2") => "masque-h2",
         ("masque", _) => "masque-h3",
         ("wg", _) => "wireguard",
+        ("wom", "h2") => "wireguard-over-masque-h2",
+        ("wom", _) => "wireguard-over-masque-h3",
         ("mim", _) => "masque-in-masque",
         _ => "warp-in-warp",
     }
@@ -3786,7 +3826,7 @@ fn session_summary(profile: &CoreProfile, attempt: u32) -> String {
     format!(
         "session transport={} scan={} ip={} noize={} fragment={} dataCheck={} quickReconnect={} \
          perf={} validate={}s startup={}s endpoint={} peerPinned={} zeroTrust={} gateway={} \
-         attempt={attempt}",
+         tlsCiphersSet={} tlsGroupsSet={} greaseDisabled={} echOn={} echResolverSet={} echDomainSet={} enrollAddressSet={} attempt={attempt}",
         transport_label(profile),
         profile.scan_mode,
         profile.ip_family,
@@ -3801,6 +3841,13 @@ fn session_summary(profile: &CoreProfile, attempt: u32) -> String {
         non_empty(profile.peer.as_deref()).is_some(),
         non_empty(profile.team.as_deref()).is_some(),
         profile.gateway,
+        non_empty(profile.tls_ciphers.as_deref()).is_some(),
+        non_empty(profile.tls_groups.as_deref()).is_some(),
+        profile.disable_grease,
+        non_empty(profile.ech.as_deref()).is_some_and(|v| !v.eq_ignore_ascii_case("off")),
+        non_empty(profile.ech_resolver.as_deref()).is_some(),
+        non_empty(profile.ech_domain.as_deref()).is_some(),
+        non_empty(profile.enroll_address.as_deref()).is_some(),
     )
 }
 
@@ -3810,6 +3857,9 @@ fn transport_name(profile: &CoreProfile) -> &'static str {
         "masque-h2" => "MASQUE H2",
         "masque-h3" => "MASQUE H3",
         "wireguard" => "WireGuard",
+        "masque-in-masque" => "MASQUE in MASQUE",
+        "wireguard-over-masque-h2" => "WireGuard over MASQUE H2",
+        "wireguard-over-masque-h3" => "WireGuard over MASQUE H3",
         _ => "WARP in WARP",
     }
 }
@@ -4030,6 +4080,30 @@ mod tests {
         assert!(args.contains(&"--dual".to_string()) == false);
         assert!(args.windows(2).any(|pair| pair == ["--ip", "both"]));
         assert!(args.contains(&"--quick-reconnect".to_string()));
+    }
+
+    #[test]
+    fn new_tls_fields_round_trip_and_old_profiles_keep_defaults() {
+        let old: CoreProfile = serde_json::from_str(r#"{"protocol":"masque"}"#).unwrap();
+        assert!(!old.disable_grease);
+        assert!(old.tls_ciphers.is_none() && old.ech_resolver.is_none() && old.enroll_address.is_none());
+        let p = CoreProfile { protocol: "wom".into(), scan_mode: "verified".into(), tls_groups: Some("X25519:P-256:P-384".into()), tls_ciphers: Some("ECDHE-RSA-AES128-GCM-SHA256".into()), disable_grease: true, ech: Some("auto".into()), ech_domain: Some("cloudflare-ech.com".into()), enroll_address: Some("203.0.113.10:443".into()), ..Default::default() };
+        p.validate().unwrap();
+        let back: CoreProfile = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert_eq!(p.args(Path::new("identity.toml")), back.args(Path::new("identity.toml")));
+        let args = back.args(Path::new("identity.toml"));
+        assert!(args.contains(&"--wg-over-masque".into()) && args.contains(&"--h2".into()));
+        assert!(args.windows(2).any(|pair| pair == ["--ech-dns", "https://1.1.1.1/dns-query"]));
+        let off = CoreProfile { ech: Some("off".into()), ..back };
+        assert!(!off.tls_args().contains(&"--ech-dns".into()));
+        assert!(!off.tls_args().contains(&"--ech-domain".into()));
+        assert_eq!(off.ech_domain.as_deref(), Some("cloudflare-ech.com"));
+    }
+
+    #[test]
+    fn nested_masque_transports_do_not_claim_wireguards_datagram_budget() {
+        for transport in ["masque-h2", "masque-h3", "masque-in-masque", "wireguard-over-masque-h2", "wireguard-over-masque-h3"] { assert!(!transport_carries_quic(Some(transport))); }
+        for transport in ["wireguard", "warp-in-warp"] { assert!(transport_carries_quic(Some(transport))); }
     }
 
     #[test]

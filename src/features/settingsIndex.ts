@@ -42,8 +42,8 @@ export const SETTINGS: SettingEntry[] = [
   { label: "Round-trip chart", section: "status", where: "Status", keywords: "latency ping ms speed graph chart rtt" },
   { label: "Speed test", section: "status", where: "Status", keywords: "throughput download mbps bandwidth how fast" },
 
-  { label: "Protocol", section: "routes", where: "Routes & transports", keywords: "masque h2 h3 wireguard wg warp in warp gool tcp quic udp transport" },
-  { label: "Search depth", section: "routes", where: "Routes & transports", keywords: "scan mode turbo balanced thorough stealth ironclad how hard to look" },
+  { label: "Protocol", section: "routes", where: "Routes & transports", keywords: "masque h2 h3 wireguard wg warp in warp gool wom wg-over-masque tcp quic udp transport" },
+  { label: "Search depth", section: "routes", where: "Routes & transports", keywords: "scan mode turbo balanced thorough stealth verified edges ironclad how hard to look" },
   { label: "Addresses", section: "routes", where: "Routes & transports", keywords: "ipv4 ipv6 dual stack ip family v4 v6" },
   { label: "Reuse the last working edge", section: "routes", where: "Routes & transports", keywords: "quick reconnect cached gateway faster connect" },
   { label: "End-to-end data check", section: "routes", where: "Routes & transports", keywords: "verify tunnel really works data check validation" },
@@ -52,6 +52,11 @@ export const SETTINGS: SettingEntry[] = [
   { label: "Split the TLS opening", section: "routes", where: "Routes & transports", keywords: "fragment client hello dpi censorship filtering bypass" },
   { label: "Obfuscation profile", section: "routes", where: "Routes & transports", keywords: "noize noise padding gfw firewall aggressive hide traffic fingerprint" },
   { label: "Encrypted Client Hello", section: "routes", where: "Routes & transports", keywords: "ech sni hostname hiding" },
+  { label: "TLS 1.2 cipher suites", section: "routes", where: "Routes & transports", keywords: "tls ciphers boring ssl fingerprint" },
+  { label: "Disable GREASE", section: "routes", where: "Routes & transports", keywords: "tls grease fingerprint" },
+  { label: "WARP registration address", section: "routes", where: "Routes & transports", keywords: "enroll address account endpoint registration" },
+  { label: "ECH resolver", section: "routes", where: "Routes & transports", keywords: "ech dns doh udp tcp https resolver" },
+  { label: "ECH key domain", section: "routes", where: "Routes & transports", keywords: "ech domain https key" },
   { label: "TLS groups", section: "routes", where: "Routes & transports", keywords: "key exchange curves x25519 tls" },
   { label: "WireGuard keepalive", section: "routes", where: "Routes & transports", keywords: "keepalive udp mapping nat" },
 

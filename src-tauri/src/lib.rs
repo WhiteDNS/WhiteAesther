@@ -16,6 +16,7 @@ mod route_memory;
 mod scanner;
 mod system_proxy;
 mod tls;
+mod tls_options;
 mod tor;
 
 use chain::Chain;

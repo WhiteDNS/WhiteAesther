@@ -97,6 +97,7 @@ const SCAN_DEADLINE_MS: Record<string, number> = {
   balanced: 140_000,
   thorough: 330_000,
   stealth: 205_000,
+  verified: 68_000,
   ironclad: 195_000,
 };
 

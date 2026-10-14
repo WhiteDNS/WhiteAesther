@@ -129,29 +129,10 @@ fn run_report(
     extra: &[String],
     transport: &str,
 ) -> Result<serde_json::Value, String> {
+    profile.validate()?;
     let (core_path, config_dir, identity_path) = crate::core_supervisor::core_paths(app, profile)?;
 
-    let mut command = Command::new(&core_path);
-    command
-        // MASQUE regardless of the profile's protocol: the core's reporting
-        // modes wrap scan_embedded, which has no WireGuard or WARP-in-WARP
-        // path. The panel says so rather than quietly scanning the wrong thing.
-        .arg("--masque")
-        .args(["--scan", &profile.scan_mode])
-        .args(["--ip", &profile.ip_family])
-        .args(["--noize", &profile.noize])
-        .args(["--config", &identity_path.to_string_lossy()])
-        .args(["--log-level", "warn"])
-        .args(extra)
-        .current_dir(&config_dir)
-        .env_remove("RUST_LOG")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    if transport == "h2" {
-        command.arg("--h2");
-    }
-    crate::core_supervisor::hide_console(&mut command);
+    let mut command = report_process(&core_path, &config_dir, &identity_path, profile, extra, transport);
 
     let mut child = command
         .spawn()
@@ -197,6 +178,40 @@ fn run_report(
     Ok(value)
 }
 
+fn report_process(core_path: &std::path::Path, config_dir: &std::path::Path, identity_path: &std::path::Path, profile: &CoreProfile, extra: &[String], transport: &str) -> Command {
+    let mut command = Command::new(core_path);
+    command
+        // MASQUE regardless of the profile's protocol: the core's reporting
+        // modes wrap scan_embedded, which has no WireGuard or WARP-in-WARP
+        // path. The panel says so rather than quietly scanning the wrong thing.
+        .arg("--masque")
+        .args(["--scan", &profile.scan_mode])
+        .args(["--ip", &profile.ip_family])
+        .args(["--noize", &profile.noize])
+        .args(["--config", &identity_path.to_string_lossy()])
+        .args(["--log-level", "warn"])
+        .args(["--validate-secs", &profile.validate_secs.to_string()])
+        .args(["--startup-secs", &profile.startup_secs.to_string()])
+        .args(profile.tls_args())
+        .args(extra)
+        .current_dir(config_dir)
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if transport == "h2" {
+        command.arg("--h2");
+        if profile.fragment_client_hello {
+            command.args(["--fragment", "--fragment-size", &profile.fragment_size, "--fragment-delay", &profile.fragment_delay]);
+        }
+    }
+    if profile.performance_profile != "auto" { command.args(["--perf", &profile.performance_profile]); }
+    crate::core_supervisor::set_engine_environment(&mut command, profile);
+    crate::core_supervisor::hide_console(&mut command);
+
+    command
+}
+
 pub enum ScanState {
     Running,
     Exited,
@@ -217,4 +232,22 @@ fn candidate_from(value: &serde_json::Value) -> Option<ScanCandidate> {
         peer: value.get("peer")?.as_str()?.to_string(),
         rtt_ms: value.get("rttMs")?.as_u64()?,
     })
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    #[test]
+    fn scanner_receives_the_sessions_tls_and_private_upstream_settings() {
+        let p = CoreProfile { ech: Some("auto".into()), ech_resolver: Some("tcp://1.1.1.1:53".into()), ech_domain: Some("keys.example".into()), tls_groups: Some("X25519:P-256".into()), tls_ciphers: Some("ECDHE-RSA-AES128-GCM-SHA256".into()), disable_grease: true, enroll_address: Some("203.0.113.10:443".into()), upstream_proxy: "socks5://user:secret@127.0.0.1:1080".into(), ..Default::default() };
+        let command = report_process(std::path::Path::new("aether"), std::path::Path::new("config"), std::path::Path::new("identity.toml"), &p, &["--scan-only".into()], "h2");
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        for flag in ["--ech", "--ech-dns", "--ech-domain", "--tls-groups", "--tls-ciphers", "--disable-grease", "--enroll-address", "--fragment"] { assert!(args.iter().any(|a| a == flag), "{flag}"); }
+        assert!(args.iter().all(|a| !a.contains("secret")));
+        assert!(command.get_envs().any(|(key,value)| key == "AETHER_UPSTREAM" && value.is_some_and(|v| v == p.upstream_proxy.as_str())));
+        let off = CoreProfile { ech: Some("off".into()), ..p };
+        let command = report_process(std::path::Path::new("aether"), std::path::Path::new("config"), std::path::Path::new("identity.toml"), &off, &[], "h3");
+        assert!(!command.get_args().any(|a| a == "--ech-dns" || a == "--ech-domain" || a == "--fragment"));
+        assert!(command.get_envs().any(|(key,value)| key == "AETHER_ECH_DNS" && value.is_none()));
+    }
 }

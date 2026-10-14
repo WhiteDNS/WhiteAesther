@@ -57,9 +57,16 @@ export async function loadProfile(): Promise<ConnectionProfile> {
   return invoke("load_profile");
 }
 
-export async function saveProfile(profile: ConnectionProfile): Promise<ConnectionProfile> {
+let profileWrites: Promise<unknown> = Promise.resolve();
+
+export function saveProfile(profile: ConnectionProfile): Promise<ConnectionProfile> {
   requireDesktop();
-  return invoke("save_profile", { profile });
+  const submitted: ConnectionProfile = JSON.parse(JSON.stringify(profile));
+  // Storage sees Save and write-through switches in the order they were used.
+  // A failed write must not block a later correction.
+  const saved = profileWrites.then(() => invoke<ConnectionProfile>("save_profile", { profile: submitted }));
+  profileWrites = saved.then(() => undefined, () => undefined);
+  return saved;
 }
 
 /** Writes an already-composed, already-reviewed report and returns its path. */

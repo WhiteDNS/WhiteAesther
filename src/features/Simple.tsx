@@ -709,6 +709,8 @@ const TRANSPORT_NAMES: Record<string, string> = {
   wireguard: "WireGuard",
   "warp-in-warp": "WARP in WARP",
   "masque-in-masque": "MASQUE in MASQUE",
+  "wireguard-over-masque-h2": "WireGuard over MASQUE H2",
+  "wireguard-over-masque-h3": "WireGuard over MASQUE H3",
 };
 
 export function transportName(value: CoreSnapshot["transport"]): string {

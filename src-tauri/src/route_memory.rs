@@ -82,7 +82,7 @@ impl Route {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Remedy {
-    /// The gateway demanded ECH (TLS alert 121): H3 with ECH required.
+    /// The gateway demanded ECH (TLS alert 121): authenticated H2/H3 with ECH.
     Ech,
     /// The server name was refused (TLS alert 112): H2 with a split
     /// ClientHello.

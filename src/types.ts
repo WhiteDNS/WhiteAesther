@@ -157,9 +157,9 @@ export interface LanSettings {
 
 export interface ConnectionProfile {
   name: string;
-  protocol: "masque" | "wg" | "gool" | "mim";
+  protocol: "masque" | "wg" | "gool" | "mim" | "wom";
   masqueTransport: "h2" | "h3";
-  scanMode: "turbo" | "balanced" | "thorough" | "stealth" | "ironclad";
+  scanMode: "turbo" | "balanced" | "thorough" | "stealth" | "verified" | "ironclad";
   ipFamily: "v4" | "v6" | "both";
   socksAddress: string;
   quickReconnect: boolean;
@@ -174,6 +174,11 @@ export interface ConnectionProfile {
   h2Peer: string | null;
   ech: string | null;
   tlsGroups: string | null;
+  tlsCiphers: string | null;
+  disableGrease: boolean;
+  enrollAddress: string | null;
+  echResolver: string | null;
+  echDomain: string | null;
   performanceProfile: "auto" | "low" | "medium" | "high";
   keepaliveSecs: number;
   noize: "off" | "light" | "firewall" | "balanced" | "gfw" | "aggressive";
@@ -258,7 +263,7 @@ export interface CoreSnapshot {
   pid: number | null;
   corePath: string | null;
   version: string | null;
-  transport: "masque-h2" | "masque-h3" | "wireguard" | "warp-in-warp" | "masque-in-masque" | null;
+  transport: "masque-h2" | "masque-h3" | "wireguard" | "warp-in-warp" | "masque-in-masque" | "wireguard-over-masque-h2" | "wireguard-over-masque-h3" | null;
   endpoint: string | null;
   socksAddress: string;
   latencyMs: number | null;
@@ -306,6 +311,11 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   h2Peer: null,
   ech: null,
   tlsGroups: null,
+  tlsCiphers: null,
+  disableGrease: false,
+  enrollAddress: null,
+  echResolver: null,
+  echDomain: null,
   performanceProfile: "auto",
   keepaliveSecs: 25,
   noize: "balanced",

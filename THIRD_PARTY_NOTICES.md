@@ -8,9 +8,9 @@ licence, and those licences are not superseded by WhiteAesther's.
 The connection engine. WhiteAesther ships the `aether` executable inside its installers and runs it
 to connect, and in a reporting mode to populate the endpoint picker.
 
-- Upstream: <https://github.com/CluvexStudio/Aether> — version 1.8.0
-- The build used here: <https://github.com/WhiteDNS/Aether> at tag `v1.8.0-whiteaesther.1` — a fork
-  adding the two reporting modes the endpoint picker needs, with upstream history preserved and
+- Upstream: <https://github.com/CluvexStudio/Aether> — version 2.3.0
+- The build used here: <https://github.com/WhiteDNS/Aether> at the immutable revision in `core-source.json` — a fork
+  retaining desktop scanner/identity contracts and the Android 2.3 networking fixes, with upstream history preserved and
   every change reviewable as a diff against it
 - Licence: GNU Affero General Public License v3.0 — see `LICENSE`, also installed as
   `licenses/whiteaesther-AGPL-3.0.txt`
@@ -18,6 +18,13 @@ to connect, and in a reporting mode to populate the endpoint picker.
 
 Because WhiteAesther is built around Aether and distributes it, WhiteAesther is treated as a
 derivative work and is licensed AGPL-3.0. Its complete source is public at <https://github.com/WhiteDNS/WhiteAesther>.
+
+### BoringSSL build dependency
+
+The upgraded core uses Boring/tokio-boring 5.2 and official boring-sys 5.2.0. Its vendored
+source has one NASM include-path quoting correction for Windows workspaces containing spaces;
+cryptographic and certificate-validation code is unchanged. Source, provenance and original
+licences are in the core fork’s `third-party/boring-sys`. No Android NDK runtime library is packaged.
 
 ### Trademark
 

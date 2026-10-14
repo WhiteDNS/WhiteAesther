@@ -280,7 +280,9 @@ export default function App() {
         localStorage.setItem("whiteaesther-profile", JSON.stringify(profile));
       } else {
         const saved = await persistProfile(effective);
-        setProfile((current) => ({
+        // The response owns only the draft submitted by this Save. Any edit
+        // creates a new object, including clearing a field or changing a secret.
+        setProfile((current) => current !== profile ? current : ({
           ...saved,
           accessClientSecret: current.accessClientSecret,
           accessToken: current.accessToken,
