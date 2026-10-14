@@ -31,8 +31,9 @@ for (const artifact of packages) {
     } else if (artifact.endsWith(".deb")) {
       run("dpkg-deb", ["-x", artifact, scratch]);
     } else if (artifact.endsWith(".rpm")) {
-      const archive = execFileSync("rpm2cpio", [artifact], { maxBuffer: 256 * 1024 * 1024 });
-      execFileSync("cpio", ["-idm", "--no-absolute-filenames"], { cwd: scratch, input: archive, stdio: ["pipe", "ignore", "pipe"] });
+      // libarchive reads the RPM wrapper and compressed CPIO payload directly.
+      // Keep extraction streaming and reject malformed archives via its exit code.
+      run("bsdtar", ["-xf", artifact, "-C", scratch, "--no-same-owner"]);
     } else {
       run(artifact, ["--appimage-extract"], { cwd: scratch });
     }

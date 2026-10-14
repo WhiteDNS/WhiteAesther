@@ -208,7 +208,7 @@ jobs:
           -o Acquire::Retries=3 -o Acquire::http::Timeout=20
           libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
           libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-          cmake ninja-build perl pkg-config clang rpm rpm2cpio cpio xdg-utils
+          cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils
           libevent-2.1-7
 
       - name: Install pnpm
