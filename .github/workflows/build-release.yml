@@ -227,6 +227,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
 
       - name: Install NASM for BoringSSL
         if: runner.os == 'Windows'
