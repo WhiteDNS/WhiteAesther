@@ -8,7 +8,9 @@ licence, and those licences are not superseded by WhiteAesther's.
 The connection engine. WhiteAesther ships the `aether` executable inside its installers and runs it
 to connect, and in a reporting mode to populate the endpoint picker.
 
+- Original creator: [CluvexStudio](https://github.com/CluvexStudio), with the Aether contributors
 - Upstream: <https://github.com/CluvexStudio/Aether> — version 2.3.0
+- Creator's Telegram channel and support information: <https://t.me/CluvexStudio>
 - The build used here: <https://github.com/WhiteDNS/Aether> at the immutable revision in `core-source.json` — a fork
   retaining desktop scanner/identity contracts and the Android 2.3 networking fixes, with upstream history preserved and
   every change reviewable as a diff against it
