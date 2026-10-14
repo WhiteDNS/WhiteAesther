@@ -1,4 +1,4 @@
-# Unreleased desktop: Aether 2.3
+# Desktop v1.10.0: Aether 2.3
 
 - Upgrade the desktop fork to Aether 2.3 networking while retaining scanner JSON, identity
   backup/restore, routing, the existing carriers and clean sidecar teardown.
@@ -12,7 +12,7 @@
 
 Defaults: new text fields empty, GREASE enabled, ECH off unless selected or tried by Automatic.
 Empty ECH resolver on an active ECH attempt uses authenticated DoH at https://1.1.1.1/dns-query.
-Old profiles and identity backups remain compatible. No app version bump or public release is implied.
+Old profiles and identity backups remain compatible. Desktop v1.10.0 is the initial prerelease of this upgrade.
 
 See [the Persian guide](AETHER-2.3.fa.md) and [implementation/verification notes](AETHER-2.3-VALIDATION.md).
 Fixture and UI tests do not establish connectivity on restrictive networks; live acceptance remains separate.

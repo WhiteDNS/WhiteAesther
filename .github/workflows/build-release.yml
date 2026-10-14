@@ -365,6 +365,9 @@ jobs:
       # contents one.
       actions: read
     steps:
+      - name: Check out the release notes
+        uses: actions/checkout@v7
+
       - name: Download the packages built in this run
         if: needs.gate.outputs.reuse == ''
         uses: actions/download-artifact@v8
@@ -498,9 +501,13 @@ jobs:
             if [[ "${{ needs.gate.outputs.prerelease }}" == "true" ]]; then
               flags+=(--prerelease)
             fi
+            if [[ -f "docs/releases/${tag}.md" ]]; then
+              flags+=(--notes-file "docs/releases/${tag}.md")
+            else
+              flags+=(--generate-notes)
+            fi
             gh release create "$tag" release-assets/* \
               --target "${GITHUB_SHA}" \
-              --generate-notes \
               --title "WhiteAesther $tag" \
               ${flags[@]+"${flags[@]}"}
           fi

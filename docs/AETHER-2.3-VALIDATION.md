@@ -1,7 +1,8 @@
-# Local Aether 2.3 delivery — 2026-10-14
+# Aether 2.3 validation — 2026-10-14
 
-The user requested local output only. No push, pull request, merge, remote CI or release was
-performed. Desktop version remains 1.9.9; these installers are local previews, not a new release.
+The initial delivery was local only, with desktop version 1.9.9. Its installers remain local
+previews. The user subsequently authorized GitHub publication, merge and release of v1.10.0.
+The release is an initial prerelease; native CI results are recorded in GitHub checks.
 The original Android and sibling core checkouts were not changed. Existing desktop notes and
 untracked user files are excluded from the implementation commit.
 
@@ -20,9 +21,8 @@ and missing-identity export without provisioning. The core's `DESKTOP_2_3.md` de
 provenance and retained desktop behavior. Official boring-sys 5.2.0 is vendored with only a NASM
 include-path quoting correction; Android NDK executable changes were excluded.
 
-The core commit currently exists locally. GitHub checkout of this pin will require making that
-commit available in WhiteDNS/Aether later, under separate user authorization. The five-platform
-matrix is prepared, but has not run. The local core Git bundle can be imported into a checkout
+The core commit was published on `codex/desktop-2.3` in WhiteDNS/Aether for the native checks.
+The five-platform matrix is now required before release. The local core Git bundle can also be imported into a checkout
 containing the baseline without changing its working tree:
 
 ```powershell
@@ -63,7 +63,7 @@ core search deliberately rejects the previous 2.0 binary instead of silently pac
 | Production frontend build | Passed |
 | Rendered UI with final release core | 7 passed |
 | Windows x86_64 NSIS and MSI | Both built; both extracted cores passed exact revision, architecture, PE runtime and offline JSON command checks |
-| Workflow YAML | Parsed locally; five native targets present; remote jobs not run |
+| Workflow YAML | Parsed locally; five native targets present; GitHub checks track release validation separately |
 
 UI tests use the actual React application in Chromium with controlled Tauri IPC and fixture
 storage. They cover character-by-character typing, clipboard paste, clear, late Save, queued
@@ -94,4 +94,4 @@ live acceptance checks. Full tunnel/elevation/system-proxy crash recovery was no
 the host during this work; its existing implementation and tests were preserved.
 
 See [the Persian guide](AETHER-2.3.fa.md) for settings, defaults, compatibility and upgrade steps,
-and [unreleased notes](RELEASE-NOTES-AETHER-2.3.md) for the user-facing changes.
+and [v1.10.0 release notes](releases/v1.10.0.md) for the user-facing changes.
