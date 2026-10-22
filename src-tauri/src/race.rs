@@ -21,8 +21,8 @@
 //! begins by stopping whatever it was doing. That is not an obstacle to racing,
 //! it is the shape of it: the lanes are *carriers*, not routes, so nothing ever
 //! asks for two Psiphons. The engine is the exception -- a trial engine is an
-//! ordinary child process on a private port, so both MASQUE framings can run at
-//! once, which is the whole point of racing them.
+//! ordinary child process on a private port. The proven route for this network,
+//! or H2 when none is known, starts three seconds ahead of engine recovery.
 //!
 //! ## The race owns everything it starts
 //!
@@ -144,6 +144,8 @@ pub struct RaceWinner {
     /// profile's own: a pin the user set without a fallback still gets one
     /// here, because the race found this way out without that address.
     pub endpoint_mode: Option<String>,
+    /// The gateway that actually carried the verified trial traffic.
+    pub peer: Option<String>,
     /// How long it took to answer, for the line that says so on screen.
     pub seconds: u64,
 }
@@ -216,7 +218,9 @@ fn lanes(profile: &CoreProfile, available: &[CarrierKind]) -> Vec<Lane> {
             lanes.push(Lane::plain(CarrierKind::Aether, Some("h3")));
         }
     }
-    if available.contains(&CarrierKind::Aether) {
+    if available.contains(&CarrierKind::Aether)
+        && !profile.ech.as_deref().is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
+    {
         let mut encrypted = Lane::plain(CarrierKind::Aether, Some("h2"));
         encrypted.ech = Some(profile.ech_setting().unwrap_or("auto").into());
         lanes.push(encrypted);
@@ -256,7 +260,7 @@ fn apply_recall(lanes: &mut [Lane], profile: &CoreProfile, recall: &Recall) -> b
         if let Some(index) = selected {
             let lane = &mut lanes[index];
             lane.fragment |= route.fragment;
-            if route.ech.is_some() {
+            if route.ech.is_some() && profile.ech.as_deref().is_none_or(|v| v.trim().is_empty()) {
                 lane.ech = route.ech.clone();
             }
             had_lead = true;
@@ -266,7 +270,9 @@ fn apply_recall(lanes: &mut [Lane], profile: &CoreProfile, recall: &Recall) -> b
         for lane in lanes.iter_mut().filter(|lane| lane.kind == CarrierKind::Aether) {
             match remedy {
                 Remedy::Ech if matches!(lane.transport, Some("h2" | "h3")) => {
-                    if lane.ech.is_none() { lane.ech = Some("auto".into()); }
+                    if lane.ech.is_none() && profile.ech.as_deref().is_none_or(|v| v.trim().is_empty()) {
+                        lane.ech = Some("auto".into());
+                    }
                 }
                 Remedy::Fragment if lane.transport == Some("h2") => lane.fragment = true,
                 _ => {}
@@ -274,6 +280,21 @@ fn apply_recall(lanes: &mut [Lane], profile: &CoreProfile, recall: &Recall) -> b
         }
     }
     had_lead
+}
+
+/// Give a proven route on this network the first window; otherwise H2 leads.
+fn preferred_engine_lane(lanes: &[Lane], profile: &CoreProfile, recall: &Recall) -> Option<usize> {
+    recall.engine_route.as_ref().and_then(|route| {
+        lanes.iter().position(|lane| route_of(lane.kind, &trial_profile(profile, lane)) == *route)
+    }).or_else(|| lanes.iter().position(|lane| lane.kind == CarrierKind::Aether && lane.transport == Some("h2")))
+}
+
+fn lane_start_delay(index: usize, lane: &Lane, preferred: Option<usize>) -> Duration {
+    if lane.kind != CarrierKind::Aether || Some(index) == preferred {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(3)
+    }
 }
 
 /// The profile one engine lane runs, derived from the user's.
@@ -387,13 +408,14 @@ fn run_lane(
     profile: &CoreProfile,
     stop: &AtomicBool,
     remedy: &Arc<Mutex<Option<Remedy>>>,
-) -> Result<SocketAddr, String> {
+) -> Result<Option<String>, String> {
     let trial = trial_profile(profile, lane);
+    let endpoint = Arc::new(Mutex::new(None));
     let deadline = Instant::now() + lane_budget(lane.kind, &trial);
 
     // Whatever this lane started, so it can be asked whether it is carrying
     // yet. The engine keeps its child alive in `_engine` for the whole lane.
-    let (listener, _engine) = match lane.kind {
+    let (listener, mut engine) = match lane.kind {
         CarrierKind::Aether => {
             let mut trial = trial;
             // Its own listener, so two engine lanes and whatever the user
@@ -417,7 +439,8 @@ fn run_lane(
             }
             if let Some(stderr) = child.stderr.take() {
                 let remedy = remedy.clone();
-                thread::spawn(move || watch_for_remedy(stderr, &remedy));
+                let endpoint = endpoint.clone();
+                thread::spawn(move || watch_for_remedy(stderr, &remedy, &endpoint));
             }
             let address: SocketAddr = trial
                 .socks_address
@@ -443,8 +466,13 @@ fn run_lane(
         if stop.load(Ordering::SeqCst) {
             return Err("another way out answered first".into());
         }
+        if let Some(child) = engine.as_mut().and_then(|engine| engine.0.as_mut()) {
+            if let Some(status) = child.try_wait().map_err(|error| format!("cannot monitor trial engine: {error}"))? {
+                return Err(format!("trial engine exited with {status}"));
+            }
+        }
         match carries_verified_traffic_unless(listener, &|| stop.load(Ordering::SeqCst)) {
-            Ok(()) => return Ok(listener),
+            Ok(()) => return Ok(endpoint.lock().ok().and_then(|value| value.clone())),
             Err(reason) => last = reason,
         }
         thread::sleep(POLL);
@@ -461,9 +489,12 @@ fn route_memory_path(app: &AppHandle) -> Option<std::path::PathBuf> {
 }
 
 /// Reads an engine's log to its end, keeping the last remedy a failure named.
-fn watch_for_remedy(stream: impl Read, remedy: &Mutex<Option<Remedy>>) {
+fn watch_for_remedy(stream: impl Read, remedy: &Mutex<Option<Remedy>>, endpoint: &Mutex<Option<String>>) {
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
+        if let Some(peer) = crate::core_supervisor::parse_endpoint(&line) {
+            if let Ok(mut slot) = endpoint.lock() { *slot = Some(peer); }
+        }
         if let Some(named) = Remedy::named_in(&line) {
             if let Ok(mut slot) = remedy.lock() {
                 *slot = Some(named);
@@ -507,13 +538,14 @@ pub async fn race_carriers(
         _ => Recall::default(),
     };
     let had_lead = apply_recall(&mut lanes, &profile, &recall);
+    let preferred = preferred_engine_lane(&lanes, &profile, &recall);
 
     let supervisor = supervisor.inner().clone();
     let app_for_race = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let started = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = mpsc::channel::<(Lane, Result<SocketAddr, String>, u64)>();
+        let (sender, receiver) = mpsc::channel::<(Lane, Result<Option<String>, String>, u64)>();
         let expected = lanes.len();
         if had_lead {
             supervisor.log(
@@ -528,7 +560,7 @@ pub async fn race_carriers(
         supervisor.log(
             "info",
             format!(
-                "searching: {} started together",
+                "searching: {} (preferred engine route leads recovery by 3s)",
                 lanes.iter().map(Lane::name).collect::<Vec<_>>().join(", ")
             ),
         );
@@ -536,7 +568,8 @@ pub async fn race_carriers(
         let engine_ran = lanes.iter().filter(|lane| lane.kind == CarrierKind::Aether).count();
         // One per lane: the last failure each engine named as fixable.
         let mut remedies: Vec<Arc<Mutex<Option<Remedy>>>> = Vec::with_capacity(expected);
-        for lane in lanes {
+        for (index, lane) in lanes.into_iter().enumerate() {
+            let delay = lane_start_delay(index, &lane, preferred);
             let app = app_for_race.clone();
             let profile = profile.clone();
             let stop = stop.clone();
@@ -545,7 +578,15 @@ pub async fn race_carriers(
             remedies.push(remedy.clone());
             thread::spawn(move || {
                 let began = Instant::now();
-                let outcome = run_lane(&app, &lane, &profile, &stop, &remedy);
+                let until = began + delay;
+                while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                let outcome = if stop.load(Ordering::SeqCst) {
+                    Err("another way out answered first".into())
+                } else {
+                    run_lane(&app, &lane, &profile, &stop, &remedy)
+                };
                 // A lane that finishes after the race is over has nobody to
                 // tell, and that is fine -- the receiver is gone and the send
                 // fails harmlessly.
@@ -557,6 +598,7 @@ pub async fn race_carriers(
         drop(sender);
 
         let mut chosen: Option<Lane> = None;
+        let mut chosen_peer = None;
         // A carrier that answered first while the engine was still going: it
         // wins unless an engine lane carries within the grace.
         let mut provisional: Option<(Lane, Instant)> = None;
@@ -572,6 +614,7 @@ pub async fn race_carriers(
                 break;
             };
             let carried = result.is_ok();
+            let peer = result.as_ref().ok().cloned().flatten();
             supervisor.log(
                 if carried { "info" } else { "warn" },
                 match &result {
@@ -607,6 +650,7 @@ pub async fn race_carriers(
             }
             if carried && (provisional.is_none() || lane.kind == CarrierKind::Aether) {
                 chosen = Some(lane);
+                chosen_peer = peer;
                 break;
             }
         }
@@ -633,7 +677,8 @@ pub async fn race_carriers(
                 },
                 fragment_client_hello: engine.then_some(trial.fragment_client_hello),
                 ech: if engine { trial.ech.clone() } else { None },
-                endpoint_mode: if engine { session_endpoint_mode(&profile) } else { None },
+                endpoint_mode: if engine && chosen_peer.is_some() { Some("custom-first".into()) } else if engine { session_endpoint_mode(&profile) } else { None },
+                peer: chosen_peer.clone(),
                 seconds: started.elapsed().as_secs(),
             }
         });
@@ -740,6 +785,38 @@ pub async fn race_carriers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unproven_networks_start_h2_and_recover_with_h3() {
+        let profile = CoreProfile::default();
+        let lanes = lanes(&profile, &[CarrierKind::Aether]);
+        let preferred = preferred_engine_lane(&lanes, &profile, &Recall::default());
+        assert_eq!(preferred, Some(0));
+        assert_eq!(lane_start_delay(0, &lanes[0], preferred), Duration::ZERO);
+        assert!(lane_start_delay(1, &lanes[1], preferred) > Duration::ZERO);
+    }
+
+    #[test]
+    fn only_a_route_recalled_for_this_network_can_give_h3_the_lead() {
+        let mut profile = CoreProfile::default();
+        profile.fragment_client_hello = false;
+        let mut lanes = lanes(&profile, &[CarrierKind::Aether]);
+        let recall = Recall { engine_route: Some(engine_route("h3", false, None)), remedy: None };
+        apply_recall(&mut lanes, &profile, &recall);
+        assert_eq!(preferred_engine_lane(&lanes, &profile, &recall), Some(1));
+        assert_eq!(preferred_engine_lane(&lanes, &profile, &Recall::default()), Some(0));
+    }
+
+    #[test]
+    fn recall_and_recovery_respect_explicit_ech_off() {
+        let profile = CoreProfile { ech: Some("off".into()), ..Default::default() };
+        let mut lanes = lanes(&profile, &[CarrierKind::Aether]);
+        apply_recall(&mut lanes, &profile, &Recall {
+            engine_route: Some(engine_route("h2", false, Some("auto"))), remedy: Some(Remedy::Ech),
+        });
+        assert!(lanes.iter().all(|lane| lane.ech.is_none()));
+        assert!(lanes.iter().all(|lane| trial_profile(&profile, lane).ech.as_deref() == Some("off")));
+    }
     use std::path::Path;
 
     fn kinds(lanes: &[Lane]) -> Vec<(CarrierKind, Option<&'static str>)> {

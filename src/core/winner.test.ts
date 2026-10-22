@@ -12,10 +12,17 @@ function winner(overrides: Partial<RaceWinner>): RaceWinner {
     fragmentClientHello: null,
     ech: null,
     endpointMode: null,
+    peer: null,
     seconds: 4,
     ...overrides,
   };
 }
+
+test("the final session reuses the gateway that carried verified trial traffic", () => {
+  const session = profileForWinner(DEFAULT_PROFILE, winner({ peer: "188.114.97.6:443", endpointMode: "custom-first" }));
+  assert.equal(session.peer, "188.114.97.6:443");
+  assert.equal(session.endpointMode, "custom-first");
+});
 
 test("the session runs the tactic the winning lane ran, not the profile's", () => {
   const profile = { ...DEFAULT_PROFILE, fragmentClientHello: false, ech: null };

@@ -1,0 +1,3312 @@
+diff --git a/aether/src/account.rs b/aether/src/account.rs
+index c6474d975ea5c25990c8e266b014d46d8ec24e65..b5080b55c18342b36186ed363f7dfbdd3f1304b7 100644
+--- a/aether/src/account.rs
++++ b/aether/src/account.rs
+@@ -262,10 +262,11 @@ fn backoff_delay(attempt: u32) -> std::time::Duration {
+ 
+ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+     let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+-    let seconds = raw.trim().parse::<u64>().ok()?;
+-    Some(std::time::Duration::from_secs(
+-        seconds.min(API_RETRY_AFTER_CAP_SECS),
+-    ))
++    let seconds = raw.trim().parse::<u64>().ok().or_else(|| {
++        let date = chrono::DateTime::parse_from_rfc2822(raw.trim()).ok()?;
++        Some((date.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64)
++    })?;
++    Some(std::time::Duration::from_secs(seconds))
+ }
+ 
+ fn refuses_identity(status: reqwest::StatusCode) -> bool {
+@@ -348,12 +349,23 @@ pub fn api_ech_in_use() -> Option<Vec<u8>> {
+ async fn api_ech() -> Result<Option<Vec<u8>>> {
+     let option = &crate::tls::API_ECH_OPTION;
+     let setting = std::env::var(option.variable).ok();
+-    if setting.as_deref().is_none_or(str::is_empty) {
++    if setting
++        .as_deref()
++        .is_none_or(|value| value.trim().is_empty() || value.trim().eq_ignore_ascii_case("off"))
++    {
+         return Ok(None);
+     }
+     // Android validates ECH before provisioning. Reuse that session's key
+     // rather than making a second bootstrap lookup on the same restricted path.
+-    let remembered = api_ech_in_use().or_else(crate::tls::session_ech);
++    let automatic = setting.as_deref().is_some_and(|value| {
++        matches!(
++            value.trim().to_ascii_lowercase().as_str(),
++            "auto" | "require"
++        )
++    });
++    let remembered = automatic
++        .then(|| api_ech_in_use().or_else(crate::tls::session_ech))
++        .flatten();
+     if remembered.is_some() {
+         return Ok(remembered);
+     }
+@@ -448,6 +460,8 @@ pub fn check_enroll_address() -> Result<()> {
+ /// core's TLS fingerprint (see `https`), offering the ECH key of --ech when it is given, through
+ /// the upstream proxy when there is one. Retried on a transient answer, after as long as the API
+ /// asks to wait when it does.
++/// Without explicit ECH or an enrollment address, authenticated raw, split and
++/// ECH handshakes race over TCP-reachable edges before one HTTP request is sent.
+ async fn api_call(
+     label: &str,
+     method: &str,
+@@ -457,9 +471,20 @@ async fn api_call(
+     jwt: Option<&str>,
+ ) -> Result<AccountData> {
+     let (address, port) = enroll_address()?;
++    // Explicit ECH and enrollment addresses remain strict manual policies.
++    // Otherwise bootstrap all three methods without waiting for a failed direct call.
++    let adaptive = std::env::var("AETHER_ENROLL_ADDRESS")
++        .unwrap_or_default()
++        .trim()
++        .is_empty()
++        && std::env::var("AETHER_ECH")
++            .unwrap_or_default()
++            .trim()
++            .is_empty();
+     // The system resolver looks a name up outside the socket mark; through the upstream proxy,
+     // the proxy looks it up and only the marked connection to the proxy leaves.
+     if crate::egress::mark() != 0
++        && !adaptive
+         && crate::upstream::configured().is_none()
+         && address.parse::<std::net::IpAddr>().is_err()
+     {
+@@ -501,7 +526,17 @@ async fn api_call(
+             tokio::time::sleep(wait).await;
+         }
+ 
+-        let sent = crate::https::send(&request, &fingerprint, ech.as_mut(), API_TIMEOUT).await;
++        let sent = if adaptive {
++            match apifront::send(&request, &fingerprint, API_TIMEOUT).await {
++                Ok((response, key)) => {
++                    ech = key;
++                    Ok(response)
++                }
++                Err(error) => Err(error),
++            }
++        } else {
++            crate::https::send(&request, &fingerprint, ech.as_mut(), API_TIMEOUT).await
++        };
+         if let Some(key) = &ech {
+             // A key a server handed back is the one the later calls offer.
+             remember_api_ech(key.clone());
+@@ -510,39 +545,10 @@ async fn api_call(
+         let response = match sent {
+             Ok(response) => response,
+             Err(error) => {
+-                // The request never became an HTTP exchange at all: the name did
+-                // not resolve, the connection was refused, or it was reset or
+-                // timed out on the way out. Repeating it cannot change any of
+-                // those, because what failed is the route rather than the
+-                // answer -- and it used to be repeated four more times at twenty
+-                // seconds each. That is a hundred seconds spent before the
+-                // camouflaged route was allowed to start, on exactly the
+-                // networks where the camouflaged route is the only one that can
+-                // work. Measured on a phone in Iran: 18:13:26 to 18:15:08.
+-                //
+-                // The retry ladder below is kept for the answers that ask for
+-                // one -- 429, 5xx and Retry-After -- because those did reach
+-                // Cloudflare and are worth asking again.
+-                log::warn!(
+-                    "[!] {label}: the direct route did not complete a request ({error}); \
+-                     handing over to the camouflaged route rather than repeating it"
+-                );
+-                if ech.is_none()
+-                    && std::env::var("AETHER_ENROLL_ADDRESS")
+-                        .unwrap_or_default()
+-                        .trim()
+-                        .is_empty()
+-                {
+-                    return fallback_call(
+-                        label,
+-                        method,
+-                        path,
+-                        body.map(<[u8]>::to_vec),
+-                        bearer,
+-                        jwt,
+-                    )
+-                    .await;
+-                }
++                // Only explicit HTTP refusals asking for a retry enter the
++                // backoff below. An ambiguous failed POST is never sent again
++                // over another route: the server may already have accepted it.
++                log::warn!("[!] {label}: API route failed ({error})");
+                 return Err(error);
+             }
+         };
+@@ -562,13 +568,25 @@ async fn api_call(
+         }
+ 
+         let described = format!("{label}: {}", describe_rejection(status, &body));
++        // Preserve the server's full hold. Sleeping for a truncated hold and
++        // submitting four more registrations only prolongs rate limiting.
++        if status == reqwest::StatusCode::TOO_MANY_REQUESTS
++            || cooldown.is_some_and(|wait| wait.as_secs() > API_RETRY_AFTER_CAP_SECS)
++        {
++            return Err(AetherError::RateLimited {
++                reason: described,
++                retry_after: cooldown.map(|wait| wait.as_secs()),
++            });
++        }
+         last_error = if refuses_identity(status) {
+             AetherError::IdentityRefused(described)
+         } else {
+             AetherError::Api(described)
+         };
+ 
+-        if !worth_retrying(status) {
++        // A 5xx/408 after a mutation is ambiguous too. Only safe reads may
++        // use the retry ladder; 429 above is an explicit refusal with a hold.
++        if !worth_retrying(status) || !matches!(method, "GET" | "HEAD") {
+             return Err(last_error);
+         }
+ 
+@@ -909,17 +927,57 @@ pub struct MasqueEnrollment {
+     pub key_pem: Vec<u8>,
+     pub issued_at: u64,
+     pub renewed: bool,
++    pub profile: Option<AccountData>,
++}
++
++impl MasqueEnrollment {
++    pub fn apply(self, identity: Identity) -> Identity {
++        let mut identity = Identity {
++            cert_pem: self.cert_pem,
++            key_pem: self.key_pem,
++            cert_issued_at: self.issued_at,
++            ..identity
++        };
++        if let Some(profile) = self.profile {
++            apply_interface_profile(&mut identity, &profile);
++        }
++        identity
++    }
++}
++
++/// Enrollment and device refresh can move both the edge and tunnel addresses.
++pub fn apply_interface_profile(identity: &mut Identity, profile: &AccountData) {
++    let ipv4 = profile.config.interface.addresses.v4.trim();
++    let ipv6 = profile.config.interface.addresses.v6.trim();
++    if !ipv4.is_empty() {
++        identity.ipv4 = ipv4.into();
++    }
++    if !ipv6.is_empty() {
++        identity.ipv6 = ipv6.into();
++    }
++    let endpoint = endpoint_from(profile);
++    if !endpoint.is_empty() {
++        identity.assigned_endpoint = endpoint;
++    }
+ }
+ 
+ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollment> {
++    ensure_masque_enrolled_with_key(identity, None).await
++}
++
++pub(crate) async fn ensure_masque_enrolled_with_key(
++    identity: &Identity,
++    prepared: Option<MasqueKeyPair>,
++) -> Result<MasqueEnrollment> {
+     let usable = !identity.cert_pem.is_empty() && !identity.key_pem.is_empty();
+ 
+-    if usable && !masque_cert_expiring(identity.cert_issued_at) {
++    if prepared.is_none() && usable && !masque_cert_expiring(identity.cert_issued_at) {
+         return Ok(MasqueEnrollment {
+             cert_pem: identity.cert_pem.clone(),
+             key_pem: identity.key_pem.clone(),
+             issued_at: identity.cert_issued_at,
+             renewed: false,
++            profile: None,
+         });
+     }
+ 
+@@ -929,7 +987,11 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
+         log::info!("[+] enrolling MASQUE key for device {}", identity.device_id);
+     }
+ 
+-    let keypair = generate_masque_keypair()?;
++    let resumable = prepared.is_some();
++    let keypair = match prepared {
++        Some(pair) => pair,
++        None => generate_masque_keypair()?,
++    };
+     match enroll_key(
+         &identity.device_id,
+         &identity.access_token,
+@@ -938,16 +1000,17 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
+     )
+     .await
+     {
+-        Ok(_) => {
++        Ok(profile) => {
+             log::info!("[+] MASQUE key enrolled");
+             Ok(MasqueEnrollment {
+                 cert_pem: keypair.cert_pem,
+                 key_pem: keypair.key_pem,
+                 issued_at: now_unix(),
+                 renewed: true,
++                profile: Some(profile),
+             })
+         }
+-        Err(error) if cert_still_usable(identity) => {
++        Err(error) if !resumable && cert_still_usable(identity) => {
+             log::warn!(
+                 "[!] key enrollment failed ({error}); keeping the certificate already on disk"
+             );
+@@ -956,6 +1019,7 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
+                 key_pem: identity.key_pem.clone(),
+                 issued_at: identity.cert_issued_at,
+                 renewed: false,
++                profile: None,
+             })
+         }
+         Err(error) => Err(error),
+@@ -1157,7 +1221,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn a_retry_after_header_is_honoured_but_capped() {
++    fn a_retry_after_header_is_preserved_for_the_persistent_hold() {
+         let mut headers = reqwest::header::HeaderMap::new();
+         headers.insert(
+             reqwest::header::RETRY_AFTER,
+@@ -1165,8 +1229,98 @@ mod tests {
+         );
+         assert_eq!(
+             retry_after(&headers),
+-            Some(std::time::Duration::from_secs(API_RETRY_AFTER_CAP_SECS))
++            Some(std::time::Duration::from_secs(120))
++        );
++    }
++
++    async fn mutation_answer(response: &'static [u8]) -> AetherError {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        let (address, listener, acceptor) = crate::https::test_server(b"\x08http/1.1").await;
++        std::env::set_var("AETHER_ENROLL_ADDRESS", address.to_string());
++        std::env::remove_var("AETHER_ECH");
++        let server = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let mut tls = tokio_boring::accept(&acceptor, tcp).await.unwrap();
++            let mut request = Vec::new();
++            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
++                let mut buffer = [0; 1024];
++                let read = tls.read(&mut buffer).await.unwrap();
++                assert!(read > 0);
++                request.extend_from_slice(&buffer[..read]);
++            }
++            if !response.is_empty() {
++                tls.write_all(response).await.unwrap();
++            }
++            drop(tls);
++            tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
++                .await
++                .is_ok()
++        });
++        let result = tokio::time::timeout(
++            std::time::Duration::from_secs(3),
++            api_call("registration", "POST", "/reg", Some(b"{}"), None, None),
++        )
++        .await;
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        let error = result
++            .expect("a hold must not be slept out inside the API call")
++            .unwrap_err();
++        assert!(
++            !server.await.unwrap(),
++            "a registration was sent again after its result was ambiguous or refused"
+         );
++        error
++    }
++
++    #[tokio::test]
++    async fn a_rate_limit_is_returned_once_with_its_full_server_hold() {
++        let error = mutation_answer(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3600\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await;
++        assert_eq!(error.retry_after(), Some(3600));
++    }
++
++    #[tokio::test]
++    async fn an_ambiguous_mutation_is_never_repeated() {
++        mutation_answer(b"").await;
++        mutation_answer(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await;
++    }
++
++    #[test]
++    fn enrollment_applies_the_new_interface_and_edge_without_losing_credentials() {
++        let mut old = handshake_identity();
++        old.ipv4 = "172.16.0.2".into();
++        old.assigned_endpoint = "162.159.192.2".into();
++        let profile = serde_json::from_str(r#"{"id":"device","config":{"interface":{"addresses":{"v4":"172.16.1.4","v6":"2606:4700::4"}},"peers":[{"public_key":"","endpoint":{"v4":"162.159.198.2:2408"}}]}}"#).unwrap();
++        let updated = MasqueEnrollment {
++            cert_pem: old.cert_pem.clone(),
++            key_pem: old.key_pem.clone(),
++            issued_at: old.cert_issued_at,
++            renewed: true,
++            profile: Some(profile),
++        }
++        .apply(old);
++        assert_eq!(updated.ipv4, "172.16.1.4");
++        assert_eq!(updated.ipv6, "2606:4700::4");
++        assert_eq!(updated.assigned_endpoint, "162.159.198.2");
++        assert_eq!(updated.access_token, "token");
++        assert!(updated.has_masque_credentials());
++    }
++
++    #[test]
++    fn partial_enrollment_metadata_does_not_erase_a_saved_interface() {
++        let old = handshake_identity();
++        let ipv4 = old.ipv4.clone();
++        let profile = serde_json::from_str(r#"{"id":"device"}"#).unwrap();
++        let updated = MasqueEnrollment {
++            cert_pem: old.cert_pem.clone(),
++            key_pem: old.key_pem.clone(),
++            issued_at: old.cert_issued_at,
++            renewed: true,
++            profile: Some(profile),
++        }
++        .apply(old);
++        assert_eq!(updated.ipv4, ipv4);
+     }
+ 
+     #[test]
+@@ -1338,58 +1492,3 @@ mod identity_refusal_tests {
+         }
+     }
+ }
+-
+-async fn fallback_call(
+-    label: &str,
+-    method: &str,
+-    path: &str,
+-    body: Option<Vec<u8>>,
+-    bearer: Option<&str>,
+-    jwt: Option<&str>,
+-) -> Result<AccountData> {
+-    log::info!(
+-        "[*] {label} retrying over a camouflaged route: random cloudflare edge address, \
+-         no dns lookup, split client hello, alternate tls fingerprints"
+-    );
+-
+-    let request = apifront::ApiRequest {
+-        method: method.to_string(),
+-        host: api_host().to_string(),
+-        path: path.to_string(),
+-        headers: front_headers(bearer, jwt),
+-        body,
+-    };
+-
+-    let response = apifront::fetch(&request).await?;
+-
+-    if (200..300).contains(&response.status) {
+-        log::info!(
+-            "[+] {label} went through the camouflaged route ({})",
+-            response.route
+-        );
+-        return serde_json::from_str::<AccountData>(&response.body).map_err(|e| {
+-            AetherError::Api(format!(
+-                "{label} decode over {}: {e} ({} byte answer)",
+-                response.route,
+-                response.body.len()
+-            ))
+-        });
+-    }
+-
+-    let described = format!(
+-        "{label} over {}: {}",
+-        response.route,
+-        describe_status(response.status, &response.body)
+-    );
+-    if matches!(response.status, 401 | 404 | 410) {
+-        return Err(AetherError::IdentityRefused(described));
+-    }
+-    Err(AetherError::Api(described))
+-}
+-
+-fn describe_status(status: u16, body: &str) -> String {
+-    match reqwest::StatusCode::from_u16(status) {
+-        Ok(code) => describe_rejection(code, body),
+-        Err(_) => format!("status {status}: {body}"),
+-    }
+-}
+diff --git a/aether/src/api.rs b/aether/src/api.rs
+index afc957703aa7e059bf775fb201bb4b9488e9b858..8c7fcc76160747d238ec08e50182a26440c529e8 100644
+--- a/aether/src/api.rs
++++ b/aether/src/api.rs
+@@ -356,12 +356,7 @@ pub async fn attach_masque_cert(identity: Identity) -> Result<Identity> {
+     }
+ 
+     let enrollment = account::ensure_masque_enrolled(&identity).await?;
+-    Ok(Identity {
+-        cert_pem: enrollment.cert_pem,
+-        key_pem: enrollment.key_pem,
+-        cert_issued_at: enrollment.issued_at,
+-        ..identity
+-    })
++    Ok(enrollment.apply(identity))
+ }
+ 
+ pub async fn open_identity(path: &str, request: &ProvisionRequest) -> Result<Identity> {
+diff --git a/aether/src/apifront.rs b/aether/src/apifront.rs
+index 215ccfccc9f4b0214c2d60a4487d44e6afd48d25..b41d1c76c607e9ef6651daead207714e6179127e 100644
+--- a/aether/src/apifront.rs
++++ b/aether/src/apifront.rs
+@@ -1,525 +1,556 @@
+-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
++//! Adaptive WARP API bootstrap. Race authenticated TLS handshakes, then send
++//! the HTTP request only on the winner: registrations must not be duplicated.
++
++use std::net::{Ipv4Addr, SocketAddr};
+ use std::time::Duration;
+ 
+-use boring::ssl::{SslConnector, SslMethod, SslVersion};
++use futures::future::BoxFuture;
++use futures::stream::FuturesUnordered;
++use futures::{FutureExt, StreamExt};
+ use rand::RngExt;
+-use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::net::TcpStream;
+ 
+ use crate::error::{AetherError, Result};
+ use crate::fragment::{FragmentConfig, FragmentingStream};
+-
+-const EDGE_PREFIX: [u8; 3] = [141, 101, 113];
+-const EDGE_SAMPLES: usize = 3;
+-const RESOLVED_SAMPLES: usize = 2;
+-
+-const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
++use crate::{https, tls};
++
++const SEEDS: &[[u8; 4]] = &[
++    [188, 114, 97, 6],
++    [188, 114, 97, 1],
++    [162, 159, 198, 1],
++    [162, 159, 199, 1],
++];
++const PREFIXES: &[[u8; 3]] = &[[188, 114, 96], [188, 114, 97], [141, 101, 113]];
++const SAMPLES_PER_RANGE: usize = 3;
++const PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
+ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+-const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
+-const MAX_BODY: usize = 512 * 1024;
+-
+-const LEGACY_CIPHERS: &str = "ECDHE-ECDSA-CHACHA20-POLY1305:\
+-ECDHE-ECDSA-AES128-GCM-SHA256:\
+-ECDHE-RSA-AES128-GCM-SHA256:\
+-ECDHE-ECDSA-AES256-SHA:\
+-ECDHE-RSA-AES128-SHA:\
+-AES256-SHA";
+-
+-const LEGACY_GROUPS: &str = "X25519:P-256";
+-const MODERN_GROUPS: &str = "X25519:P-256:P-384";
+-const CHROME_GROUPS: &str = "P-256:X25519:P-384";
++const MAX_REACHABLE: usize = 4;
+ 
+-const ALPN_HTTP1: &[u8] = b"\x08http/1.1";
++struct Session {
++    tls: tokio_boring::SslStream<FragmentingStream<TcpStream>>,
++    route: String,
++    ech: Option<Vec<u8>>,
++}
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub enum Fingerprint {
++#[derive(Clone, Copy)]
++enum Method {
++    RawDirect,
++    RawEdge,
++    Split,
+     SplitLegacy,
+-    SplitModern,
+-    Modern,
+-    ChromeLike,
++    Ech,
+ }
+ 
+-impl Fingerprint {
+-    pub fn label(self) -> &'static str {
++impl Method {
++    fn label(self) -> &'static str {
+         match self {
+-            Fingerprint::SplitLegacy => "split-tls12",
+-            Fingerprint::SplitModern => "split-tls13",
+-            Fingerprint::Modern => "plain-tls13",
+-            Fingerprint::ChromeLike => "chrome",
++            Self::RawDirect => "raw-direct",
++            Self::RawEdge => "raw-edge",
++            Self::Split => "split-clienthello",
++            Self::SplitLegacy => "split-tls12",
++            Self::Ech => "ech",
+         }
+     }
++}
+ 
+-    fn all() -> [Fingerprint; 4] {
+-        [
+-            Fingerprint::SplitLegacy,
+-            Fingerprint::SplitModern,
+-            Fingerprint::Modern,
+-            Fingerprint::ChromeLike,
+-        ]
+-    }
+-
+-    fn fragments(self) -> FragmentConfig {
+-        match self {
+-            Fingerprint::SplitLegacy | Fingerprint::SplitModern => FragmentConfig {
+-                enabled: true,
+-                size_min: 24,
+-                size_max: 48,
+-                delay_min_ms: 2,
+-                delay_max_ms: 8,
+-                sni_split: true,
+-            },
+-            _ => FragmentConfig::disabled(),
+-        }
+-    }
+-
+-    fn configure(self) -> Result<boring::ssl::ConnectConfiguration> {
+-        let mut builder =
+-            SslConnector::builder(SslMethod::tls()).map_err(|e| AetherError::Tls(e.to_string()))?;
+-
+-        let tls = |error: boring::error::ErrorStack| AetherError::Tls(error.to_string());
+-
+-        match self {
+-            Fingerprint::SplitLegacy => {
+-                builder
+-                    .set_min_proto_version(Some(SslVersion::TLS1_2))
+-                    .map_err(tls)?;
+-                builder
+-                    .set_max_proto_version(Some(SslVersion::TLS1_2))
+-                    .map_err(tls)?;
+-                builder.set_grease_enabled(false);
+-                builder.set_cipher_list(LEGACY_CIPHERS).map_err(tls)?;
+-                builder.set_curves_list(LEGACY_GROUPS).map_err(tls)?;
+-                builder.set_alpn_protos(ALPN_HTTP1).map_err(tls)?;
+-            }
+-            Fingerprint::SplitModern => {
+-                builder
+-                    .set_min_proto_version(Some(SslVersion::TLS1_3))
+-                    .map_err(tls)?;
+-                builder
+-                    .set_max_proto_version(Some(SslVersion::TLS1_3))
+-                    .map_err(tls)?;
+-                builder.set_grease_enabled(false);
+-                builder.set_curves_list(MODERN_GROUPS).map_err(tls)?;
+-                builder.set_alpn_protos(ALPN_HTTP1).map_err(tls)?;
+-            }
+-            Fingerprint::Modern => {
+-                builder
+-                    .set_min_proto_version(Some(SslVersion::TLS1_2))
+-                    .map_err(tls)?;
+-                builder
+-                    .set_max_proto_version(Some(SslVersion::TLS1_3))
+-                    .map_err(tls)?;
+-                builder.set_grease_enabled(false);
+-                builder.set_curves_list(MODERN_GROUPS).map_err(tls)?;
+-                builder.set_alpn_protos(ALPN_HTTP1).map_err(tls)?;
+-            }
+-            Fingerprint::ChromeLike => {
+-                builder
+-                    .set_min_proto_version(Some(SslVersion::TLS1_2))
+-                    .map_err(tls)?;
+-                builder
+-                    .set_max_proto_version(Some(SslVersion::TLS1_3))
+-                    .map_err(tls)?;
+-                builder.set_grease_enabled(true);
+-                builder.set_permute_extensions(true);
+-                builder.set_curves_list(CHROME_GROUPS).map_err(tls)?;
+-                builder.set_alpn_protos(ALPN_HTTP1).map_err(tls)?;
+-                builder.enable_signed_cert_timestamps();
+-                builder.enable_ocsp_stapling();
++fn edge_pool() -> Vec<SocketAddr> {
++    let mut pool: Vec<_> = SEEDS
++        .iter()
++        .map(|ip| SocketAddr::from((Ipv4Addr::from(*ip), 443)))
++        .collect();
++    for prefix in PREFIXES {
++        for _ in 0..SAMPLES_PER_RANGE {
++            let ip = Ipv4Addr::new(
++                prefix[0],
++                prefix[1],
++                prefix[2],
++                rand::rng().random_range(1..=254),
++            );
++            let address = SocketAddr::from((ip, 443));
++            if !pool.contains(&address) {
++                pool.push(address);
+             }
+         }
+-
+-        builder.build().configure().map_err(tls)
+     }
++    pool
+ }
+ 
+-#[derive(Debug, Clone)]
+-pub struct ApiRequest {
+-    pub method: String,
+-    pub host: String,
+-    pub path: String,
+-    pub headers: Vec<(String, String)>,
+-    pub body: Option<Vec<u8>>,
+-}
+-
+-#[derive(Debug, Clone)]
+-pub struct ApiResponse {
+-    pub status: u16,
+-    pub body: String,
+-    pub route: String,
+-}
+-
+-pub fn random_edge_address() -> SocketAddr {
+-    let host = rand::rng().random_range(1..=254u8);
+-    let ip = Ipv4Addr::new(EDGE_PREFIX[0], EDGE_PREFIX[1], EDGE_PREFIX[2], host);
+-    SocketAddr::new(IpAddr::V4(ip), 443)
+-}
+-
+-async fn candidates(host: &str) -> Vec<SocketAddr> {
+-    let mut list: Vec<SocketAddr> = Vec::new();
+-
+-    while list.len() < EDGE_SAMPLES {
+-        let candidate = random_edge_address();
+-        if !list.contains(&candidate) {
+-            list.push(candidate);
+-        }
+-    }
+-
+-    if let Ok(resolved) = tokio::net::lookup_host((host, 443)).await {
+-        for address in resolved
+-            .filter(|entry| entry.is_ipv4())
+-            .take(RESOLVED_SAMPLES)
++async fn probe_edges(host: &str) -> Vec<SocketAddr> {
++    let mut pool = edge_pool();
++    // Names are resolved only on the unmarked direct path. With a proxy, its
++    // resolver handles the raw lane; IP probes still go through that proxy.
++    if crate::egress::mark() == 0 && crate::upstream::configured().is_none() {
++        if let Ok(Ok(resolved)) =
++            tokio::time::timeout(PROBE_TIMEOUT, tokio::net::lookup_host((host, 443))).await
+         {
+-            if !list.contains(&address) {
+-                list.push(address);
++            for address in resolved.take(2) {
++                if !pool.contains(&address) {
++                    pool.push(address);
++                }
+             }
+         }
+     }
+-
+-    list
+-}
+-
+-fn render_request(request: &ApiRequest) -> Vec<u8> {
+-    let mut head = String::new();
+-    head.push_str(&format!("{} {} HTTP/1.1\r\n", request.method, request.path));
+-    head.push_str(&format!("Host: {}\r\n", request.host));
+-
+-    for (name, value) in &request.headers {
+-        head.push_str(&format!("{name}: {value}\r\n"));
++    let mut probes = FuturesUnordered::new();
++    for address in pool.iter().copied() {
++        probes.push(async move {
++            let connected = async {
++                match crate::upstream::configured() {
++                    Some(proxy) => proxy.connect(address).await,
++                    None => crate::egress::tcp_connect(address)
++                        .await
++                        .map_err(AetherError::from),
++                }
++            };
++            match tokio::time::timeout(PROBE_TIMEOUT, connected).await {
++                Ok(Ok(stream)) => {
++                    drop(stream);
++                    Some(address)
++                }
++                _ => None,
++            }
++        });
+     }
+-
+-    head.push_str("Accept-Encoding: identity\r\n");
+-    head.push_str(&format!(
+-        "Content-Length: {}\r\n",
+-        request.body.as_ref().map(Vec::len).unwrap_or(0)
+-    ));
+-    head.push_str("Connection: close\r\n\r\n");
+-
+-    let mut wire = head.into_bytes();
+-    if let Some(body) = &request.body {
+-        wire.extend_from_slice(body);
++    let mut live = Vec::new();
++    while let Some(answer) = probes.next().await {
++        if let Some(address) = answer {
++            live.push(address);
++            if live.len() == MAX_REACHABLE {
++                break;
++            }
++        }
+     }
+-    wire
+-}
+-
+-fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
+-    let split = raw
+-        .windows(4)
+-        .position(|window| window == b"\r\n\r\n")
+-        .ok_or_else(|| AetherError::Api("truncated response head".into()))?;
+-
+-    let head = String::from_utf8_lossy(&raw[..split]);
+-    let mut body = raw[split + 4..].to_vec();
+-
+-    let mut lines = head.split("\r\n");
+-    let status_line = lines
+-        .next()
+-        .ok_or_else(|| AetherError::Api("empty response".into()))?;
+-    let status = status_line
+-        .split_whitespace()
+-        .nth(1)
+-        .and_then(|token| token.parse::<u16>().ok())
+-        .ok_or_else(|| AetherError::Api(format!("bad status line: {status_line}")))?;
+-
+-    let chunked = lines.any(|line| {
+-        let lowered = line.to_lowercase();
+-        lowered.starts_with("transfer-encoding:") && lowered.contains("chunked")
+-    });
+-
+-    if chunked {
+-        body = dechunk(&body);
++    // A short TCP probe can miss a slow edge. Keep a bounded fallback, rather
++    // than declaring the API unreachable before trying an actual handshake.
++    if live.is_empty() {
++        pool.truncate(MAX_REACHABLE);
++        live = pool;
+     }
+-
+-    Ok((status, String::from_utf8_lossy(&body).into_owned()))
++    log::info!(
++        "[*] API bootstrap: {} candidate edges after TCP probing",
++        live.len()
++    );
++    live
+ }
+ 
+-fn dechunk(body: &[u8]) -> Vec<u8> {
+-    let mut out = Vec::new();
+-    let mut cursor = 0usize;
+-
+-    while cursor < body.len() {
+-        let line_end = match body[cursor..]
+-            .windows(2)
+-            .position(|window| window == b"\r\n")
+-        {
+-            Some(offset) => cursor + offset,
+-            None => break,
+-        };
+-        let line = String::from_utf8_lossy(&body[cursor..line_end]);
+-        let token = line.split(';').next().unwrap_or("").trim();
+-        let size = match usize::from_str_radix(token, 16) {
+-            Ok(0) | Err(_) => break,
+-            Ok(value) => value,
+-        };
+-        let start = line_end + 2;
+-        let end = match start.checked_add(size) {
+-            Some(end) if end <= body.len() => end,
+-            _ => break,
+-        };
+-        out.extend_from_slice(&body[start..end]);
+-        cursor = end + 2;
++async fn first_ready<T>(mut pending: FuturesUnordered<BoxFuture<'_, Result<T>>>) -> Result<T> {
++    let mut failure = AetherError::Api("every API handshake route failed".into());
++    while let Some(result) = pending.next().await {
++        match result {
++            Ok(winner) => return Ok(winner),
++            Err(error) => {
++                log::debug!("[api bootstrap] {error}");
++                failure = error;
++            }
++        }
+     }
+-
+-    out
++    Err(failure)
++    // All losing futures and their sockets are dropped here, also on cancellation.
+ }
+ 
+-async fn exchange(
+-    request: &ApiRequest,
+-    address: SocketAddr,
+-    fingerprint: Fingerprint,
+-) -> Result<ApiResponse> {
+-    let tcp = match crate::upstream::configured() {
+-        Some(proxy) => tokio::time::timeout(CONNECT_TIMEOUT, proxy.connect(address))
+-            .await
+-            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
+-            .map_err(|e| {
+-                AetherError::Api(format!("connect to {address} through the proxy: {e}"))
+-            })?,
+-        None => tokio::time::timeout(CONNECT_TIMEOUT, crate::egress::tcp_connect(address))
+-            .await
+-            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
+-            .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?,
++async fn open_route(
++    request: &https::Request<'_>,
++    fingerprint: &tls::Fingerprint,
++    address: Option<SocketAddr>,
++    fragments: FragmentConfig,
++    mut ech: Option<Vec<u8>>,
++    method: Method,
++) -> Result<Session> {
++    let label = method.label();
++    // Retain the old TLS 1.2 split profile as an alternative within the split
++    // lane; some inspectors treat its shorter ClientHello differently.
++    let legacy = tls::Fingerprint {
++        ciphers: Some("ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:AES256-SHA".into()),
++        groups: "X25519:P-256".into(),
++        grease: false,
+     };
+-    tcp.set_nodelay(true).ok();
+-
+-    let config = fingerprint.configure()?;
+-    let stream = FragmentingStream::new(tcp, fingerprint.fragments());
+-
+-    let mut tls = tokio::time::timeout(
++    let maximum = if matches!(method, Method::SplitLegacy) {
++        Some(boring::ssl::SslVersion::TLS1_2)
++    } else {
++        None
++    };
++    let fingerprint = if maximum.is_some() {
++        &legacy
++    } else {
++        fingerprint
++    };
++    let address_host = address.map(|address| address.ip().to_string());
++    let routed = https::Request {
++        address: address_host
++            .as_deref()
++            .zip(address.map(|address| address.port())),
++        ..*request
++    };
++    let tls = tokio::time::timeout(
+         HANDSHAKE_TIMEOUT,
+-        tokio_boring::connect(config, &request.host, stream),
++        https::open(&routed, fingerprint, ech.as_mut(), fragments, maximum),
+     )
+     .await
+-    .map_err(|_| AetherError::Api(format!("tls handshake with {address} timed out")))?
+-    .map_err(|e| AetherError::Api(format!("tls handshake with {address}: {e}")))?;
+-
+-    if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
+-        return Err(AetherError::Api(format!(
+-            "{address} negotiated http/2 which this path does not speak"
+-        )));
+-    }
+-
+-    let wire = render_request(request);
+-
+-    let collected = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
+-        tls.write_all(&wire).await?;
+-        tls.flush().await?;
+-
+-        let mut buffer = Vec::new();
+-        let mut chunk = [0u8; 8192];
+-        loop {
+-            let read = tls.read(&mut chunk).await?;
+-            if read == 0 {
+-                break;
+-            }
+-            buffer.extend_from_slice(&chunk[..read]);
+-            if buffer.len() > MAX_BODY {
+-                break;
+-            }
+-        }
+-        Ok::<Vec<u8>, std::io::Error>(buffer)
+-    })
+-    .await
+-    .map_err(|_| AetherError::Api(format!("exchange with {address} timed out")))?
+-    .map_err(|e| AetherError::Api(format!("exchange with {address}: {e}")))?;
+-
+-    let (status, body) = parse_response(&collected)?;
+-
+-    Ok(ApiResponse {
+-        status,
+-        body,
+-        route: format!("{address} / {}", fingerprint.label()),
++    .map_err(|_| AetherError::Api(format!("{label} TLS handshake timed out")))??;
++    Ok(Session {
++        tls,
++        route: format!(
++            "{label} / {}",
++            address.map_or_else(|| request.host.to_string(), |a| a.to_string())
++        ),
++        ech,
+     })
+ }
+ 
+-pub async fn fetch(request: &ApiRequest) -> Result<ApiResponse> {
+-    let addresses = candidates(&request.host).await;
+-    if addresses.is_empty() {
+-        return Err(AetherError::Api(
+-            "no camouflaged route to the api was available".into(),
+-        ));
++async fn open_edges(
++    request: &https::Request<'_>,
++    fingerprint: &tls::Fingerprint,
++    addresses: Vec<SocketAddr>,
++    fragments: FragmentConfig,
++    ech: Option<Vec<u8>>,
++    method: Method,
++) -> Result<Session> {
++    let pending = FuturesUnordered::new();
++    for address in addresses {
++        pending.push(
++            open_route(
++                request,
++                fingerprint,
++                Some(address),
++                fragments,
++                ech.clone(),
++                method,
++            )
++            .boxed(),
++        );
+     }
++    first_ready(pending).await
++}
+ 
+-    let mut rejection: Option<ApiResponse> = None;
+-    let mut failure: Option<AetherError> = None;
+-
+-    for fingerprint in Fingerprint::all() {
+-        for address in &addresses {
+-            match exchange(request, *address, fingerprint).await {
+-                Ok(response) if (200..300).contains(&response.status) => {
+-                    return Ok(response);
+-                }
+-                Ok(response) => {
+-                    log::debug!(
+-                        "[apifront] {} answered {} via {}",
+-                        request.host,
+-                        response.status,
+-                        response.route
++/// The three methods share one edge probe. ECH resolution runs inside its
++/// lane, so a blocked resolver cannot delay raw TLS or a split ClientHello.
++pub(crate) async fn send(
++    request: &https::Request<'_>,
++    fingerprint: &tls::Fingerprint,
++    timeout: Duration,
++) -> Result<(https::Response, Option<Vec<u8>>)> {
++    tokio::time::timeout(timeout, async {
++        let edges = probe_edges(request.host).boxed().shared();
++        let pending: FuturesUnordered<BoxFuture<'_, Result<Session>>> = FuturesUnordered::new();
++        let raw_edges = edges.clone();
++        pending.push(
++            async {
++                let raw = FuturesUnordered::new();
++                if crate::egress::mark() == 0 || crate::upstream::configured().is_some() {
++                    raw.push(
++                        open_route(
++                            request,
++                            fingerprint,
++                            None,
++                            FragmentConfig::disabled(),
++                            None,
++                            Method::RawDirect,
++                        )
++                        .boxed(),
+                     );
+-                    if rejection.is_none() || response.status != 403 {
+-                        rejection = Some(response);
+-                    }
+-                }
+-                Err(error) => {
+-                    log::debug!("[apifront] {} attempt failed: {error}", fingerprint.label());
+-                    failure = Some(error);
+                 }
++                raw.push(
++                    async {
++                        open_edges(
++                            request,
++                            fingerprint,
++                            raw_edges.await,
++                            FragmentConfig::disabled(),
++                            None,
++                            Method::RawEdge,
++                        )
++                        .await
++                    }
++                    .boxed(),
++                );
++                first_ready(raw).await
+             }
+-        }
+-    }
+-
+-    if let Some(response) = rejection {
+-        return Ok(response);
+-    }
+-
+-    Err(failure.unwrap_or_else(|| AetherError::Api("every camouflaged route failed".into())))
++            .boxed(),
++        );
++        let split_edges = edges.clone();
++        pending.push(
++            async {
++                let mut fragments = FragmentConfig::from_env();
++                fragments.enabled = true;
++                let addresses = split_edges.await;
++                let split = FuturesUnordered::new();
++                split.push(
++                    open_edges(
++                        request,
++                        fingerprint,
++                        addresses.clone(),
++                        fragments,
++                        None,
++                        Method::Split,
++                    )
++                    .boxed(),
++                );
++                split.push(
++                    open_edges(
++                        request,
++                        fingerprint,
++                        addresses,
++                        fragments,
++                        None,
++                        Method::SplitLegacy,
++                    )
++                    .boxed(),
++                );
++                first_ready(split).await
++            }
++            .boxed(),
++        );
++        pending.push(
++            async {
++                let lookup = async {
++                    if let Some(key) = crate::account::api_ech_in_use().or_else(tls::session_ech) {
++                        return Ok(key);
++                    }
++                    crate::dns::fetch_ech_config(&crate::dns::SESSION_ECH).await
++                };
++                let (addresses, key) = tokio::join!(edges, lookup);
++                open_edges(
++                    request,
++                    fingerprint,
++                    addresses,
++                    FragmentConfig::disabled(),
++                    Some(key?),
++                    Method::Ech,
++                )
++                .await
++            }
++            .boxed(),
++        );
++        let winner = first_ready(pending).await?;
++        log::info!("[+] API TLS route won: {}", winner.route);
++        let response = https::send_on_session(winner.tls, request).await?;
++        Ok((response, winner.ech))
++    })
++    .await
++    .map_err(|_| AetherError::Api("API bootstrap/exchange timed out".into()))?
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+-    #[test]
+-    fn every_random_edge_address_stays_inside_the_cloudflare_range() {
+-        for _ in 0..64 {
+-            let address = random_edge_address();
+-            assert_eq!(address.port(), 443);
+-            match address.ip() {
+-                IpAddr::V4(v4) => {
+-                    let octets = v4.octets();
+-                    assert_eq!([octets[0], octets[1], octets[2]], EDGE_PREFIX);
+-                    assert!(octets[3] >= 1 && octets[3] <= 254);
+-                }
+-                IpAddr::V6(_) => panic!("the edge range is ipv4 only"),
+-            }
+-        }
+-    }
+-
+-    #[test]
+-    fn the_request_carries_the_host_header_and_a_length() {
+-        let request = ApiRequest {
+-            method: "POST".to_string(),
+-            host: "api.cloudflareclient.com".to_string(),
+-            path: "/v0a4471/reg".to_string(),
+-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+-            body: Some(b"{\"a\":1}".to_vec()),
++    #[tokio::test]
++    async fn an_untrusted_api_certificate_cannot_win_the_race() {
++        let _setting = crate::upstream::hold_setting().await;
++        let pair = crate::account::generate_masque_keypair().unwrap();
++        let mut acceptor =
++            boring::ssl::SslAcceptor::mozilla_intermediate_v5(boring::ssl::SslMethod::tls())
++                .unwrap();
++        acceptor
++            .set_certificate(&boring::x509::X509::from_pem(&pair.cert_pem).unwrap())
++            .unwrap();
++        acceptor
++            .set_private_key(&boring::pkey::PKey::private_key_from_pem(&pair.key_pem).unwrap())
++            .unwrap();
++        let acceptor = acceptor.build();
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let _ = tokio_boring::accept(&acceptor, tcp).await;
++        });
++        let request = https::Request {
++            method: "POST",
++            host: "api.cloudflareclient.com",
++            port: 443,
++            address: None,
++            sni: None,
++            path: "/reg",
++            headers: &[],
++            body: Some(b"secret"),
+         };
+-
+-        let wire = String::from_utf8(render_request(&request)).expect("utf8");
+-        assert!(wire.starts_with("POST /v0a4471/reg HTTP/1.1\r\n"));
+-        assert!(wire.contains("Host: api.cloudflareclient.com\r\n"));
+-        assert!(wire.contains("Content-Type: application/json\r\n"));
+-        assert!(wire.contains("Content-Length: 7\r\n"));
+-        assert!(wire.ends_with("\r\n\r\n{\"a\":1}"));
++        assert!(open_route(
++            &request,
++            &tls::Fingerprint::default(),
++            Some(address),
++            FragmentConfig::disabled(),
++            None,
++            Method::RawDirect
++        )
++        .await
++        .is_err());
++        server.await.unwrap();
+     }
+ 
+-    #[test]
+-    fn a_body_less_request_still_declares_a_zero_length() {
+-        let request = ApiRequest {
+-            method: "GET".to_string(),
+-            host: "example.invalid".to_string(),
+-            path: "/".to_string(),
+-            headers: Vec::new(),
+-            body: None,
++    #[tokio::test]
++    async fn racing_real_tls_sessions_sends_the_registration_only_once() {
++        use std::sync::atomic::{AtomicUsize, Ordering};
++        use std::sync::Arc;
++        let _setting = crate::upstream::hold_setting().await;
++        let (address, listener, acceptor) = https::test_server(b"\x02h2").await;
++        let received = Arc::new(AtomicUsize::new(0));
++        let count = received.clone();
++        let server = tokio::spawn(async move {
++            let mut connections = tokio::task::JoinSet::new();
++            loop {
++                let (tcp, _) = listener.accept().await.unwrap();
++                let acceptor = acceptor.clone();
++                let count = count.clone();
++                connections.spawn(async move {
++                    let Ok(tls) = tokio_boring::accept(&acceptor, tcp).await else {
++                        return;
++                    };
++                    let Ok(mut h2) = h2::server::handshake(tls).await else {
++                        return;
++                    };
++                    while let Some(Ok((mut request, mut reply))) = h2.accept().await {
++                        count.fetch_add(1, Ordering::SeqCst);
++                        assert_eq!(request.method(), "POST");
++                        assert_eq!(request.uri().host(), Some("api.cloudflareclient.com"));
++                        let mut payload = Vec::new();
++                        while let Some(chunk) = request.body_mut().data().await {
++                            payload.extend_from_slice(&chunk.unwrap());
++                        }
++                        assert_eq!(payload, b"{\"key\":\"test\"}");
++                        reply
++                            .send_response(
++                                http::Response::builder().status(204).body(()).unwrap(),
++                                true,
++                            )
++                            .unwrap();
++                    }
++                });
++            }
++        });
++        let stalled_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let stalled_address = stalled_listener.local_addr().unwrap();
++        let stalled = tokio::spawn(async move {
++            let (_tcp, _) = stalled_listener.accept().await.unwrap();
++            futures::future::pending::<()>().await;
++        });
++        let request = https::Request {
++            method: "POST",
++            host: "api.cloudflareclient.com",
++            port: 443,
++            address: None,
++            sni: None,
++            path: "/reg",
++            headers: &[],
++            body: Some(b"{\"key\":\"test\"}"),
+         };
+-        let wire = String::from_utf8(render_request(&request)).expect("utf8");
+-        assert!(wire.contains("Content-Length: 0\r\n"));
+-    }
+-
+-    #[test]
+-    fn a_plain_response_is_parsed() {
+-        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"x\"}";
+-        let (status, body) = parse_response(raw).expect("parsed");
+-        assert_eq!(status, 200);
+-        assert_eq!(body, "{\"id\":\"x\"}");
+-    }
+-
+-    #[test]
+-    fn a_chunked_response_is_reassembled() {
+-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n4\r\n:1}\n\r\n0\r\n\r\n";
+-        let (status, body) = parse_response(raw).expect("parsed");
+-        assert_eq!(status, 200);
+-        assert_eq!(body, "{\"a\":1}\n");
+-    }
+-
+-    #[test]
+-    fn a_rejection_status_is_reported_rather_than_hidden() {
+-        let raw = b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\n\r\nslow down";
+-        let (status, body) = parse_response(raw).expect("parsed");
+-        assert_eq!(status, 429);
+-        assert_eq!(body, "slow down");
+-    }
+-
+-    #[test]
+-    fn a_headless_response_is_an_error() {
+-        assert!(parse_response(b"garbage").is_err());
+-    }
+-
+-    #[test]
+-    fn a_chunked_body_is_joined_on_bytes_without_panicking() {
+-        let text = "ééé".as_bytes();
+-        let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+-        raw.extend_from_slice(format!("{:x}\r\n", 3).as_bytes());
+-        raw.extend_from_slice(&text[..3]);
+-        raw.extend_from_slice(format!("\r\n{:x}\r\n", text.len() - 3).as_bytes());
+-        raw.extend_from_slice(&text[3..]);
+-        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+-        let (status, body) = parse_response(&raw).expect("parsed");
+-        assert_eq!(status, 200);
+-        assert_eq!(body, "ééé");
+-
+-        let raw =
+-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nabc\r\n";
+-        let (_, body) = parse_response(raw).expect("parsed");
+-        assert!(body.is_empty());
++        let fingerprint = tls::Fingerprint::default();
++        let mut fragments = FragmentConfig::from_env();
++        fragments.enabled = true;
++        let pending = FuturesUnordered::new();
++        pending.push(
++            open_route(
++                &request,
++                &fingerprint,
++                Some(stalled_address),
++                FragmentConfig::disabled(),
++                None,
++                Method::RawDirect,
++            )
++            .boxed(),
++        );
++        pending.push(
++            open_route(
++                &request,
++                &fingerprint,
++                Some(address),
++                FragmentConfig::disabled(),
++                None,
++                Method::RawEdge,
++            )
++            .boxed(),
++        );
++        pending.push(
++            open_route(
++                &request,
++                &fingerprint,
++                Some(address),
++                fragments,
++                None,
++                Method::SplitLegacy,
++            )
++            .boxed(),
++        );
++        let winner = tokio::time::timeout(Duration::from_secs(3), first_ready(pending))
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(
++            received.load(Ordering::SeqCst),
++            0,
++            "handshake racers sent an HTTP request"
++        );
++        let response = tokio::time::timeout(
++            Duration::from_secs(3),
++            https::send_on_session(winner.tls, &request),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++        assert_eq!(response.status, 204);
++        tokio::time::sleep(Duration::from_millis(100)).await;
++        assert_eq!(received.load(Ordering::SeqCst), 1);
++        let legacy = open_route(
++            &request,
++            &fingerprint,
++            Some(address),
++            fragments,
++            None,
++            Method::SplitLegacy,
++        )
++        .await
++        .unwrap();
++        assert_eq!(legacy.tls.ssl().version_str(), "TLSv1.2");
++        assert_eq!(
++            received.load(Ordering::SeqCst),
++            1,
++            "a split handshake sent an early request"
++        );
++        let response = https::send_on_session(legacy.tls, &request).await.unwrap();
++        assert_eq!(response.status, 204);
++        assert_eq!(received.load(Ordering::SeqCst), 2);
++        server.abort();
++        stalled.abort();
+     }
+ 
+     #[test]
+-    fn each_fingerprint_builds_a_usable_configuration() {
+-        for fingerprint in Fingerprint::all() {
+-            assert!(
+-                fingerprint.configure().is_ok(),
+-                "{} should configure",
+-                fingerprint.label()
+-            );
++    fn bootstrap_pool_includes_the_reported_edge_and_multiple_ranges() {
++        let pool = edge_pool();
++        assert!(pool.contains(&"188.114.97.6:443".parse().unwrap()));
++        for prefix in PREFIXES {
++            assert!(pool.iter().any(|address| match address.ip() {
++                std::net::IpAddr::V4(ip) => ip.octets()[..3] == prefix[..],
++                _ => false,
++            }));
+         }
+-    }
+-
+-    #[test]
+-    fn only_the_split_profiles_chop_the_client_hello() {
+-        assert!(Fingerprint::SplitLegacy.fragments().enabled);
+-        assert!(Fingerprint::SplitModern.fragments().enabled);
+-        assert!(!Fingerprint::Modern.fragments().enabled);
+-        assert!(!Fingerprint::ChromeLike.fragments().enabled);
++        assert!(pool.iter().all(|address| address.port() == 443));
+     }
+ 
+     #[tokio::test]
+-    #[ignore = "needs live network access to the cloudflare edge"]
+-    async fn every_fingerprint_reaches_the_live_edge() {
+-        let request = ApiRequest {
+-            method: "GET".to_string(),
+-            host: "api.cloudflareclient.com".to_string(),
+-            path: "/v0a4471/reg/nonexistent".to_string(),
+-            headers: vec![("User-Agent".to_string(), "WARP for Android".to_string())],
+-            body: None,
+-        };
+-
+-        let mut reached = 0;
+-        for fingerprint in Fingerprint::all() {
+-            let address = random_edge_address();
+-            match exchange(&request, address, fingerprint).await {
+-                Ok(response) => {
+-                    reached += 1;
+-                    println!(
+-                        "{} -> {} via {}",
+-                        fingerprint.label(),
+-                        response.status,
+-                        response.route
+-                    );
+-                }
+-                Err(error) => println!("{} failed: {error}", fingerprint.label()),
++    async fn a_stalled_lane_does_not_delay_a_winner_and_is_dropped() {
++        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
++        impl Drop for Dropped {
++            fn drop(&mut self) {
++                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+             }
+         }
+-
+-        assert!(reached > 0, "no fingerprint reached the edge");
++        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let guard = Dropped(dropped.clone());
++        let pending: FuturesUnordered<BoxFuture<'_, Result<u8>>> = FuturesUnordered::new();
++        pending.push(
++            async move {
++                let _guard = guard;
++                futures::future::pending().await
++            }
++            .boxed(),
++        );
++        pending.push(async { Err(AetherError::Api("blocked".into())) }.boxed());
++        pending.push(async { Ok(7) }.boxed());
++        assert_eq!(
++            tokio::time::timeout(Duration::from_millis(100), first_ready(pending))
++                .await
++                .unwrap()
++                .unwrap(),
++            7
++        );
++        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+     }
+ }
+diff --git a/aether/src/cli.rs b/aether/src/cli.rs
+index 008429fc50c2cef85aa3a142bacac8a10037e324..86016f25e7fba661bfaf5fdc067617489b215438 100644
+--- a/aether/src/cli.rs
++++ b/aether/src/cli.rs
+@@ -353,8 +353,9 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
+                     serde_json::json!({
+                         "schema": 1, "version": env!("CARGO_PKG_VERSION"),
+                         "revision": env!("AETHER_BUILD_REVISION"),
++                        "patchset": "restricted-networks-v1",
+                         "commands": ["scan-only", "scan-limit", "test-endpoint", "export-identity", "import-identity", "check-options"],
+-                        "features": ["h2-ech", "h3-ech", "tls-ciphers", "tls-groups", "disable-grease", "enroll-address", "ech-dns", "ech-domain", "wg-over-masque", "verified", "scan-diversity", "history-8", "certificate-pinning"]
++                        "features": ["h2-ech", "h3-ech", "tls-ciphers", "tls-groups", "disable-grease", "enroll-address", "ech-dns", "ech-domain", "wg-over-masque", "verified", "scan-diversity", "history-8", "certificate-pinning", "api-handshake-race", "pending-enrollment-key", "engine-stack-8m", "network-scoped-endpoints"]
+                     })
+                 );
+                 return Ok(Parsed::Done);
+diff --git a/aether/src/consts.rs b/aether/src/consts.rs
+index 7245793ec66fe0d57e72adf62819e6f01c3fadec..b6257807140e9d147a91012523f0b123aaad1d0e 100644
+--- a/aether/src/consts.rs
++++ b/aether/src/consts.rs
+@@ -1,7 +1,9 @@
+ pub const API_URL: &str = "https://api.cloudflareclient.com";
+ pub const API_VERSION: &str = "v0a4471";
+ 
+-pub const CONNECT_SNI: &str = "consumer-masque.cloudflareclient.com";
++// Keep the visible TLS name separate from the CONNECT authority. The MASQUE
++// hostname is filtered on networks where ordinary Cloudflare HTTPS still works.
++pub const CONNECT_SNI: &str = "www.cloudflare.com";
+ pub const L4_CONNECT_SNI: &str = "consumer-masque-proxy.cloudflareclient.com";
+ pub const CONNECT_URI: &str = "https://cloudflareaccess.com";
+ 
+diff --git a/aether/src/engine_thread.rs b/aether/src/engine_thread.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..887ed11e94e4dcef641fb903b151ed61f83c4c7b
+--- /dev/null
++++ b/aether/src/engine_thread.rs
+@@ -0,0 +1,194 @@
++//! Construct and poll engine futures on a stack owned by the engine. Tokio's
++//! worker stack setting does not cover the thread calling Runtime::block_on.
++use std::future::Future;
++
++use crate::error::{AetherError, Result};
++
++pub const STACK_BYTES: usize = 8 * 1024 * 1024;
++
++fn runtime() -> Result<tokio::runtime::Runtime> {
++    tokio::runtime::Builder::new_multi_thread()
++        .thread_stack_size(STACK_BYTES)
++        .enable_all()
++        .build()
++        .map_err(AetherError::from)
++}
++
++/// `make` runs inside the new thread, including construction of its future.
++pub fn run<T, F, Fut>(make: F) -> Result<T>
++where
++    T: Send + 'static,
++    F: FnOnce() -> Fut + Send + 'static,
++    Fut: Future<Output = Result<T>>,
++{
++    std::thread::Builder::new()
++        .name("aether-engine".into())
++        .stack_size(STACK_BYTES)
++        .spawn(move || runtime()?.block_on(Box::pin(make())))?
++        .join()
++        .map_err(|_| AetherError::Other("engine thread panicked".into()))?
++}
++
++/// Dropping the awaiting caller closes the channel, drops the root future and
++/// releases its sockets and runtime. No detached preparation survives cancel.
++pub async fn dispatch<T, F, Fut>(make: F) -> Result<T>
++where
++    T: Send + 'static,
++    F: FnOnce() -> Fut + Send + 'static,
++    Fut: Future<Output = Result<T>>,
++{
++    let upstream = crate::upstream::scoped();
++    let (mut reply, answer) = tokio::sync::oneshot::channel();
++    std::thread::Builder::new()
++        .name("aether-prepare".into())
++        .stack_size(STACK_BYTES)
++        .spawn(move || {
++            let result = match runtime() {
++                Ok(runtime) => runtime.block_on(Box::pin(async {
++                    let operation = async {
++                        match upstream {
++                            Some(proxy) => {
++                                crate::upstream::through(
++                                    proxy,
++                                    async move { Box::pin(make()).await },
++                                )
++                                .await
++                            }
++                            None => Box::pin(make()).await,
++                        }
++                    };
++                    tokio::select! {
++                        biased;
++                        _ = reply.closed() => return None,
++                        result = Box::pin(operation) => Some(result),
++                    }
++                })),
++                Err(error) => Some(Err(error)),
++            };
++            if let Some(result) = result {
++                let _ = reply.send(result);
++            }
++        })?;
++    answer
++        .await
++        .map_err(|_| AetherError::Other("engine preparation thread panicked".into()))?
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::{
++        atomic::{AtomicBool, Ordering},
++        Arc,
++    };
++
++    #[tokio::test]
++    async fn scoped_upstreams_survive_dispatch_and_remain_isolated() {
++        let _settings = crate::upstream::hold_setting().await;
++        let first = crate::upstream::Upstream::parse("socks5h://127.0.0.1:18001").unwrap();
++        let second = crate::upstream::Upstream::parse("socks5h://127.0.0.1:18002").unwrap();
++        let (a, b) = tokio::join!(
++            crate::upstream::through(
++                first.clone(),
++                dispatch(|| {
++                    let constructed_with = crate::upstream::configured();
++                    async move {
++                        assert_eq!(constructed_with, crate::upstream::configured());
++                        Ok(constructed_with)
++                    }
++                })
++            ),
++            crate::upstream::through(
++                second.clone(),
++                dispatch(|| async { Ok(crate::upstream::configured()) })
++            ),
++        );
++        assert_eq!(a.unwrap(), Some(first));
++        assert_eq!(b.unwrap(), Some(second));
++        assert!(crate::upstream::configured().is_none());
++    }
++
++    #[inline(never)]
++    fn stack_heavy() -> u64 {
++        let bytes = std::hint::black_box([7u8; 512 * 1024]);
++        bytes.iter().map(|byte| *byte as u64).sum()
++    }
++
++    #[test]
++    fn prepare_and_root_polling_are_safe_from_a_small_caller_stack() {
++        std::thread::Builder::new()
++            .stack_size(256 * 1024)
++            .spawn(|| {
++                assert_eq!(run(|| async { Ok(stack_heavy()) }).unwrap(), 7 * 512 * 1024);
++                let rt = tokio::runtime::Builder::new_current_thread()
++                    .enable_all()
++                    .build()
++                    .unwrap();
++                rt.block_on(async {
++                    let _settings = crate::upstream::hold_setting().await;
++                    let previous = std::env::var("AETHER_ENROLL_ADDRESS").ok();
++                    std::env::set_var("AETHER_ENROLL_ADDRESS", "https://invalid.example");
++                    let config = crate::EmbeddedConfig {
++                        config_path: "unused-small-stack-test.toml".into(),
++                        listen: "127.0.0.1:0".parse().unwrap(),
++                        peer: None,
++                        peer_fallback: false,
++                        scan_mode: "turbo".into(),
++                        ip_scan: "4".into(),
++                        protocol: "masque".into(),
++                        access: crate::socks::Access::default(),
++                    };
++                    let prepare = crate::prepare_embedded(&config);
++                    assert!(std::mem::size_of_val(&prepare) < 16 * 1024);
++                    // Real preparation stops at offline option validation, before
++                    // any public registration or endpoint probe is possible.
++                    assert!(matches!(Box::pin(prepare).await, Err(AetherError::Api(_))));
++                    match previous {
++                        Some(value) => std::env::set_var("AETHER_ENROLL_ADDRESS", value),
++                        None => std::env::remove_var("AETHER_ENROLL_ADDRESS"),
++                    }
++                    assert_eq!(
++                        dispatch(|| async {
++                            let root = stack_heavy();
++                            let worker = tokio::spawn(async { stack_heavy() }).await.unwrap();
++                            Ok(root + worker)
++                        })
++                        .await
++                        .unwrap(),
++                        14 * 512 * 1024
++                    );
++                });
++            })
++            .unwrap()
++            .join()
++            .unwrap();
++    }
++
++    #[tokio::test]
++    async fn cancellation_drops_the_operation_and_its_resources() {
++        struct Resource(Arc<AtomicBool>);
++        impl Drop for Resource {
++            fn drop(&mut self) {
++                self.0.store(true, Ordering::SeqCst);
++            }
++        }
++        let dropped = Arc::new(AtomicBool::new(false));
++        let flag = dropped.clone();
++        let (started, ready) = tokio::sync::oneshot::channel();
++        let operation = tokio::spawn(dispatch(move || async move {
++            let _resource = Resource(flag);
++            let _ = started.send(());
++            std::future::pending::<Result<()>>().await
++        }));
++        ready.await.unwrap();
++        operation.abort();
++        let _ = operation.await;
++        tokio::time::timeout(std::time::Duration::from_secs(3), async {
++            while !dropped.load(Ordering::SeqCst) {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .unwrap();
++    }
++}
+diff --git a/aether/src/https.rs b/aether/src/https.rs
+index baa81d01d7bb217802e23b172af2b2c6e544f927..d31d2a2c4d53051f3f592cde361f837b00253e5e 100644
+--- a/aether/src/https.rs
++++ b/aether/src/https.rs
+@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+ use tokio::net::TcpStream;
+ 
+ use crate::error::{AetherError, Result};
++use crate::fragment::{FragmentConfig, FragmentingStream};
+ use crate::tls::Fingerprint;
+ 
+ /// ALPN: HTTP/2, then HTTP/1.1, as Chrome offers them.
+@@ -30,6 +31,7 @@ const MAX_LINE: usize = 8 * 1024;
+ /// `path` the path with its query. The connection goes to `host` on `port`, and the ClientHello
+ /// names `host`, unless `address` and `sni` name others; offering ECH, the name goes inside the
+ /// encrypted ClientHello.
++#[derive(Clone, Copy)]
+ pub struct Request<'a> {
+     pub method: &'a str,
+     pub host: &'a str,
+@@ -64,7 +66,9 @@ pub async fn send(
+     ech: Option<&mut Vec<u8>>,
+     timeout: Duration,
+ ) -> Result<Response> {
+-    tokio::time::timeout(timeout, exchange(request, fingerprint, ech))
++    // The TLS exchange future is large in debug builds. Keeping it inline in
++    // Timeout copies it through the nested DNS/ECH/provisioning call chain.
++    tokio::time::timeout(timeout, Box::pin(exchange(request, fingerprint, ech)))
+         .await
+         .map_err(|_| {
+             AetherError::Api(format!(
+@@ -78,12 +82,30 @@ pub async fn send(
+ async fn exchange(
+     request: &Request<'_>,
+     fingerprint: &Fingerprint,
+-    mut ech: Option<&mut Vec<u8>>,
++    ech: Option<&mut Vec<u8>>,
+ ) -> Result<Response> {
++    let tls = open(request, fingerprint, ech, FragmentConfig::disabled(), None).await?;
++    send_on_session(tls, request).await
++}
++
++/// Establish and authenticate TLS without sending an HTTP request. Callers can
++/// race handshakes, drop the losers, and send a registration exactly once.
++pub(crate) async fn open(
++    request: &Request<'_>,
++    fingerprint: &Fingerprint,
++    mut ech: Option<&mut Vec<u8>>,
++    fragments: FragmentConfig,
++    maximum_version: Option<boring::ssl::SslVersion>,
++) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
+     let (address, port) = request.address.unwrap_or((request.host, request.port));
+     let mut retried = false;
+     let tls = loop {
+         let mut config = configuration(fingerprint)?;
++        if let Some(version) = maximum_version {
++            config
++                .set_max_proto_version(Some(version))
++                .map_err(|e| AetherError::Tls(e.to_string()))?;
++        }
+         if let Some(list) = ech.as_deref() {
+             // BoringSSL takes a key it offers nothing from, and the name would go in the clear.
+             crate::tls::ensure_offerable(list)?;
+@@ -93,7 +115,8 @@ async fn exchange(
+         }
+         let tcp = dial(address, port).await?;
+         let _ = tcp.set_nodelay(true);
+-        match tokio_boring::connect(config, request.sni.unwrap_or(request.host), tcp).await {
++        let stream = FragmentingStream::new(tcp, fragments);
++        match tokio_boring::connect(config, request.sni.unwrap_or(request.host), stream).await {
+             Ok(tls) => break tls,
+             Err(e) => {
+                 let message = e.to_string();
+@@ -126,8 +149,17 @@ async fn exchange(
+     };
+     // Nothing goes over a handshake that went without the key it was given.
+     if ech.is_some() && !tls.ssl().ech_accepted() {
+-        return Err(AetherError::Ech("the handshake went without ECH".into()));
++        return Err(AetherError::Ech(
++            "ECH_REJECTED: the handshake went without ECH".into(),
++        ));
+     }
++    Ok(tls)
++}
++
++pub(crate) async fn send_on_session(
++    tls: tokio_boring::SslStream<FragmentingStream<TcpStream>>,
++    request: &Request<'_>,
++) -> Result<Response> {
+     if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
+         over_http2(tls, request).await
+     } else {
+@@ -175,7 +207,9 @@ fn configuration(fingerprint: &Fingerprint) -> Result<ConnectConfiguration> {
+     {
+         let pins = test_pins().lock().unwrap().clone();
+         let pins: Vec<_> = pins.iter().map(Vec::as_slice).collect();
+-        crate::tls::install_verification(&mut builder, true, &pins)?;
++        if !pins.is_empty() {
++            crate::tls::install_verification(&mut builder, true, &pins)?;
++        }
+     }
+     let config = builder
+         .build()
+@@ -316,7 +350,9 @@ where
+     tls.flush().await.map_err(failed)?;
+ 
+     let mut answer = Http1Answer::default();
+-    let mut chunk = [0u8; 8192];
++    // This buffer lives across awaits and therefore enlarges every enclosing
++    // API/provisioning future when stored inline. Allocate it directly on the heap.
++    let mut chunk = vec![0u8; 8192].into_boxed_slice();
+     loop {
+         match tls.read(&mut chunk).await {
+             // The connection ended, with a close_notify or without one, which BoringSSL tells
+diff --git a/aether/src/identity.rs b/aether/src/identity.rs
+index 411006bcf05807526250a3f9f856a551563fb720..06e5d81aed5a059b87be6496a8aeb09390cd60b3 100644
+--- a/aether/src/identity.rs
++++ b/aether/src/identity.rs
+@@ -117,6 +117,10 @@ pub struct Device {
+     /// trip. WireGuard may not, until the answer is confirmed.
+     #[serde(default)]
+     pub enrolment_pending_since: u64,
++    #[serde(default)]
++    pub pending_key_pem: String,
++    #[serde(default)]
++    pub pending_cert_pem: String,
+ 
+     #[serde(default)]
+     pub cert_pem: String,
+@@ -182,7 +186,7 @@ impl RegistrationBudget {
+         self.last_reason = reason.to_string();
+         let step =
+             BACKOFF_STEPS_SECS[(self.attempts as usize - 1).min(BACKOFF_STEPS_SECS.len() - 1)];
+-        self.next_attempt_at = now + retry_after.unwrap_or(step).max(step);
++        self.next_attempt_at = now.saturating_add(retry_after.unwrap_or(step).max(step));
+     }
+ 
+     /// Records a registration that was kept, which clears the debt.
+@@ -477,6 +481,8 @@ pub fn device_from(identity: &Identity, registered_at: u64) -> Device {
+             TunnelType::Masque
+         },
+         enrolment_pending_since: 0,
++        pending_key_pem: String::new(),
++        pending_cert_pem: String::new(),
+         cert_pem: persisted.cert_pem,
+         key_pem: persisted.key_pem,
+         cert_issued_at: persisted.cert_issued_at,
+@@ -710,10 +716,54 @@ pub fn save(store_path: &str, store: &Store) -> Result<()> {
+     config::write_private(store_path, &store.to_text()?)
+ }
+ 
++/// Desktop trials are separate processes. An in-process provisioning mutex
++/// cannot keep them from registering twice or overwriting a pending key.
++/// The OS releases this lock even when a losing sidecar is killed.
++pub async fn lock_store(store_path: &str) -> Result<std::fs::File> {
++    let path = std::path::PathBuf::from(format!("{store_path}.lock"));
++    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
++        std::fs::create_dir_all(parent)?;
++    }
++    let file = std::fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(path)?;
++    loop {
++        match file.try_lock() {
++            Ok(()) => return Ok(file),
++            Err(std::fs::TryLockError::WouldBlock) => {
++                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
++            }
++            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn sidecars_wait_for_the_same_store_and_cancel_without_retaining_the_lock() {
++        let dir = scratch("process-lock");
++        let path = dir.join("identity.toml").to_string_lossy().into_owned();
++        let first = lock_store(&path).await.unwrap();
++        assert!(
++            tokio::time::timeout(std::time::Duration::from_millis(100), lock_store(&path))
++                .await
++                .is_err()
++        );
++        drop(first);
++        let next = tokio::time::timeout(std::time::Duration::from_secs(1), lock_store(&path))
++            .await
++            .unwrap()
++            .unwrap();
++        drop(next);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
+     fn wireguard_device(token: &str) -> Device {
+         Device {
+             access_token: token.to_string(),
+diff --git a/aether/src/lib.rs b/aether/src/lib.rs
+index b8174a9ceb6c6b26108a311f930a5e57558ddc98..3cce68dbb3cea303bbead5cece4f8ac60ea43471 100644
+--- a/aether/src/lib.rs
++++ b/aether/src/lib.rs
+@@ -9,6 +9,7 @@ pub mod config;
+ pub mod consts;
+ pub mod dns;
+ pub mod egress;
++pub mod engine_thread;
+ pub mod error;
+ // Upstream's own C API is deliberately not vendored. Nothing here calls it --
+ // native/android-bridge is this project's FFI and predates it -- and its
+@@ -27,6 +28,7 @@ pub mod noize;
+ pub mod prober;
+ pub mod quic;
+ pub mod routing;
++pub mod scan;
+ pub mod stats;
+ // Ours: the VpnService callback that keeps a socket out of the tunnel.
+ pub mod sniff;
+@@ -968,6 +970,12 @@ pub async fn provision_embedded(config: &EmbeddedConfig) -> Result<Vec<String>>
+ }
+ 
+ pub async fn prepare_embedded(config: &EmbeddedConfig) -> Result<EmbeddedPrepared> {
++    let config = config.clone();
++    engine_thread::dispatch(move || async move { Box::pin(prepare_embedded_inner(&config)).await })
++        .await
++}
++
++async fn prepare_embedded_inner(config: &EmbeddedConfig) -> Result<EmbeddedPrepared> {
+     tls::check_tls_options()?;
+     account::check_enroll_address()?;
+     let _ech_session = tls::EchSession::start(
+@@ -995,7 +1003,7 @@ pub async fn prepare_embedded(config: &EmbeddedConfig) -> Result<EmbeddedPrepare
+     // the WireGuard path -- provisioning a WARP account and building a tunnel
+     // nobody asked for, without saying so. Now the next protocol upstream adds
+     // is a compile error here instead of a silent one.
+-    let identity = match config.protocol() {
++    let mut identity = match config.protocol() {
+         Protocol::Masque | Protocol::MasqueInMasque | Protocol::WireGuardOverMasque => {
+             load_or_provision_masque(&config.identity_site()).await?
+         }
+@@ -1008,7 +1016,9 @@ pub async fn prepare_embedded(config: &EmbeddedConfig) -> Result<EmbeddedPrepare
+     // costs exactly what preparing a single one does.
+     let peer = match config.protocol() {
+         Protocol::Masque | Protocol::MasqueInMasque | Protocol::WireGuardOverMasque => {
+-            select_embedded_peer(&identity, config, &config_path).await?
++            let peer = select_embedded_peer(&mut identity, config, &config_path).await?;
++            persist_masque_profile(&config.identity_site(), &identity).await?;
++            peer
+         }
+         Protocol::WireGuard | Protocol::WarpInWarp => {
+             select_embedded_wg_peer(&identity, config, &config_path)
+@@ -1107,6 +1117,15 @@ async fn verify_wg_peer(
+     identity: &account::Identity,
+     peer: SocketAddr,
+     profile: &aethernoize::AetherNoizeConfig,
++) -> Result<std::time::Duration> {
++    verify_wg_peer_mode(identity, peer, profile, false).await
++}
++
++async fn verify_wg_peer_mode(
++    identity: &account::Identity,
++    peer: SocketAddr,
++    profile: &aethernoize::AetherNoizeConfig,
++    real_traffic: bool,
+ ) -> Result<std::time::Duration> {
+     let private_key = identity.private_key_bytes()?;
+     let peer_public = identity.peer_public_key_bytes()?;
+@@ -1114,6 +1133,30 @@ async fn verify_wg_peer(
+         .ipv4
+         .parse()
+         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
++    if real_traffic {
++        let (_, session) = wireguard::verify_endpoint_keep_session(
++            peer,
++            private_key,
++            peer_public,
++            identity.client_id,
++            ipv4,
++            profile,
++            std::time::Duration::from_secs(8),
++            None,
++        )
++        .await?;
++        let params = tunnelping::WgPingParams {
++            local_ipv4: ipv4,
++            local_ipv6: "::1".parse().unwrap(),
++            aethernoize: profile.clone(),
++        };
++        return tunnelping::wg_http_ping_established(
++            session,
++            &params,
++            std::time::Duration::from_secs(15),
++        )
++        .await;
++    }
+     wireguard::verify_endpoint(
+         peer,
+         private_key,
+@@ -1131,6 +1174,15 @@ pub async fn scan_embedded(
+     config: &EmbeddedConfig,
+     limit: usize,
+     cancelled: &AtomicBool,
++) -> Result<Vec<EmbeddedScanResult>> {
++    scan_embedded_observed(config, limit, cancelled, &|_| {}).await
++}
++
++pub async fn scan_embedded_observed(
++    config: &EmbeddedConfig,
++    limit: usize,
++    cancelled: &AtomicBool,
++    observer: scan::ScanObserver<'_>,
+ ) -> Result<Vec<EmbeddedScanResult>> {
+     tls::check_tls_options()?;
+     account::check_enroll_address()?;
+@@ -1149,15 +1201,21 @@ pub async fn scan_embedded(
+         config.protocol(),
+         Protocol::WireGuard | Protocol::WarpInWarp
+     ) {
+-        return scan_embedded_wg(config, limit, cancelled).await;
++        return scan_embedded_wg(config, limit, cancelled, observer).await;
+     }
+-    let identity = load_or_provision_masque(&config.identity_site()).await?;
++    let mut identity = load_or_provision_masque(&config.identity_site()).await?;
++    // The registration endpoint is often outside the old seed list. Discovery
++    // must include it just as connecting does, even when the pool is blocked.
++    let preferred = assigned_masque_peers_updated(&mut identity).await;
++    persist_masque_profile(&config.identity_site(), &identity).await?;
+     let probe = masque_probe(&identity, prober::IpScan::parse(&config.ip_scan)).await?;
+-    let results = prober::scan_gateways(
++    let results = prober::scan_gateways_observed(
+         &probe,
+         prober::ScanMode::parse(&config.scan_mode),
+         limit,
+         cancelled,
++        &preferred,
++        observer,
+     )
+     .await?;
+     Ok(results
+@@ -1191,6 +1249,10 @@ pub async fn test_embedded_peer(config: &EmbeddedConfig) -> Result<EmbeddedScanR
+         Protocol::WireGuard | Protocol::WarpInWarp
+     ) {
+         let identity = load_or_provision_warp(&config.identity_site()).await?;
++        if config.scan_mode == "ironclad" {
++            let rtt = verify_wg_peer_mode(&identity, peer, &aethernoize_config(), true).await?;
++            return Ok(EmbeddedScanResult { peer, rtt });
++        }
+         // Every profile, because an endpoint that refuses one may answer
+         // another, and reporting the first refusal as "dead" would be wrong.
+         let mut last = AetherError::NoCleanEndpoint;
+@@ -1203,7 +1265,12 @@ pub async fn test_embedded_peer(config: &EmbeddedConfig) -> Result<EmbeddedScanR
+         return Err(last);
+     }
+     let identity = load_or_provision_masque(&config.identity_site()).await?;
+-    let rtt = verify_masque_peer(&identity, peer).await?;
++    let rtt = if config.scan_mode == "ironclad" {
++        let probe = masque_probe(&identity, prober::IpScan::parse(&config.ip_scan)).await?;
++        prober::verify_gateway_traffic(&probe, peer).await?
++    } else {
++        verify_masque_peer(&identity, peer).await?
++    };
+     Ok(EmbeddedScanResult { peer, rtt })
+ }
+ 
+@@ -1582,6 +1649,7 @@ async fn scan_embedded_wg(
+     config: &EmbeddedConfig,
+     limit: usize,
+     cancelled: &AtomicBool,
++    observer: scan::ScanObserver<'_>,
+ ) -> Result<Vec<EmbeddedScanResult>> {
+     let identity = load_or_provision_warp(&config.identity_site()).await?;
+     let private_key = identity.private_key_bytes()?;
+@@ -1601,11 +1669,12 @@ async fn scan_embedded_wg(
+         excluded: HashSet::new(),
+     };
+ 
+-    let results = wg_prober::scan_wg_endpoints(
++    let results = wg_prober::scan_wg_endpoints_observed(
+         &probe,
+         wg_prober::WgScanMode::parse(&config.scan_mode),
+         limit,
+         cancelled,
++        observer,
+     )
+     .await?;
+ 
+@@ -1727,7 +1796,7 @@ async fn run_wireguard_tunnel_embedded(
+ }
+ 
+ async fn select_embedded_peer(
+-    identity: &account::Identity,
++    identity: &mut account::Identity,
+     config: &EmbeddedConfig,
+     config_path: &str,
+ ) -> Result<SocketAddr> {
+@@ -1796,8 +1865,10 @@ async fn select_embedded_peer(
+             return Ok(peer);
+         }
+     }
+-    for peer in assigned_masque_peers(identity).await {
+-        if Some(peer) == stored_masque_peer(identity) {
++    let tried_stored = stored_masque_peer(identity);
++    let previous_ipv4 = identity.ipv4.clone();
++    for peer in assigned_masque_peers_updated(identity).await {
++        if Some(peer) == tried_stored && identity.ipv4 == previous_ipv4 {
+             continue;
+         }
+         if peer_matches_ip_scan(peer, &config.ip_scan)
+@@ -1852,6 +1923,10 @@ fn stored_masque_peer(identity: &account::Identity) -> Option<SocketAddr> {
+ }
+ 
+ async fn assigned_masque_peers(identity: &account::Identity) -> Vec<SocketAddr> {
++    assigned_masque_peers_updated(&mut identity.clone()).await
++}
++
++async fn assigned_masque_peers_updated(identity: &mut account::Identity) -> Vec<SocketAddr> {
+     fn on_443(host: &str) -> Option<SocketAddr> {
+         let host = host.trim();
+         if host.is_empty() {
+@@ -1883,6 +1958,7 @@ async fn assigned_masque_peers(identity: &account::Identity) -> Vec<SocketAddr>
+     match asked {
+         Err(_) => log::debug!("[-] no answer in time about which endpoint is assigned"),
+         Ok(Ok(reg)) => {
++            account::apply_interface_profile(identity, &reg);
+             if let Some(current) = on_443(&account::endpoint_from(&reg)) {
+                 if !peers.contains(&current) {
+                     if peers.is_empty() {
+@@ -1906,6 +1982,17 @@ async fn assigned_masque_peers(identity: &account::Identity) -> Vec<SocketAddr>
+ /// search behind it works without an answer.
+ const ASSIGNED_ENDPOINT_LOOKUP: std::time::Duration = std::time::Duration::from_secs(4);
+ 
++async fn persist_masque_profile(site: &IdentitySite, identity: &account::Identity) -> Result<()> {
++    let _provisioning = provisioning_lock().lock().await;
++    let _store_lock = identity::lock_store(&site.store_path).await?;
++    let mut loaded = identity::load(&site.store_path, &site.legacy)?;
++    // A late result must not replace a different identity installed meanwhile.
++    if loaded.store.device_id(site.slot) == Some(identity.device_id.as_str()) {
++        record(&mut loaded.store, site, identity)?;
++    }
++    Ok(())
++}
++
+ /// How one MASQUE hop is sized, and what it may skip.
+ ///
+ /// A single hop, and the outer hop of a nested pair, get the whole budget. The
+@@ -2749,6 +2836,15 @@ async fn provision_within_budget(
+     let through_proxy = crate::upstream::configured().is_some();
+     registration_may_go(store, through_proxy, account::now_unix())?;
+ 
++    // Persist before the POST: dropping this future on stop/timeout cannot
++    // forget an ambiguous registration and spend the quota again immediately.
++    store.registration_budget(through_proxy).failed(
++        account::now_unix(),
++        "registration interrupted before its outcome was saved",
++        None,
++    );
++    identity::save(&site.store_path, store)?;
++
+     match provision_account().await {
+         Ok(identity) => {
+             store
+@@ -2757,11 +2853,10 @@ async fn provision_within_budget(
+             Ok(identity)
+         }
+         Err(error) => {
+-            store.registration_budget(through_proxy).failed(
+-                account::now_unix(),
+-                &error.to_string(),
+-                error.retry_after(),
+-            );
++            let budget = store.registration_budget(through_proxy);
++            // Update the pre-recorded attempt instead of counting it twice.
++            budget.attempts = budget.attempts.saturating_sub(1);
++            budget.failed(account::now_unix(), &error.to_string(), error.retry_after());
+             if let Err(write) = identity::save(&site.store_path, store) {
+                 log::warn!("[-] could not record what the registration attempt cost: {write}");
+             }
+@@ -2797,6 +2892,7 @@ fn registration_may_go(store: &mut identity::Store, through_proxy: bool, now: u6
+ 
+ async fn load_or_provision_warp(site: &IdentitySite) -> Result<account::Identity> {
+     let _provisioning = provisioning_lock().lock().await;
++    let _store_lock = identity::lock_store(&site.store_path).await?;
+     let mut loaded = identity::load(&site.store_path, &site.legacy)?;
+ 
+     if let Some((id, device)) = loaded.store.take_usable(site.slot) {
+@@ -2841,6 +2937,37 @@ async fn load_or_provision_warp(site: &IdentitySite) -> Result<account::Identity
+     Ok(identity)
+ }
+ 
++fn pending_enrollment_key(store: &identity::Store, id: &str) -> Result<account::MasqueKeyPair> {
++    let pending = store
++        .device(id)
++        .filter(|device| !device.pending_key_pem.is_empty());
++    let Some(device) = pending else {
++        return account::generate_masque_keypair();
++    };
++    let key = boring::pkey::PKey::private_key_from_pem(device.pending_key_pem.as_bytes())
++        .map_err(|_| AetherError::Other("saved pending enrollment key is invalid".into()))?;
++    let cert = boring::x509::X509::from_pem(device.pending_cert_pem.as_bytes()).map_err(|_| {
++        AetherError::Other("saved pending enrollment certificate is invalid".into())
++    })?;
++    let spki_der = key
++        .public_key_to_der()
++        .map_err(|error| AetherError::Tls(error.to_string()))?;
++    let cert_spki = cert
++        .public_key()
++        .and_then(|key| key.public_key_to_der())
++        .map_err(|error| AetherError::Tls(error.to_string()))?;
++    if cert_spki != spki_der {
++        return Err(AetherError::Other(
++            "saved pending enrollment certificate and key do not match".into(),
++        ));
++    }
++    Ok(account::MasqueKeyPair {
++        key_pem: device.pending_key_pem.as_bytes().to_vec(),
++        cert_pem: device.pending_cert_pem.as_bytes().to_vec(),
++        spki_der,
++    })
++}
++
+ /// Enrols a MASQUE key onto `identity`, recording the attempt before it is made.
+ ///
+ /// The marker is written and flushed first, and cleared by the write that
+@@ -2854,18 +2981,30 @@ async fn enrol_and_record(
+     site: &IdentitySite,
+     identity: account::Identity,
+ ) -> Result<account::Identity> {
++    let pair = pending_enrollment_key(store, &identity.device_id)?;
++    let through_proxy = upstream::configured().is_some();
++    registration_may_go(store, through_proxy, account::now_unix())?;
+     if let Some(device) = store.device_mut(&identity.device_id) {
+         device.enrolment_pending_since = account::now_unix();
++        device.pending_key_pem = String::from_utf8_lossy(&pair.key_pem).into_owned();
++        device.pending_cert_pem = String::from_utf8_lossy(&pair.cert_pem).into_owned();
+     }
+     identity::save(&site.store_path, store)?;
+ 
+-    let enrollment = account::ensure_masque_enrolled(&identity).await?;
+-    let identity = account::Identity {
+-        cert_pem: enrollment.cert_pem,
+-        key_pem: enrollment.key_pem,
+-        cert_issued_at: enrollment.issued_at,
+-        ..identity
++    let enrollment = match account::ensure_masque_enrolled_with_key(&identity, Some(pair)).await {
++        Ok(enrollment) => enrollment,
++        Err(error @ AetherError::RateLimited { .. }) => {
++            store.registration_budget(through_proxy).failed(
++                account::now_unix(),
++                &error.to_string(),
++                error.retry_after(),
++            );
++            identity::save(&site.store_path, store)?;
++            return Err(error);
++        }
++        Err(error) => return Err(error),
+     };
++    let identity = enrollment.apply(identity);
+     let identity = adopt_team_profile(identity).await;
+     record(store, site, &identity)?;
+     // The file an earlier build reads has no store to tell it any of this, and
+@@ -2878,12 +3017,13 @@ async fn enrol_and_record(
+ 
+ async fn load_or_provision_masque(site: &IdentitySite) -> Result<account::Identity> {
+     let _provisioning = provisioning_lock().lock().await;
++    let _store_lock = identity::lock_store(&site.store_path).await?;
+     let mut loaded = identity::load(&site.store_path, &site.legacy)?;
+ 
+     if let Some((id, device)) = loaded.store.take_usable(site.slot) {
+         let identity = identity::identity_from(&id, &device)?;
+ 
+-        if identity.has_masque_credentials() {
++        if identity.has_masque_credentials() && device.enrolment_pending_since == 0 {
+             log::info!("[+] loaded existing masque identity for device {id}");
+             let identity = adopt_team_profile(identity).await;
+             if !identity.refused {
+@@ -3555,7 +3695,21 @@ async fn masque_probe(
+ /// `aether-masque-lastconn.toml` -- so nobody loses a remembered endpoint and
+ /// re-scans on the first connect after updating.
+ fn lastconn_path(config_path: &str) -> String {
+-    derive_sibling_path(config_path, "lastconn")
++    match std::env::var("AETHER_NETWORK_KEY").ok().as_deref() {
++        None => derive_sibling_path(config_path, "lastconn"),
++        Some("unknown") => {
++            static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++            let nonce = NONCE.get_or_init(|| hex::encode(rand::random::<[u8; 16]>()));
++            derive_sibling_path(config_path, &format!("lastconn-unknown-{nonce}"))
++        }
++        Some(network) => {
++            let hash = ring::digest::digest(&ring::digest::SHA256, network.as_bytes());
++            derive_sibling_path(
++                config_path,
++                &format!("lastconn-{}", hex::encode(&hash.as_ref()[..12])),
++            )
++        }
++    }
+ }
+ 
+ async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
+@@ -5680,6 +5834,26 @@ async fn select_ip_version() -> prober::IpScan {
+ mod identity_tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn desktop_endpoint_memory_is_scoped_without_moving_the_identity() {
++        let _settings = crate::upstream::hold_setting().await;
++        let config = "/identity/aether-masque.toml";
++        let previous = std::env::var("AETHER_NETWORK_KEY").ok();
++        std::env::remove_var("AETHER_NETWORK_KEY");
++        let legacy = lastconn_path(config);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-one");
++        let first = lastconn_path(config);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-two");
++        assert_ne!(first, lastconn_path(config));
++        assert_ne!(first, legacy);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-one");
++        assert_eq!(first, lastconn_path(config));
++        match previous {
++            Some(value) => std::env::set_var("AETHER_NETWORK_KEY", value),
++            None => std::env::remove_var("AETHER_NETWORK_KEY"),
++        }
++    }
++
+     /// Clears the environment these paths read, so a developer's own settings
+     /// cannot decide whether the suite passes.
+     fn isolated() {
+@@ -5729,6 +5903,59 @@ mod identity_tests {
+         dir
+     }
+ 
++    #[tokio::test]
++    async fn an_enrollment_rate_limit_survives_restart_with_the_same_pending_key() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        isolated();
++        let dir = scratch("enrollment-hold");
++        let base = dir.join("aether.toml");
++        let site = identity_site(base.to_str().unwrap(), identity::Slot::Masque);
++        let identity = account::handshake_identity();
++        let mut store = identity::Store::default();
++        record(&mut store, &site, &identity).unwrap();
++        let (address, listener, acceptor) = https::test_server(b"\x08http/1.1").await;
++        std::env::set_var("AETHER_ENROLL_ADDRESS", address.to_string());
++        let server = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let mut tls = tokio_boring::accept(&acceptor, tcp).await.unwrap();
++            let mut request = Vec::new();
++            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
++                let mut chunk = [0; 1024];
++                let count = tls.read(&mut chunk).await.unwrap();
++                assert!(count > 0);
++                request.extend_from_slice(&chunk[..count]);
++            }
++            assert!(request.starts_with(b"PATCH "));
++            tls.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3600\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
++        });
++        let error = enrol_and_record(&mut store, &site, identity)
++            .await
++            .unwrap_err();
++        assert_eq!(error.retry_after(), Some(3600));
++        server.await.unwrap();
++        let first = identity::load(&site.store_path, &site.legacy).unwrap();
++        let key = first
++            .store
++            .device("device")
++            .unwrap()
++            .pending_key_pem
++            .clone();
++        assert!(!key.is_empty());
++        assert!(matches!(
++            load_or_provision_masque(&site).await,
++            Err(AetherError::RegistrationOnHold {
++                wait: 3598..=3600,
++                ..
++            })
++        ));
++        let second = identity::load(&site.store_path, &site.legacy).unwrap();
++        assert_eq!(second.store.device("device").unwrap().pending_key_pem, key);
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
+     #[test]
+     fn an_exported_identity_comes_back_as_the_same_device() {
+         isolated();
+@@ -6107,6 +6334,88 @@ mod identity_tests {
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ 
++    #[tokio::test]
++    async fn cancelling_registration_preserves_the_attempt_on_disk() {
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        isolated();
++        let dir = scratch("cancel-registration");
++        let base = dir.join("aether.toml");
++        let site = identity_site(base.to_str().unwrap(), identity::Slot::Masque);
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        std::env::set_var(
++            "AETHER_ENROLL_ADDRESS",
++            listener.local_addr().unwrap().to_string(),
++        );
++        let mut store = identity::Store::default();
++        let result = tokio::time::timeout(
++            std::time::Duration::from_millis(200),
++            provision_within_budget(&mut store, &site),
++        )
++        .await;
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        assert!(
++            result.is_err(),
++            "the stalled local TLS server must time out"
++        );
++        let mut loaded = identity::load(&site.store_path, &site.legacy).unwrap();
++        assert_eq!(loaded.store.registration.attempts, 1);
++        assert!(registration_may_go(&mut loaded.store, false, account::now_unix()).is_err());
++        assert_eq!(loaded.store.ids().count(), 0);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[tokio::test]
++    async fn interrupted_enrollment_reuses_its_saved_key_instead_of_registering_again() {
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        isolated();
++        let dir = scratch("resume-enrollment");
++        let base = dir.join("aether.toml");
++        let site = identity_site(base.to_str().unwrap(), identity::Slot::Masque);
++        let identity = account::handshake_identity();
++        let original_key = identity.key_pem.clone();
++        let mut store = identity::Store::default();
++        record(&mut store, &site, &identity).unwrap();
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        std::env::set_var(
++            "AETHER_ENROLL_ADDRESS",
++            listener.local_addr().unwrap().to_string(),
++        );
++        assert!(tokio::time::timeout(
++            std::time::Duration::from_millis(200),
++            enrol_and_record(&mut store, &site, identity)
++        )
++        .await
++        .is_err());
++        let first = identity::load(&site.store_path, &site.legacy).unwrap();
++        let pending_key = first
++            .store
++            .device("device")
++            .unwrap()
++            .pending_key_pem
++            .clone();
++        assert!(!pending_key.is_empty());
++        assert_ne!(pending_key.as_bytes(), original_key);
++        // Even with an unexpired old certificate, the pending enrollment must
++        // finish with the same key after a restart.
++        assert!(tokio::time::timeout(
++            std::time::Duration::from_millis(200),
++            load_or_provision_masque(&site)
++        )
++        .await
++        .is_err());
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        let second = identity::load(&site.store_path, &site.legacy).unwrap();
++        assert_eq!(
++            second.store.device("device").unwrap().pending_key_pem,
++            pending_key
++        );
++        assert_eq!(second.store.ids().count(), 1);
++        assert_eq!(second.store.registration.attempts, 0);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     /// A wait this device's address has earned does not hold back a
+     /// registration that leaves from a carrier's.
+     ///
+diff --git a/aether/src/main.rs b/aether/src/main.rs
+index d039bc411e7ad1652ee300e751e68d85c84597d8..a14b718ffd5f7cb0a0b3bc9c6cb7b7f7cff202cd 100644
+--- a/aether/src/main.rs
++++ b/aether/src/main.rs
+@@ -3,7 +3,6 @@
+ // Rust 1.98 built it.
+ #![recursion_limit = "256"]
+ 
+-#[tokio::main]
+-async fn main() -> aether::error::Result<()> {
+-    aether::run().await
++fn main() -> aether::error::Result<()> {
++    aether::engine_thread::run(aether::run)
+ }
+diff --git a/aether/src/masque_h2.rs b/aether/src/masque_h2.rs
+index b1850734c8ac33c77e7fb2d09b3b17ed8f83e645..1f671ff06b814eaf9407442acf09b689e7bd9085 100644
+--- a/aether/src/masque_h2.rs
++++ b/aether/src/masque_h2.rs
+@@ -288,6 +288,21 @@ async fn connect_tls(
+         let stream = FragmentingStream::new(tcp, fragment);
+         match tokio_boring::connect(tls_config, &cfg.sni, stream).await {
+             Ok(tls) => {
++                // Some existing tunnel edges omit ALPN. Retain that fallback;
++                // an explicitly negotiated HTTP/1.1 cannot carry H2 frames.
++                if tls
++                    .ssl()
++                    .selected_alpn_protocol()
++                    .is_some_and(|protocol| protocol != b"h2")
++                {
++                    return Err(AetherError::Masque(format!(
++                        "h2 ALPN: gateway selected {} instead of h2",
++                        tls.ssl()
++                            .selected_alpn_protocol()
++                            .map(|protocol| String::from_utf8_lossy(protocol).into_owned())
++                            .unwrap_or_else(|| "no protocol".into()),
++                    )));
++                }
+                 if ech.is_some() {
+                     // Nothing goes over a handshake that went without the key it was given.
+                     if !tls.ssl().ech_accepted() {
+@@ -866,6 +881,99 @@ fn bytes_to_ip(version: u8, bytes: &[u8]) -> Option<IpAddr> {
+ mod tests {
+     use super::*;
+ 
++    async fn local_tls_peer(
++        alpn: Option<&'static [u8]>,
++    ) -> (H2TunnelConfig, tokio::task::JoinHandle<()>) {
++        let identity = crate::account::handshake_identity();
++        let cert = X509::from_pem(&identity.cert_pem).unwrap();
++        let key = PKey::private_key_from_pem(&identity.key_pem).unwrap();
++        let pin = ring::digest::digest(
++            &ring::digest::SHA256,
++            &cert.public_key().unwrap().public_key_to_der().unwrap(),
++        )
++        .as_ref()
++        .to_vec();
++        let mut acceptor =
++            boring::ssl::SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
++        acceptor.set_certificate(&cert).unwrap();
++        acceptor.set_private_key(&key).unwrap();
++        if let Some(alpn) = alpn {
++            acceptor.set_alpn_select_callback(move |_, offered| {
++                boring::ssl::select_next_proto(alpn, offered).ok_or(boring::ssl::AlpnError::NOACK)
++            });
++        }
++        let acceptor = acceptor.build();
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let peer = listener.local_addr().unwrap();
++        let task = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let _tls = tokio_boring::accept(&acceptor, tcp).await.unwrap();
++            std::future::pending::<()>().await;
++        });
++        (
++            H2TunnelConfig {
++                peer,
++                sni: "localhost".into(),
++                authority: "edge.test".into(),
++                path: "/".into(),
++                cert_pem: identity.cert_pem,
++                key_pem: identity.key_pem,
++                local_ipv4: Ipv4Addr::new(172, 16, 0, 2),
++                quiet: true,
++                pin_endpoint: true,
++                expected_pins: vec![pin],
++                ech_config_list: None,
++            },
++            task,
++        )
++    }
++
++    #[tokio::test]
++    async fn a_pinned_tls_peer_without_h2_is_rejected_before_sending_a_connect_request() {
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        let (cfg, server) = local_tls_peer(Some(b"\x08http/1.1")).await;
++        let outcome = tokio::time::timeout(
++            Duration::from_secs(3),
++            connect_tls(&cfg, FragmentConfig::from_env()),
++        )
++        .await;
++        server.abort();
++        let message = match outcome {
++            Ok(Err(error)) => error.to_string(),
++            _ => panic!("a non-h2 peer must produce a specific ALPN error, without hanging"),
++        };
++        assert!(message.contains("h2 ALPN"), "{message}");
++    }
++
++    #[tokio::test]
++    async fn a_pinned_peer_negotiating_h2_still_passes_tls_setup() {
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        let (cfg, server) = local_tls_peer(Some(b"\x02h2")).await;
++        let outcome = tokio::time::timeout(
++            Duration::from_secs(3),
++            connect_tls(&cfg, FragmentConfig::from_env()),
++        )
++        .await;
++        server.abort();
++        assert!(matches!(outcome, Ok(Ok(_))));
++    }
++
++    #[tokio::test]
++    async fn a_pinned_legacy_edge_without_alpn_keeps_its_existing_h2_fallback() {
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        let (cfg, server) = local_tls_peer(None).await;
++        let outcome = tokio::time::timeout(
++            Duration::from_secs(3),
++            connect_tls(&cfg, FragmentConfig::from_env()),
++        )
++        .await;
++        server.abort();
++        assert!(matches!(outcome, Ok(Ok(_))));
++    }
++
+     /// A connect-ip stream to an edge that loses the first probe it is sent and
+     /// answers every one after it, over memory rather than a network.
+     async fn stream_to_an_edge_that_drops_the_first_probe() -> (
+diff --git a/aether/src/prober.rs b/aether/src/prober.rs
+index b58591f2ca3d2605c3679bbb93597c62f8be970e..063fe41056e0914798fd2fecbbf6569e16cf79ca 100644
+--- a/aether/src/prober.rs
++++ b/aether/src/prober.rs
+@@ -348,6 +348,11 @@ pub enum ProbeFailure {
+     ConnectIpRefused,
+     /// A tunnel opened and closed before carrying anything.
+     NoDataPlane,
++    /// The connection ended before CONNECT-IP was accepted.
++    HandshakeClosed,
++    AlpnRejected,
++    EchRejected,
++    ClientCertificateRejected,
+     Other,
+ }
+ 
+@@ -360,6 +365,10 @@ impl ProbeFailure {
+             ProbeFailure::TlsRejected => "tls refused",
+             ProbeFailure::ConnectIpRefused => "connect-ip refused",
+             ProbeFailure::NoDataPlane => "opened, carried nothing",
++            ProbeFailure::HandshakeClosed => "closed before tunnel opened",
++            ProbeFailure::AlpnRejected => "tunnel protocol not supported",
++            ProbeFailure::EchRejected => "ECH refused",
++            ProbeFailure::ClientCertificateRejected => "client certificate refused",
+             ProbeFailure::Other => "other",
+         }
+     }
+@@ -380,6 +389,21 @@ impl ProbeFailure {
+     fn of(error: &AetherError) -> Self {
+         let text = error.to_string().to_ascii_lowercase();
+         match error {
++            AetherError::Ech(_) => ProbeFailure::EchRejected,
++            _ if text.contains("code=0x178")
++                || text.contains("no application protocol")
++                || text.contains("h2 alpn") =>
++            {
++                ProbeFailure::AlpnRejected
++            }
++            _ if text.contains("this end closed it: code=0x12e") => ProbeFailure::PinMismatch,
++            _ if text.contains("the gateway closed it:")
++                && ["code=0x12a", "code=0x130", "code=0x174"]
++                    .iter()
++                    .any(|code| text.contains(code)) =>
++            {
++                ProbeFailure::ClientCertificateRejected
++            }
+             AetherError::Tls(_) if text.contains("application verification") => {
+                 ProbeFailure::PinMismatch
+             }
+@@ -391,10 +415,20 @@ impl ProbeFailure {
+                 ProbeFailure::NoAnswer
+             }
+             _ if text.contains("connect-ip status") => ProbeFailure::ConnectIpRefused,
+-            _ if text.contains("before data-plane") || text.contains("carried anything") => {
++            _ if text.contains("before data-plane")
++                || text.contains("stream closed before data") =>
++            {
+                 ProbeFailure::NoDataPlane
+             }
+-            _ if text.contains("timed out") || text.contains("deadline") => ProbeFailure::NoAnswer,
++            _ if text.contains("closed before the tunnel carried anything") => {
++                ProbeFailure::HandshakeClosed
++            }
++            _ if text.contains("timed out")
++                || text.contains("timeout")
++                || text.contains("deadline") =>
++            {
++                ProbeFailure::NoAnswer
++            }
+             _ if text.contains("refused") => ProbeFailure::Refused,
+             _ => ProbeFailure::Other,
+         }
+@@ -406,6 +440,22 @@ impl ProbeFailure {
+ pub struct FailureTally {
+     counts: std::collections::BTreeMap<ProbeFailure, usize>,
+     total: usize,
++    examples: std::collections::BTreeMap<ProbeFailure, String>,
++}
++
++#[derive(Debug)]
++struct ProbeError {
++    kind: ProbeFailure,
++    detail: String,
++}
++
++impl From<AetherError> for ProbeError {
++    fn from(error: AetherError) -> Self {
++        Self {
++            kind: ProbeFailure::of(&error),
++            detail: error.to_string(),
++        }
++    }
+ }
+ 
+ /// Probes to see before one repeated answer is believed to be about all of them.
+@@ -420,6 +470,30 @@ impl FailureTally {
+         self.total += 1;
+     }
+ 
++    fn record_error(&mut self, error: ProbeError) {
++        self.record(error.kind);
++        self.examples.entry(error.kind).or_insert_with(|| {
++            error
++                .detail
++                .chars()
++                .filter(|c| !c.is_control())
++                .take(320)
++                .collect()
++        });
++    }
++
++    fn details(&self) -> String {
++        let mut kinds: Vec<_> = self.counts.iter().collect();
++        kinds.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
++        let mut text = self.summary();
++        for (kind, _) in kinds.into_iter().take(3) {
++            if let Some(example) = self.examples.get(kind) {
++                text.push_str(&format!("; {} example: {example}", kind.label()));
++            }
++        }
++        text
++    }
++
+     /// The kind that is answering for effectively all of them, if there is one.
+     fn common_mode(&self) -> Option<(ProbeFailure, usize)> {
+         if self.total < COMMON_MODE_SAMPLE {
+@@ -592,6 +666,17 @@ pub async fn scan_gateways(
+     mode: ScanMode,
+     limit: usize,
+     cancelled: &AtomicBool,
++) -> Result<Vec<ProbeResult>> {
++    scan_gateways_observed(probe, mode, limit, cancelled, &[], &|_| {}).await
++}
++
++pub async fn scan_gateways_observed(
++    probe: &MasqueProbe,
++    mode: ScanMode,
++    limit: usize,
++    cancelled: &AtomicBool,
++    preferred: &[SocketAddr],
++    observer: crate::scan::ScanObserver<'_>,
+ ) -> Result<Vec<ProbeResult>> {
+     let mut st = mode.strategy();
+     st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
+@@ -607,12 +692,20 @@ pub async fn scan_gateways(
+             return Err(AetherError::NoCleanEndpoint);
+         }
+     }
+-    let candidates = spread_seeds(build_candidates(&st, &probe.ports, effective_ip));
++    let candidates = discovery_candidates(
++        preferred,
++        spread_seeds(build_candidates(&st, &probe.ports, effective_ip)),
++        effective_ip,
++    );
+     let ironclad = mode == ScanMode::Ironclad;
++    let started = Instant::now();
++    let mut progress = crate::scan::ScanProgress::new(candidates.len());
++    let mut failures = FailureTally::default();
++    progress.publish(started, String::new(), observer);
+     let stream = futures::stream::iter(
+         candidates
+             .into_iter()
+-            .map(|(ip, port)| verify_one(probe, ip, port, timeout, ironclad)),
++            .map(|(ip, port)| verify_one_detailed(probe, ip, port, timeout, ironclad)),
+     )
+     .buffer_unordered(st.concurrency);
+     tokio::pin!(stream);
+@@ -636,8 +729,19 @@ pub async fn scan_gateways(
+             item = stream.next() => {
+                 match item {
+                     None => break,
+-                    Some(Err(_)) => continue,
++                    Some(Err(error)) => {
++                        progress.completed += 1;
++                        failures.record_error(error);
++                        progress.publish(started, failures.details(), observer);
++                        // Web/CDN addresses can reject the tunnel immediately while
++                        // an assigned gateway is still handshaking. Their failures
++                        // must not cancel that pending candidate.
++                        continue;
++                    },
+                     Some(Ok(result)) => {
++                        progress.completed += 1;
++                        progress.hit(SocketAddr::new(result.ip, result.port), result.rtt);
++                        progress.publish(started, failures.details(), observer);
+                         if !results.iter().any(|existing: &ProbeResult| {
+                             existing.ip == result.ip && existing.port == result.port
+                         }) {
+@@ -663,12 +767,33 @@ pub async fn scan_gateways(
+         return Err(AetherError::Other("endpoint scan cancelled".into()));
+     }
+     if results.is_empty() {
+-        Err(AetherError::NoCleanEndpoint)
++        Err(AetherError::Other(format!(
++            "no working MASQUE endpoint: {}",
++            failures.details()
++        )))
+     } else {
+         Ok(results)
+     }
+ }
+ 
++/// Strong confirmation for a short list, using the exact framing and TLS options.
++pub async fn verify_gateway_traffic(probe: &MasqueProbe, peer: SocketAddr) -> Result<Duration> {
++    let params = crate::tunnelping::MasquePingParams {
++        peer,
++        sni: probe.sni.clone(),
++        authority: probe.authority.clone(),
++        path: probe.path.clone(),
++        cert_pem: probe.cert_pem.to_vec(),
++        key_pem: probe.key_pem.to_vec(),
++        ech_config_list: probe.ech_config_list.as_ref().map(|a| a.to_vec()),
++        noize: probe.noize.clone(),
++        local_ipv4: probe.local_ipv4,
++        local_ipv4_str: probe.local_ipv4.to_string(),
++        local_ipv6_str: String::new(),
++    };
++    crate::tunnelping::masque_http_ping(&params, Duration::from_secs(15)).await
++}
++
+ async fn verify_one(
+     probe: &MasqueProbe,
+     ip: IpAddr,
+@@ -676,6 +801,18 @@ async fn verify_one(
+     timeout: Duration,
+     ironclad: bool,
+ ) -> std::result::Result<ProbeResult, ProbeFailure> {
++    verify_one_detailed(probe, ip, port, timeout, ironclad)
++        .await
++        .map_err(|error| error.kind)
++}
++
++async fn verify_one_detailed(
++    probe: &MasqueProbe,
++    ip: IpAddr,
++    port: u16,
++    timeout: Duration,
++    ironclad: bool,
++) -> std::result::Result<ProbeResult, ProbeError> {
+     if ironclad {
+         let params = crate::tunnelping::MasquePingParams {
+             peer: SocketAddr::new(ip, port),
+@@ -700,7 +837,7 @@ async fn verify_one(
+             }
+             Err(e) => {
+                 log::debug!("[-] ironclad {ip}:{port} failed real http check: {e}");
+-                Err(ProbeFailure::of(&e))
++                Err(ProbeError::from(e))
+             }
+         };
+     }
+@@ -726,7 +863,7 @@ async fn verify_one(
+             Ok(rtt) => Ok(ProbeResult { ip, port, rtt }),
+             Err(e) => {
+                 log::debug!("h2 probe {ip}:{port} -> {e}");
+-                Err(ProbeFailure::of(&e))
++                Err(ProbeError::from(e))
+             }
+         };
+     }
+@@ -748,7 +885,7 @@ async fn verify_one(
+         Ok(rtt) => Ok(ProbeResult { ip, port, rtt }),
+         Err(e) => {
+             log::debug!("probe {ip}:{port} -> {e}");
+-            Err(ProbeFailure::of(&e))
++            Err(ProbeError::from(e))
+         }
+     }
+ }
+@@ -904,7 +1041,101 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
+         }
+     }
+ 
+-    out
++    fair_candidates(out)
++}
++
++// Give IPv6 and alternate ports a turn before the deadline, even when IPv4
++// contributes thousands of candidates. Preserve priority within each lane.
++fn fair_candidates(candidates: Vec<(IpAddr, u16)>) -> Vec<(IpAddr, u16)> {
++    type Lane = ((bool, u16), std::collections::VecDeque<(IpAddr, u16)>);
++    let mut lanes: Vec<Lane> = Vec::new();
++    for candidate in candidates {
++        let key = (candidate.0.is_ipv6(), candidate.1);
++        if let Some((_, lane)) = lanes.iter_mut().find(|(k, _)| *k == key) {
++            lane.push_back(candidate);
++        } else {
++            lanes.push((key, std::collections::VecDeque::from([candidate])));
++        }
++    }
++    let mut ordered = Vec::new();
++    loop {
++        let before = ordered.len();
++        for (_, lane) in &mut lanes {
++            if let Some(candidate) = lane.pop_front() {
++                ordered.push(candidate);
++            }
++        }
++        if before == ordered.len() {
++            return ordered;
++        }
++    }
++}
++
++fn discovery_candidates(
++    preferred: &[SocketAddr],
++    pool: Vec<(IpAddr, u16)>,
++    ip: IpScan,
++) -> Vec<(IpAddr, u16)> {
++    let mut seen = HashSet::new();
++    preferred
++        .iter()
++        .filter(|peer| {
++            if peer.is_ipv4() {
++                ip.want_v4()
++            } else {
++                ip.want_v6()
++            }
++        })
++        .map(|peer| (peer.ip(), peer.port()))
++        .chain(pool)
++        .filter(|candidate| seen.insert(*candidate))
++        .collect()
++}
++
++#[cfg(test)]
++mod discovery_fairness_tests {
++    use super::*;
++
++    #[test]
++    fn assigned_candidates_are_first_deduplicated_and_respect_the_ip_family() {
++        let v4: SocketAddr = "162.159.192.2:443".parse().unwrap();
++        let v6: SocketAddr = "[2606:4700:d0::1]:443".parse().unwrap();
++        let pool = vec![
++            (v4.ip(), v4.port()),
++            ("162.159.197.9".parse().unwrap(), 443),
++        ];
++        let result = discovery_candidates(&[v6, v4, v4], pool, IpScan::V4);
++        assert_eq!(result.len(), 2);
++        assert_eq!(result[0], (v4.ip(), v4.port()));
++        assert!(result.iter().all(|(ip, _)| ip.is_ipv4()));
++    }
++
++    #[test]
++    fn ipv6_and_alternate_ports_are_not_starved_by_a_large_ipv4_pool() {
++        let mut input: Vec<_> = (1..=200)
++            .map(|last| (IpAddr::V4(Ipv4Addr::new(162, 159, 197, last)), 443))
++            .collect();
++        let v6: IpAddr = "2606:4700:d0::1".parse().unwrap();
++        let alternate = (input[0].0, 8443);
++        input.push((v6, 443));
++        input.push(alternate);
++        let output = fair_candidates(input.clone());
++        assert!(output[..3].contains(&(v6, 443)));
++        assert!(output[..3].contains(&alternate));
++        assert_eq!(output.len(), input.len());
++        let input_set: HashSet<_> = input.into_iter().collect();
++        assert_eq!(output.iter().copied().collect::<HashSet<_>>(), input_set);
++        // Dedicated seed priority within a lane survives interleaving.
++        let primary: Vec<_> = output
++            .into_iter()
++            .filter(|(ip, port)| ip.is_ipv4() && *port == 443)
++            .collect();
++        assert_eq!(primary[0].0, IpAddr::V4(Ipv4Addr::new(162, 159, 197, 1)));
++        assert_eq!(
++            primary[199].0,
++            IpAddr::V4(Ipv4Addr::new(162, 159, 197, 200))
++        );
++    }
+ }
+ 
+ fn parse_cidr_v4(cidr: &str) -> Option<(u32, u8)> {
+@@ -1195,6 +1426,49 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn a_pre_tunnel_tls_close_is_never_called_a_working_tunnel_without_traffic() {
++        let cases = [
++            ("closed before the tunnel carried anything; the gateway closed it: code=0x178 (tls: no application protocol)", ProbeFailure::AlpnRejected),
++            ("closed before the tunnel carried anything; this end closed it: code=0x12e (tls: certificate unknown)", ProbeFailure::PinMismatch),
++            ("closed before the tunnel carried anything; the gateway closed it: code=0x130 (tls: unknown certificate authority)", ProbeFailure::ClientCertificateRejected),
++            ("closed before the tunnel carried anything; neither end said why", ProbeFailure::HandshakeClosed),
++            ("CONNECT-IP accepted but closed before data-plane confirmation", ProbeFailure::NoDataPlane),
++            ("h2 stream closed before data", ProbeFailure::NoDataPlane),
++            ("h2 ALPN: gateway selected no protocol instead of h2", ProbeFailure::AlpnRejected),
++            ("verify timeout", ProbeFailure::NoAnswer),
++        ];
++        for (message, expected) in cases {
++            assert_eq!(
++                ProbeFailure::of(&AetherError::Masque(message.into())),
++                expected,
++                "{message}"
++            );
++        }
++        assert_eq!(
++            ProbeFailure::of(&AetherError::Ech("the handshake went without ECH".into())),
++            ProbeFailure::EchRejected
++        );
++    }
++
++    #[test]
++    fn scan_details_preserve_a_bounded_example_of_the_actual_failure() {
++        let mut tally = FailureTally::default();
++        let message = "closed before the tunnel carried anything; the gateway closed it: code=0x178 (tls: no application protocol)";
++        tally.record_error(ProbeError::from(AetherError::Masque(message.into())));
++        tally.record_error(ProbeError::from(AetherError::Masque(message.into())));
++        let details = tally.details();
++        assert!(details.contains("tunnel protocol not supported=2"));
++        assert!(details.contains("code=0x178"));
++        assert_eq!(details.matches("example:").count(), 1);
++        tally.record_error(ProbeError::from(AetherError::Other("é\n".repeat(2000))));
++        assert!(tally
++            .examples
++            .values()
++            .all(|example| example.chars().count() <= 320));
++        assert!(!tally.details().contains('\n'));
++    }
++
+     /// The summary names every kind it saw, so a report can be read.
+     #[test]
+     fn the_summary_says_what_was_seen() {
+diff --git a/aether/src/quic.rs b/aether/src/quic.rs
+index ed7fd4825a0dcdb8544e96b8c709a31cec9d85bd..e12162806d3c0887f34363b015db9058cda94e6b 100644
+--- a/aether/src/quic.rs
++++ b/aether/src/quic.rs
+@@ -876,11 +876,13 @@ fn name_close_code(code: u64) -> &'static str {
+         0x100..=0x1ff => match code - CRYPTO_ERROR_BASE {
+             40 => "tls: handshake failure",
+             42 => "tls: bad certificate",
++            46 => "tls: certificate unknown",
+             48 => "tls: unknown certificate authority",
+             50 => "tls: decode error",
+             70 => "tls: protocol version",
+             80 => "tls: internal error",
+             112 => "tls: unrecognised name",
++            116 => "tls: client certificate required",
+             120 => "tls: no application protocol",
+             121 => "tls: ECH required",
+             _ => "tls alert",
+@@ -1036,8 +1038,8 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
+                                     }
+                                     last_probe = Instant::now();
+                                 } else {
+-                                    return Err(AetherError::Other(format!(
+-                                        "status {}",
++                                    return Err(AetherError::Masque(format!(
++                                        "h3 connect-ip status {}",
+                                         String::from_utf8_lossy(h.value())
+                                     )));
+                                 }
+@@ -1108,8 +1110,11 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
+         }
+ 
+         if conn.is_closed() {
++            if !connect_ip_ok {
++                return Err(describe_early_close(&conn));
++            }
+             return Err(AetherError::Other(
+-                "closed before data-plane confirmation".into(),
++                "CONNECT-IP accepted but closed before data-plane confirmation".into(),
+             ));
+         }
+     }
+diff --git a/aether/src/scan.rs b/aether/src/scan.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d07244ada455547bdc764d98e4b6cb7796925440
+--- /dev/null
++++ b/aether/src/scan.rs
+@@ -0,0 +1,68 @@
++//! Per-request discovery telemetry. Observers must return quickly and never dial.
++use std::net::SocketAddr;
++use std::time::{Duration, Instant};
++
++#[derive(Clone, Debug, Default, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ScanProgress {
++    pub completed: usize,
++    pub total: usize,
++    pub elapsed_millis: u64,
++    pub failures: String,
++    pub results: Vec<ScanHit>,
++}
++
++#[derive(Clone, Debug, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ScanHit {
++    pub peer: SocketAddr,
++    pub rtt_ms: u64,
++}
++
++pub type ScanObserver<'a> = &'a (dyn Fn(ScanProgress) + Send + Sync);
++
++impl ScanProgress {
++    pub fn new(total: usize) -> Self {
++        Self {
++            total,
++            ..Self::default()
++        }
++    }
++
++    pub fn hit(&mut self, peer: SocketAddr, rtt: Duration) {
++        if !self.results.iter().any(|hit| hit.peer == peer) {
++            self.results.push(ScanHit {
++                peer,
++                rtt_ms: rtt.as_millis().min(u64::MAX as u128) as u64,
++            });
++        }
++    }
++
++    pub fn publish(&mut self, started: Instant, failures: String, observer: ScanObserver<'_>) {
++        self.elapsed_millis = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
++        self.failures = failures;
++        observer(self.clone());
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn snapshots_keep_distinct_ports_and_use_the_android_wire_format() {
++        let mut progress = ScanProgress::new(100);
++        let peer = "162.159.197.3:443".parse().unwrap();
++        progress.hit(peer, Duration::from_millis(42));
++        progress.hit(peer, Duration::from_millis(43));
++        progress.hit(
++            "162.159.197.3:8443".parse().unwrap(),
++            Duration::from_millis(55),
++        );
++        assert_eq!(progress.results.len(), 2);
++        let json = serde_json::to_value(&progress).unwrap();
++        assert_eq!(json["total"], 100);
++        assert_eq!(json["results"][0]["peer"], "162.159.197.3:443");
++        assert_eq!(json["results"][0]["rttMs"], 42);
++    }
++}
+diff --git a/aether/src/tls.rs b/aether/src/tls.rs
+index 227e7e0085a6a364ca467177e662d0bf4a125da9..86dcc82aa636df52b4b3b13a0da4833f5dc941fe 100644
+--- a/aether/src/tls.rs
++++ b/aether/src/tls.rs
+@@ -487,7 +487,7 @@ pub fn decode_ech_config_list(b64: &str) -> Result<Vec<u8>> {
+     use base64::Engine;
+     base64::engine::general_purpose::STANDARD
+         .decode(b64.trim())
+-        .map_err(|e| AetherError::Ech(format!("not base64: {e}")))
++        .map_err(|e| AetherError::Ech(format!("ECH_CONFIG_INVALID: not base64: {e}")))
+ }
+ 
+ /// How the core says that it goes no further for want of an ECH key: with --ech given,
+@@ -536,7 +536,9 @@ where
+                 || v.trim().eq_ignore_ascii_case("require") =>
+         {
+             (
+-                fetch().await,
++                fetch()
++                    .await
++                    .map_err(|error| AetherError::Ech(format!("ECH_KEY_FETCH_FAILED: {error}"))),
+                 "fetched ECHConfigList automatically".to_string(),
+             )
+         }
+@@ -580,8 +582,11 @@ const X25519_PUBLIC_KEY_LEN: usize = 32;
+ 
+ /// `check_ech_config_list`, as the error of a handshake about to be given `list`.
+ pub fn ensure_offerable(list: &[u8]) -> Result<()> {
+-    check_ech_config_list(list)
+-        .map_err(|reason| AetherError::Ech(format!("the ECH key cannot be offered: {reason}")))
++    check_ech_config_list(list).map_err(|reason| {
++        AetherError::Ech(format!(
++            "ECH_CONFIG_INVALID: the ECH key cannot be offered: {reason}"
++        ))
++    })
+ }
+ 
+ /// Whether BoringSSL offers ECH when it is given `list`, an ECHConfigList. BoringSSL takes
+@@ -869,7 +874,10 @@ mod tests {
+             assert!(passed_over.contains("cannot be offered"), "{passed_over}");
+ 
+             let typo = no_key_reason(option, ech_key(option, Some("AEX+DQ="), unused).await);
+-            let named = format!("the {} value is not base64", option.flag);
++            let named = format!(
++                "the {} value is ECH_CONFIG_INVALID: not base64",
++                option.flag
++            );
+             assert!(typo.contains(&named), "{typo}");
+         }
+ 
+@@ -878,14 +886,14 @@ mod tests {
+         assert_eq!(
+             said(ech_key(&SESSION_ECH_OPTION, Some("auto"), silent).await).as_deref(),
+             Some(
+-                "ech: ECH is on but there is no ECH key to offer (udp://1.1.1.1:53 did not answer \
++                "ech: ECH is on but there is no ECH key to offer (ECH_KEY_FETCH_FAILED: ech: udp://1.1.1.1:53 did not answer \
+                  for cloudflare-ech.com); stopping rather than send the server name in the clear"
+             )
+         );
+         assert_eq!(
+             said(ech_key(&API_ECH_OPTION, Some("auto"), silent).await).as_deref(),
+             Some(
+-                "ech: ECH is on but there is no ECH key to offer for the WARP API (udp://1.1.1.1:53 \
++                "ech: ECH is on but there is no ECH key to offer for the WARP API (ECH_KEY_FETCH_FAILED: ech: udp://1.1.1.1:53 \
+                  did not answer for cloudflare-ech.com); not asking it rather than send its name in \
+                  the clear"
+             )
+diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
+index fea3bdb468e6285496217367325520868e98cb6c..cef37cae3a74da7344f3da3bf4278c80f5a76a7e 100644
+--- a/aether/src/upstream.rs
++++ b/aether/src/upstream.rs
+@@ -70,10 +70,13 @@ impl std::fmt::Debug for Upstream {
+ ///
+ /// Parsing a short string per connection costs less than being wrong about it.
+ pub fn configured() -> Option<Upstream> {
+-    SCOPED_UPSTREAM
+-        .try_with(Clone::clone)
+-        .ok()
+-        .or_else(|| Upstream::from_value(&std::env::var("AETHER_UPSTREAM").unwrap_or_default()))
++    scoped().or_else(|| Upstream::from_value(&std::env::var("AETHER_UPSTREAM").unwrap_or_default()))
++}
++
++/// Operation-local routing must survive an engine thread dispatch. Environment
++/// routing remains dynamic and is deliberately not snapshotted here.
++pub(crate) fn scoped() -> Option<Upstream> {
++    SCOPED_UPSTREAM.try_with(Clone::clone).ok()
+ }
+ 
+ tokio::task_local! {
+diff --git a/aether/src/wg_prober.rs b/aether/src/wg_prober.rs
+index b7fe377b207f595a2b59e931ffc3cd1d402dd22f..bb3d2b3829fb765b8a939b9af1ed2af450567d02 100644
+--- a/aether/src/wg_prober.rs
++++ b/aether/src/wg_prober.rs
+@@ -405,6 +405,16 @@ pub async fn scan_wg_endpoints(
+     mode: WgScanMode,
+     limit: usize,
+     cancelled: &std::sync::atomic::AtomicBool,
++) -> Result<Vec<WgProbeResult>> {
++    scan_wg_endpoints_observed(probe, mode, limit, cancelled, &|_| {}).await
++}
++
++pub async fn scan_wg_endpoints_observed(
++    probe: &WgProbe,
++    mode: WgScanMode,
++    limit: usize,
++    cancelled: &std::sync::atomic::AtomicBool,
++    observer: crate::scan::ScanObserver<'_>,
+ ) -> Result<Vec<WgProbeResult>> {
+     let mut st = mode.strategy();
+     st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
+@@ -432,6 +442,9 @@ pub async fn scan_wg_endpoints(
+ 
+     let ironclad = mode == WgScanMode::Ironclad;
+     begin_probe_pass();
++    let started = Instant::now();
++    let mut progress = crate::scan::ScanProgress::new(candidates.len());
++    progress.publish(started, String::new(), observer);
+     let stream = futures::stream::iter(
+         candidates
+             .into_iter()
+@@ -459,13 +472,20 @@ pub async fn scan_wg_endpoints(
+         tokio::select! {
+             item = stream.next() => match item {
+                 None => break,
+-                Some(None) => continue,
++                Some(None) => {
++                    progress.completed += 1;
++                    progress.publish(started, probe_pass_summary(), observer);
++                },
+                 Some(Some(result)) => {
++                    progress.completed += 1;
++                    progress.hit(SocketAddr::new(result.ip, result.port), result.rtt);
++                    progress.publish(started, probe_pass_summary(), observer);
+                     log::info!("[+] wg endpoint ok {}:{} rtt={:?}", result.ip, result.port, result.rtt);
+                     found.push(result);
+                 }
+             },
+             _ = tokio::time::sleep(remaining) => break,
++            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+         }
+     }
+ 
+@@ -473,7 +493,10 @@ pub async fn scan_wg_endpoints(
+     if found.is_empty() {
+         // The one line that says which kind of failure this was.
+         log::info!("[-] wireguard scan found nothing: {}", probe_pass_summary());
+-        return Err(AetherError::NoCleanEndpoint);
++        return Err(AetherError::Other(format!(
++            "no working WireGuard endpoint: {}",
++            probe_pass_summary()
++        )));
+     }
+     Ok(found)
+ }

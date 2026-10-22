@@ -67,6 +67,8 @@ async function findCore(binaryExtension) {
   const requested = option("--source") ?? process.env.AETHER_CORE_SOURCE ?? process.env.WHITEAESTHER_CORE_PATH;
   const candidates = [
     requested,
+    ...["aether-core", ".core-work"].flatMap(directory => ["release", "debug"].map(mode =>
+      join(appRoot, directory, "aether", "target", mode, `aether${binaryExtension}`))),
     // The fork first: it is the one with the scanner's reporting modes.
     join(appRoot, "..", "Aether-whiteaesther", "aether", "target", "release", `aether${binaryExtension}`),
     join(appRoot, "..", "Aether-whiteaesther", "aether", "target", "debug", `aether${binaryExtension}`),

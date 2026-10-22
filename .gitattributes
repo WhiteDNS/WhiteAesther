@@ -1,0 +1,2 @@
+# These exact bytes are authenticated by core-source.json on every platform.
+patches/aether/*.patch text eol=lf

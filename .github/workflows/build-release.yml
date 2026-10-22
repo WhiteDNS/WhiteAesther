@@ -184,6 +184,9 @@ jobs:
           ref: ${{ env.AETHER_REVISION }}
           path: aether-core
 
+      - name: Apply and verify the desktop core patches
+        run: node scripts/apply-core-patches.mjs aether-core
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         # Twice in a row this sat here for over half an hour on x86_64 while

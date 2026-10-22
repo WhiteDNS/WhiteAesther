@@ -435,9 +435,17 @@ impl CoreProfile {
 
     pub(crate) fn tls_args(&self) -> Vec<String> {
         let mut args = Vec::new();
+        if non_empty(self.ech.as_deref()).is_some_and(|v| v.eq_ignore_ascii_case("off")) {
+            args.extend(["--ech".into(), "off".into()]);
+        }
         if let Some(ech) = self.ech_setting() {
             args.extend(["--ech".into(), ech.into()]);
+        }
+        let ech_off = non_empty(self.ech.as_deref()).is_some_and(|v| v.eq_ignore_ascii_case("off"));
+        if !ech_off && (self.ech_setting().is_some() || non_empty(self.ech_resolver.as_deref()).is_some()) {
             args.extend(["--ech-dns".into(), non_empty(self.ech_resolver.as_deref()).unwrap_or("https://1.1.1.1/dns-query").into()]);
+        }
+        if !ech_off {
             if let Some(domain) = non_empty(self.ech_domain.as_deref()) {
                 args.extend(["--ech-domain".into(), domain.into()]);
             }
@@ -1193,6 +1201,7 @@ pub(crate) fn set_engine_environment(command: &mut Command, profile: &CoreProfil
     command.env("AETHER_REPROVISION", if profile.auto_reprovision { "1" } else { "0" });
 
     crate::tls_options::clear_inherited(command);
+    command.env("AETHER_NETWORK_KEY", crate::route_memory::current_network().unwrap_or_else(|| "unknown".into()));
 }
 
 fn launch(
@@ -2203,7 +2212,9 @@ fn give_up(
 ) {
     // Every attempt went to the same pinned address, so naming it is more use
     // than repeating the core's last error.
-    let summary = if !profile.auto_reconnect {
+    let summary = if terminal_ech_failure(&reason) {
+        format!("{reason}. Change the ECH/resolver settings or reconnect to retry.")
+    } else if !profile.auto_reconnect {
         format!("{reason}. Not retried, because \"keep me connected\" is off.")
     } else if profile.endpoint_mode == "custom-only" {
         format!(
@@ -2258,6 +2269,18 @@ fn give_up(
 /// up on the first failure -- which is what a hostile network produces -- or
 /// retrying a dead configuration forever.
 fn handle_exit(app: &AppHandle, inner: &Arc<SupervisorInner>, generation: u64, reason: String) {
+    // A required key that cannot be fetched or parsed cannot be repaired by
+    // restarting the same sidecar, including while the kill switch is holding.
+    let detail = lock(&inner.snapshot).last_error.clone();
+    if let Some(detail) = detail.filter(|message| terminal_ech_failure(message)) {
+        let profile = {
+            let mut session = lock(&inner.session);
+            if !session.as_ref().is_some_and(|current| current.generation == generation) { return; }
+            session.take().map(|current| current.profile)
+        };
+        if let Some(profile) = profile { give_up(app, inner, generation, &profile, detail); }
+        return;
+    }
     // Bound to its own statement so the session lock is released before
     // anything below reaches for another one.
     // Read before taking the session lock, so the decision and the proxy state
@@ -3523,6 +3546,12 @@ fn sweep_exhausted(message: &str) -> bool {
         || lowered.contains("scan deadline reached with no gateway")
 }
 
+/// Offline ECH policy failures require a setting change or a deliberate retry.
+fn terminal_ech_failure(message: &str) -> bool {
+    message.contains("ECH_KEY_FETCH_FAILED") || message.contains("ECH_CONFIG_INVALID")
+        || message.contains("ECH is on but there is no ECH key to offer")
+}
+
 /// Ends a session whose sweep came back empty, so the supervisor's own retry
 /// runs instead of the core quietly repeating itself.
 ///
@@ -3612,12 +3641,12 @@ fn apply_log_to_snapshot(message: &str, snapshot: &mut CoreSnapshot, engine_owns
     }
     // An error and a reconnect are orthogonal: excluding "reconnecting" here hid the most
     // common phrasing for a failed retry ("... FAILED, reconnecting") from every UI surface.
-    if message.contains(" ERROR ") || message.starts_with("ERROR") {
+    if message.contains(" ERROR ") || message.starts_with("ERROR") || message.starts_with("Error:") {
         snapshot.last_error = Some(strip_logger_prefix(message));
     }
 }
 
-fn parse_endpoint(message: &str) -> Option<String> {
+pub(crate) fn parse_endpoint(message: &str) -> Option<String> {
     const MARKERS: [&str; 5] = [
         "selected MASQUE gateway ",
         "selected WireGuard endpoint ",
@@ -4069,6 +4098,16 @@ pub(crate) fn hide_console_window(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ech_policy_errors_are_captured_and_distinguished_from_server_rejection() {
+        for reason in ["ECH_KEY_FETCH_FAILED", "ECH_CONFIG_INVALID"] {
+            let mut snapshot = CoreSnapshot::default();
+            apply_log_to_snapshot(&format!("Error: Ech(\"{reason}\")"), &mut snapshot, true);
+            assert!(terminal_ech_failure(snapshot.last_error.as_deref().unwrap()));
+        }
+        assert!(!terminal_ech_failure("TLS handshake failed [ECH_REJECTED]"));
+    }
 
     #[test]
     fn default_profile_is_valid_and_non_interactive() {

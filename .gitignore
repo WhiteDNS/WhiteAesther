@@ -30,3 +30,9 @@ src-tauri/binaries/*
 # UI test output
 test-results/
 playwright-report/
+
+# Isolated, reproducible core builds; committed changes live in patches/aether.
+.core-work/
+.core-reference/
+aether-core/
+artifacts/restricted-networks/
