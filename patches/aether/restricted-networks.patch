@@ -1502,10 +1502,10 @@ index 7245793ec66fe0d57e72adf62819e6f01c3fadec..b6257807140e9d147a91012523f0b123
  
 diff --git a/aether/src/engine_thread.rs b/aether/src/engine_thread.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2e26d263f458000e8d0db780506e2c4a69fea072
+index 0000000000000000000000000000000000000000..887ed11e94e4dcef641fb903b151ed61f83c4c7b
 --- /dev/null
 +++ b/aether/src/engine_thread.rs
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,194 @@
 +//! Construct and poll engine futures on a stack owned by the engine. Tokio's
 +//! worker stack setting does not cover the thread calling Runtime::block_on.
 +use std::future::Future;
@@ -1555,7 +1555,13 @@ index 0000000000000000000000000000000000000000..2e26d263f458000e8d0db780506e2c4a
 +                Ok(runtime) => runtime.block_on(Box::pin(async {
 +                    let operation = async {
 +                        match upstream {
-+                            Some(proxy) => crate::upstream::through(proxy, Box::pin(make())).await,
++                            Some(proxy) => {
++                                crate::upstream::through(
++                                    proxy,
++                                    async move { Box::pin(make()).await },
++                                )
++                                .await
++                            }
 +                            None => Box::pin(make()).await,
 +                        }
 +                    };
@@ -1592,7 +1598,13 @@ index 0000000000000000000000000000000000000000..2e26d263f458000e8d0db780506e2c4a
 +        let (a, b) = tokio::join!(
 +            crate::upstream::through(
 +                first.clone(),
-+                dispatch(|| async { Ok(crate::upstream::configured()) })
++                dispatch(|| {
++                    let constructed_with = crate::upstream::configured();
++                    async move {
++                        assert_eq!(constructed_with, crate::upstream::configured());
++                        Ok(constructed_with)
++                    }
++                })
 +            ),
 +            crate::upstream::through(
 +                second.clone(),
@@ -1891,7 +1903,7 @@ index 411006bcf05807526250a3f9f856a551563fb720..06e5d81aed5a059b87be6496a8aeb093
          Device {
              access_token: token.to_string(),
 diff --git a/aether/src/lib.rs b/aether/src/lib.rs
-index b8174a9ceb6c6b26108a311f930a5e57558ddc98..a476a5ae48d4f0eaa1ecce6ebc50cb8e76cee7f3 100644
+index b8174a9ceb6c6b26108a311f930a5e57558ddc98..3cce68dbb3cea303bbead5cece4f8ac60ea43471 100644
 --- a/aether/src/lib.rs
 +++ b/aether/src/lib.rs
 @@ -9,6 +9,7 @@ pub mod config;
@@ -2267,17 +2279,18 @@ index b8174a9ceb6c6b26108a311f930a5e57558ddc98..a476a5ae48d4f0eaa1ecce6ebc50cb8e
              log::info!("[+] loaded existing masque identity for device {id}");
              let identity = adopt_team_profile(identity).await;
              if !identity.refused {
-@@ -3555,7 +3695,20 @@ async fn masque_probe(
+@@ -3555,7 +3695,21 @@ async fn masque_probe(
  /// `aether-masque-lastconn.toml` -- so nobody loses a remembered endpoint and
  /// re-scans on the first connect after updating.
  fn lastconn_path(config_path: &str) -> String {
 -    derive_sibling_path(config_path, "lastconn")
 +    match std::env::var("AETHER_NETWORK_KEY").ok().as_deref() {
 +        None => derive_sibling_path(config_path, "lastconn"),
-+        Some("unknown") => derive_sibling_path(
-+            config_path,
-+            &format!("lastconn-unknown-{}", std::process::id()),
-+        ),
++        Some("unknown") => {
++            static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++            let nonce = NONCE.get_or_init(|| hex::encode(rand::random::<[u8; 16]>()));
++            derive_sibling_path(config_path, &format!("lastconn-unknown-{nonce}"))
++        }
 +        Some(network) => {
 +            let hash = ring::digest::digest(&ring::digest::SHA256, network.as_bytes());
 +            derive_sibling_path(
@@ -2289,7 +2302,7 @@ index b8174a9ceb6c6b26108a311f930a5e57558ddc98..a476a5ae48d4f0eaa1ecce6ebc50cb8e
  }
  
  async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
-@@ -5680,6 +5833,26 @@ async fn select_ip_version() -> prober::IpScan {
+@@ -5680,6 +5834,26 @@ async fn select_ip_version() -> prober::IpScan {
  mod identity_tests {
      use super::*;
  
@@ -2316,7 +2329,7 @@ index b8174a9ceb6c6b26108a311f930a5e57558ddc98..a476a5ae48d4f0eaa1ecce6ebc50cb8e
      /// Clears the environment these paths read, so a developer's own settings
      /// cannot decide whether the suite passes.
      fn isolated() {
-@@ -5729,6 +5902,59 @@ mod identity_tests {
+@@ -5729,6 +5903,59 @@ mod identity_tests {
          dir
      }
  
@@ -2376,7 +2389,7 @@ index b8174a9ceb6c6b26108a311f930a5e57558ddc98..a476a5ae48d4f0eaa1ecce6ebc50cb8e
      #[test]
      fn an_exported_identity_comes_back_as_the_same_device() {
          isolated();
-@@ -6107,6 +6333,88 @@ mod identity_tests {
+@@ -6107,6 +6334,88 @@ mod identity_tests {
          let _ = std::fs::remove_dir_all(&dir);
      }
  
