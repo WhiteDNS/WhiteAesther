@@ -145,7 +145,10 @@ pub(crate) fn validate(profile: &CoreProfile) -> Result<(), String> {
     }
     // Off retains the saved override text, but does not activate or validate it.
     let ech = profile.ech.as_deref().unwrap_or("").trim();
-    if ech.is_empty() || ech.eq_ignore_ascii_case("off") {
+    if ech.contains("://") {
+        return Err("ECH configuration expects auto, off or a Base64 ECHConfigList. Put the resolver URL in ECH resolver.".into());
+    }
+    if ech.eq_ignore_ascii_case("off") {
         return Ok(());
     }
     if let Some(value) = profile

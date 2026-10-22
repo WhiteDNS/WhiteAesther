@@ -2,6 +2,7 @@ import type { ConnectionProfile } from "../types";
 
 export function buildCoreCommand(profile: ConnectionProfile): string {
   const echOn = Boolean(profile.ech?.trim()) && profile.ech?.trim().toLowerCase() !== "off";
+  const echOff = profile.ech?.trim().toLowerCase() === "off";
   const args = [
     profile.protocol === "wom" ? "--wg-over-masque" : `--${profile.protocol}`,
     (profile.protocol === "masque" || profile.protocol === "mim" || profile.protocol === "wom") && profile.masqueTransport === "h2" ? "--h2" : "",
@@ -23,9 +24,9 @@ export function buildCoreCommand(profile: ConnectionProfile): string {
     profile.endpointMode === "automatic" ? "" : option("--peer", profile.peer),
     option("--wg-peer", profile.wgPeer),
     option("--h2-peer", profile.h2Peer),
-    echOn ? option("--ech", profile.ech) : "",
-    echOn ? option("--ech-dns", profile.echResolver?.trim() || "https://1.1.1.1/dns-query") : "",
-    echOn ? option("--ech-domain", profile.echDomain) : "",
+    option("--ech", profile.ech),
+    !echOff && (echOn || profile.echResolver?.trim()) ? option("--ech-dns", profile.echResolver?.trim() || "https://1.1.1.1/dns-query") : "",
+    !echOff ? option("--ech-domain", profile.echDomain) : "",
     option("--tls-groups", profile.tlsGroups),
     option("--tls-ciphers", profile.tlsCiphers),
     profile.disableGrease ? "--disable-grease" : "",

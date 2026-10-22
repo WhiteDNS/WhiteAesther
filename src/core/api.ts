@@ -171,6 +171,7 @@ export interface RaceWinner {
   ech: string | null;
   /** The endpoint mode the session should run with, when not the profile's. */
   endpointMode: ConnectionProfile["endpointMode"] | null;
+  peer: string | null;
   seconds: number;
 }
 

@@ -1,5 +1,12 @@
 {
   "repository": "WhiteDNS/Aether",
   "version": "2.3.0",
-  "revision": "9d91b294f613d2e6961f04f3a1d5a01e3353615b"
+  "revision": "9d91b294f613d2e6961f04f3a1d5a01e3353615b",
+  "patchset": "restricted-networks-v1",
+  "patches": [
+    {
+      "path": "patches/aether/restricted-networks.patch",
+      "sha256": "e67c163be64543a445e4ec44a71ca8284724d5e8703122ff08ab5dfea80d9bf5"
+    }
+  ]
 }

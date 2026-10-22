@@ -16,5 +16,6 @@ export function profileForWinner(profile: ConnectionProfile, winner: RaceWinner)
     fragmentClientHello: winner.fragmentClientHello ?? profile.fragmentClientHello,
     ech: winner.ech ?? profile.ech,
     endpointMode: winner.endpointMode ?? profile.endpointMode,
+    peer: winner.peer ?? profile.peer,
   };
 }

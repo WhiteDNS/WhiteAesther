@@ -62,7 +62,7 @@ for (const artifact of packages) {
     }
     try { await access(config); throw new Error("Offline checks created an identity"); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
-    results.push({ package: basename(artifact), sha256: createHash("sha256").update(await readFile(artifact)).digest("hex"), version, revision: capabilities.revision, architecture, nativeImports, offlineCommands: "passed" });
+    results.push({ package: basename(artifact), sha256: createHash("sha256").update(await readFile(artifact)).digest("hex"), version, revision: capabilities.revision, patchset: capabilities.patchset, patches: expected.patches, architecture, nativeImports, offlineCommands: "passed" });
     console.log(`Verified ${basename(artifact)}: ${version}, ${architecture}, ${capabilities.revision}`);
   } finally {
     if (mounted) run("hdiutil", ["detach", scratch]);
