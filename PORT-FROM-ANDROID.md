@@ -83,11 +83,17 @@ And the part that is this repo's alone:
 
 - **MASQUE-in-MASQUE (`--mim`) is usable here today.** It is a fourth protocol,
   two nested MASQUE hops, for a network that has learnt to spot a single one.
-  `run_mim` *is* the desktop path -- Android has to refuse it, because every
-  protocol there needs an embedded variant that hands its stack to the app
-  instead of binding listeners, and that does not exist yet. Here it is a
-  profile control beside MASQUE H2/H3, WireGuard and WARP-in-WARP, plus
-  `--mim-outer` / `--mim-inner` if someone wants to pin the hops.
+  `run_mim` *is* the desktop path, so it is a profile control beside MASQUE
+  H2/H3, WireGuard and WARP-in-WARP, plus `--mim-outer` / `--mim-inner` if
+  someone wants to pin the hops.
+
+  Android has it too now (2026-09-16), by the same reasoning this repo reached
+  independently: it is the last lane of the engine's race, not only a picker
+  entry. Two things found while building it there are worth knowing if this
+  repo's version is ever revisited. The app must advertise the *inner* hop's
+  MTU on its interface -- 1162 for H3, because the outer link carries 1280 less
+  48 bytes of IPv6 header and 70 of MASQUE framing -- and nested MASQUE needs a
+  second MASQUE account, which Android's identity backup does not carry.
 - **`--mark` / the new `egress` module** sets `SO_MARK` on every outbound
   socket, so the core's own traffic can be routed around the tunnel it is
   building. It needs root or `CAP_NET_ADMIN`, which is why Android cannot use it
