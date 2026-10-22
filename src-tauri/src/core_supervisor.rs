@@ -4100,6 +4100,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ech_policy_errors_are_captured_and_distinguished_from_server_rejection() {
+        for reason in ["ECH_KEY_FETCH_FAILED", "ECH_CONFIG_INVALID"] {
+            let mut snapshot = CoreSnapshot::default();
+            apply_log_to_snapshot(&format!("Error: Ech(\"{reason}\")"), &mut snapshot, true);
+            assert!(terminal_ech_failure(snapshot.last_error.as_deref().unwrap()));
+        }
+        assert!(!terminal_ech_failure("TLS handshake failed [ECH_REJECTED]"));
+    }
+
+    #[test]
     fn default_profile_is_valid_and_non_interactive() {
         let profile = CoreProfile::default();
         profile.validate().unwrap();

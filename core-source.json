@@ -6,7 +6,7 @@
   "patches": [
     {
       "path": "patches/aether/restricted-networks.patch",
-      "sha256": "e67c163be64543a445e4ec44a71ca8284724d5e8703122ff08ab5dfea80d9bf5"
+      "sha256": "9b85dbde30e8c609e833361c051c3760097903ffbe9d931933af886b254b262e"
     }
   ]
 }

@@ -65,6 +65,8 @@ dispatches construction and polling of its inner future onto an 8 MiB thread;
 dropping its receiver cancels that operation and tears down its runtime. Large
 HTTPS exchange futures and response buffers are heap allocated. This addresses
 the calling thread that `#[tokio::main]`/`block_on` uses as well as worker stacks.
+An operation-local upstream proxy is carried into the dispatched root future;
+separate preparations retain their own routing context.
 
 ## Validation and field testing
 

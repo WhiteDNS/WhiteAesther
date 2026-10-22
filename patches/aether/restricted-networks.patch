@@ -1502,10 +1502,10 @@ index 7245793ec66fe0d57e72adf62819e6f01c3fadec..b6257807140e9d147a91012523f0b123
  
 diff --git a/aether/src/engine_thread.rs b/aether/src/engine_thread.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..23fb4b826b6334fa59264df60034fffb98c5ef58
+index 0000000000000000000000000000000000000000..2e26d263f458000e8d0db780506e2c4a69fea072
 --- /dev/null
 +++ b/aether/src/engine_thread.rs
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,182 @@
 +//! Construct and poll engine futures on a stack owned by the engine. Tokio's
 +//! worker stack setting does not cover the thread calling Runtime::block_on.
 +use std::future::Future;
@@ -1545,6 +1545,7 @@ index 0000000000000000000000000000000000000000..23fb4b826b6334fa59264df60034fffb
 +    F: FnOnce() -> Fut + Send + 'static,
 +    Fut: Future<Output = Result<T>>,
 +{
++    let upstream = crate::upstream::scoped();
 +    let (mut reply, answer) = tokio::sync::oneshot::channel();
 +    std::thread::Builder::new()
 +        .name("aether-prepare".into())
@@ -1552,10 +1553,16 @@ index 0000000000000000000000000000000000000000..23fb4b826b6334fa59264df60034fffb
 +        .spawn(move || {
 +            let result = match runtime() {
 +                Ok(runtime) => runtime.block_on(Box::pin(async {
++                    let operation = async {
++                        match upstream {
++                            Some(proxy) => crate::upstream::through(proxy, Box::pin(make())).await,
++                            None => Box::pin(make()).await,
++                        }
++                    };
 +                    tokio::select! {
 +                        biased;
 +                        _ = reply.closed() => return None,
-+                        result = Box::pin(make()) => Some(result),
++                        result = Box::pin(operation) => Some(result),
 +                    }
 +                })),
 +                Err(error) => Some(Err(error)),
@@ -1576,6 +1583,26 @@ index 0000000000000000000000000000000000000000..23fb4b826b6334fa59264df60034fffb
 +        atomic::{AtomicBool, Ordering},
 +        Arc,
 +    };
++
++    #[tokio::test]
++    async fn scoped_upstreams_survive_dispatch_and_remain_isolated() {
++        let _settings = crate::upstream::hold_setting().await;
++        let first = crate::upstream::Upstream::parse("socks5h://127.0.0.1:18001").unwrap();
++        let second = crate::upstream::Upstream::parse("socks5h://127.0.0.1:18002").unwrap();
++        let (a, b) = tokio::join!(
++            crate::upstream::through(
++                first.clone(),
++                dispatch(|| async { Ok(crate::upstream::configured()) })
++            ),
++            crate::upstream::through(
++                second.clone(),
++                dispatch(|| async { Ok(crate::upstream::configured()) })
++            ),
++        );
++        assert_eq!(a.unwrap(), Some(first));
++        assert_eq!(b.unwrap(), Some(second));
++        assert!(crate::upstream::configured().is_none());
++    }
 +
 +    #[inline(never)]
 +    fn stack_heavy() -> u64 {
@@ -1864,7 +1891,7 @@ index 411006bcf05807526250a3f9f856a551563fb720..06e5d81aed5a059b87be6496a8aeb093
          Device {
              access_token: token.to_string(),
 diff --git a/aether/src/lib.rs b/aether/src/lib.rs
-index b8174a9ceb6c6b26108a311f930a5e57558ddc98..f80e89e03d7ae31b9f71e6196b57701c59fa4c19 100644
+index b8174a9ceb6c6b26108a311f930a5e57558ddc98..a476a5ae48d4f0eaa1ecce6ebc50cb8e76cee7f3 100644
 --- a/aether/src/lib.rs
 +++ b/aether/src/lib.rs
 @@ -9,6 +9,7 @@ pub mod config;
@@ -2262,7 +2289,34 @@ index b8174a9ceb6c6b26108a311f930a5e57558ddc98..f80e89e03d7ae31b9f71e6196b57701c
  }
  
  async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
-@@ -5729,6 +5882,59 @@ mod identity_tests {
+@@ -5680,6 +5833,26 @@ async fn select_ip_version() -> prober::IpScan {
+ mod identity_tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn desktop_endpoint_memory_is_scoped_without_moving_the_identity() {
++        let _settings = crate::upstream::hold_setting().await;
++        let config = "/identity/aether-masque.toml";
++        let previous = std::env::var("AETHER_NETWORK_KEY").ok();
++        std::env::remove_var("AETHER_NETWORK_KEY");
++        let legacy = lastconn_path(config);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-one");
++        let first = lastconn_path(config);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-two");
++        assert_ne!(first, lastconn_path(config));
++        assert_ne!(first, legacy);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-one");
++        assert_eq!(first, lastconn_path(config));
++        match previous {
++            Some(value) => std::env::set_var("AETHER_NETWORK_KEY", value),
++            None => std::env::remove_var("AETHER_NETWORK_KEY"),
++        }
++    }
++
+     /// Clears the environment these paths read, so a developer's own settings
+     /// cannot decide whether the suite passes.
+     fn isolated() {
+@@ -5729,6 +5902,59 @@ mod identity_tests {
          dir
      }
  
@@ -2322,7 +2376,7 @@ index b8174a9ceb6c6b26108a311f930a5e57558ddc98..f80e89e03d7ae31b9f71e6196b57701c
      #[test]
      fn an_exported_identity_comes_back_as_the_same_device() {
          isolated();
-@@ -6107,6 +6313,88 @@ mod identity_tests {
+@@ -6107,6 +6333,88 @@ mod identity_tests {
          let _ = std::fs::remove_dir_all(&dir);
      }
  
@@ -3156,6 +3210,28 @@ index 227e7e0085a6a364ca467177e662d0bf4a125da9..86dcc82aa636df52b4b3b13a0da4833f
                   did not answer for cloudflare-ech.com); not asking it rather than send its name in \
                   the clear"
              )
+diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
+index fea3bdb468e6285496217367325520868e98cb6c..cef37cae3a74da7344f3da3bf4278c80f5a76a7e 100644
+--- a/aether/src/upstream.rs
++++ b/aether/src/upstream.rs
+@@ -70,10 +70,13 @@ impl std::fmt::Debug for Upstream {
+ ///
+ /// Parsing a short string per connection costs less than being wrong about it.
+ pub fn configured() -> Option<Upstream> {
+-    SCOPED_UPSTREAM
+-        .try_with(Clone::clone)
+-        .ok()
+-        .or_else(|| Upstream::from_value(&std::env::var("AETHER_UPSTREAM").unwrap_or_default()))
++    scoped().or_else(|| Upstream::from_value(&std::env::var("AETHER_UPSTREAM").unwrap_or_default()))
++}
++
++/// Operation-local routing must survive an engine thread dispatch. Environment
++/// routing remains dynamic and is deliberately not snapshotted here.
++pub(crate) fn scoped() -> Option<Upstream> {
++    SCOPED_UPSTREAM.try_with(Clone::clone).ok()
+ }
+ 
+ tokio::task_local! {
 diff --git a/aether/src/wg_prober.rs b/aether/src/wg_prober.rs
 index b7fe377b207f595a2b59e931ffc3cd1d402dd22f..bb3d2b3829fb765b8a939b9af1ed2af450567d02 100644
 --- a/aether/src/wg_prober.rs
