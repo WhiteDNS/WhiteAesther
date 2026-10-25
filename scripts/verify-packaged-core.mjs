@@ -5,7 +5,7 @@ import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:f
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { binaryArchitecture, validateCoreContract, checkWindowsRuntime } from "./core-contract.mjs";
+import { binaryArchitecture, validateCoreContract, validateApiOptions, checkWindowsRuntime } from "./core-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expected = JSON.parse(await readFile(join(root, "core-source.json"), "utf8"));
@@ -43,6 +43,7 @@ for (const artifact of packages) {
     const version = run(core, ["--version"]).trim();
     const capabilities = JSON.parse(run(core, ["--desktop-capabilities"]));
     validateCoreContract(version, capabilities, expected);
+    validateApiOptions(args => run(core, args));
     const coreBytes = await readFile(core);
     const architecture = binaryArchitecture(coreBytes);
     const nativeImports = process.platform === "win32" ? checkWindowsRuntime(coreBytes) : undefined;
@@ -62,7 +63,7 @@ for (const artifact of packages) {
     }
     try { await access(config); throw new Error("Offline checks created an identity"); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
-    results.push({ package: basename(artifact), sha256: createHash("sha256").update(await readFile(artifact)).digest("hex"), version, revision: capabilities.revision, patchset: capabilities.patchset, patches: expected.patches, architecture, nativeImports, offlineCommands: "passed" });
+    results.push({ package: basename(artifact), sha256: createHash("sha256").update(await readFile(artifact)).digest("hex"), coreSha256: createHash("sha256").update(coreBytes).digest("hex"), version, revision: capabilities.revision, patchset: capabilities.patchset, patches: expected.patches, architecture, nativeImports, offlineCommands: "passed" });
     console.log(`Verified ${basename(artifact)}: ${version}, ${architecture}, ${capabilities.revision}`);
   } finally {
     if (mounted) run("hdiutil", ["detach", scratch]);

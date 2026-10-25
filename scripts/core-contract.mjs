@@ -1,5 +1,5 @@
 export const REQUIRED_COMMANDS = ["scan-only", "scan-limit", "test-endpoint", "export-identity", "import-identity", "check-options"];
-export const REQUIRED_FEATURES = ["h2-ech", "h3-ech", "tls-ciphers", "tls-groups", "disable-grease", "enroll-address", "ech-dns", "ech-domain", "wg-over-masque", "verified", "scan-diversity", "history-8", "certificate-pinning", "api-handshake-race", "pending-enrollment-key", "engine-stack-8m", "network-scoped-endpoints"];
+export const REQUIRED_FEATURES = ["h2-ech", "h3-ech", "tls-ciphers", "tls-groups", "disable-grease", "enroll-address", "ech-dns", "ech-domain", "wg-over-masque", "verified", "scan-diversity", "history-8", "certificate-pinning", "api-handshake-race", "pending-enrollment-key", "engine-stack-8m", "network-scoped-endpoints", "api-host-fallback", "resumable-warp-activation", "held-proxy-ports", "gateway-cooldown", "strict-upstream"];
 
 export function validateCoreContract(version, capabilities, expected) {
   if (version !== `aether ${expected.version}` || capabilities.schema !== 1 || capabilities.version !== expected.version) throw new Error(`Expected Aether ${expected.version}, got ${version}`);
@@ -7,6 +7,21 @@ export function validateCoreContract(version, capabilities, expected) {
   if (expected.patchset && capabilities.patchset !== expected.patchset) throw new Error(`Core patchset mismatch: expected ${expected.patchset}, got ${capabilities.patchset}`);
   for (const [key, required] of [["commands", REQUIRED_COMMANDS], ["features", REQUIRED_FEATURES]]) {
     for (const item of required) if (!capabilities[key]?.includes(item)) throw new Error(`Core is missing desktop ${key}: ${item}`);
+  }
+}
+
+// Exercise the compiled parser without provisioning or opening any sockets.
+export function validateApiOptions(run) {
+  for (const [args, expected] of [
+    [["--api-address", "203.0.113.10:443"], true],
+    [["--api-host", "api.example.com", "--api-sni", "api.example.com"], true],
+    [["--enroll-address", "203.0.113.10:443"], true],
+    [["--api-sni", "https://invalid.example.com"], false],
+    [["--upstream", "invalid://127.0.0.1:1080"], false],
+    [["--upstream", "socks5://127.0.0.1:0"], false],
+  ]) {
+    const result = JSON.parse(run(["--check-options", ...args]));
+    if (result.ok !== expected) throw new Error(`Core API option contract failed for ${args[0]}`);
   }
 }
 

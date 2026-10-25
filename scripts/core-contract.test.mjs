@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { validateCoreContract, REQUIRED_COMMANDS, REQUIRED_FEATURES, binaryArchitecture } from "./core-contract.mjs";
 
 test("staging rejects old, dirty, wrong-revision and incomplete cores", () => {
-  const expected = { version: "2.3.0", revision: "a".repeat(40), patchset: "restricted-networks-v1" };
+  const expected = { version: "2.3.0", revision: "a".repeat(40), patchset: "restricted-networks-v2" };
   const cap = { ...expected, schema: 1, commands: REQUIRED_COMMANDS, features: REQUIRED_FEATURES };
   assert.doesNotThrow(() => validateCoreContract("aether 2.3.0", cap, expected));
   for (const bad of [{ ...cap, patchset: undefined }, { ...cap, revision: "b".repeat(40) }, { ...cap, revision: cap.revision + "-dirty" }, { ...cap, features: [] }, { ...cap, commands: [] }]) assert.throws(() => validateCoreContract("aether 2.3.0", bad, expected));

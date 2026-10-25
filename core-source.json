@@ -2,11 +2,22 @@
   "repository": "WhiteDNS/Aether",
   "version": "2.3.0",
   "revision": "9d91b294f613d2e6961f04f3a1d5a01e3353615b",
-  "patchset": "restricted-networks-v1",
+  "patchset": "restricted-networks-v2",
   "patches": [
     {
       "path": "patches/aether/restricted-networks.patch",
-      "sha256": "31f4e2d2933eebd65a3c61266d20656c062bb9d45361dd29a4c7e24fa74b03d8"
+      "sha256": "032cadb555bf656b1a1cbcccdb3e4e7d01b4269ada81f3f7100eba253531903b"
     }
-  ]
+  ],
+  "upstreamBackports": {
+    "version": "2.4.0",
+    "revision": "d58f9d568083129ce2c767c85054021eb3ee6a38",
+    "features": [
+      "api-host-fallback",
+      "resumable-warp-activation",
+      "held-proxy-ports",
+      "gateway-cooldown",
+      "strict-upstream"
+    ]
+  }
 }

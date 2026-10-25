@@ -242,7 +242,7 @@ mod settings_tests {
         let p = CoreProfile { ech: Some("auto".into()), ech_resolver: Some("tcp://1.1.1.1:53".into()), ech_domain: Some("keys.example".into()), tls_groups: Some("X25519:P-256".into()), tls_ciphers: Some("ECDHE-RSA-AES128-GCM-SHA256".into()), disable_grease: true, enroll_address: Some("203.0.113.10:443".into()), upstream_proxy: "socks5://user:secret@127.0.0.1:1080".into(), ..Default::default() };
         let command = report_process(std::path::Path::new("aether"), std::path::Path::new("config"), std::path::Path::new("identity.toml"), &p, &["--scan-only".into()], "h2");
         let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        for flag in ["--ech", "--ech-dns", "--ech-domain", "--tls-groups", "--tls-ciphers", "--disable-grease", "--enroll-address", "--fragment"] { assert!(args.iter().any(|a| a == flag), "{flag}"); }
+        for flag in ["--ech", "--ech-dns", "--ech-domain", "--tls-groups", "--tls-ciphers", "--disable-grease", "--api-address", "--fragment"] { assert!(args.iter().any(|a| a == flag), "{flag}"); }
         assert!(args.iter().all(|a| !a.contains("secret")));
         assert!(command.get_envs().any(|(key,value)| key == "AETHER_UPSTREAM" && value.is_some_and(|v| v == p.upstream_proxy.as_str())));
         let off = CoreProfile { ech: Some("off".into()), ..p };

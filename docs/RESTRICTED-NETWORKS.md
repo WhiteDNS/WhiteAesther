@@ -1,5 +1,8 @@
 # Restricted-network bootstrap and native stacks
 
+Patchset v2 also includes selected [Aether 2.4 networking backports](AETHER-2.4-BACKPORTS.md).
+The base core version remains 2.3.0; the manifest records backport provenance.
+
 The desktop supervises Aether as a sidecar; it does not embed Android's JNI
 bridge. The changes are maintained in `patches/aether/restricted-networks.patch`
 on top of the exact `core-source.json` revision. CI verifies the patch SHA-256,

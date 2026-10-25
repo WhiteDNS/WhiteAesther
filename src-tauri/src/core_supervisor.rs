@@ -450,7 +450,7 @@ impl CoreProfile {
                 args.extend(["--ech-domain".into(), domain.into()]);
             }
         }
-        for (flag, value) in [("--tls-groups", &self.tls_groups), ("--tls-ciphers", &self.tls_ciphers), ("--enroll-address", &self.enroll_address)] {
+        for (flag, value) in [("--tls-groups", &self.tls_groups), ("--tls-ciphers", &self.tls_ciphers), ("--api-address", &self.enroll_address)] {
             if let Some(value) = non_empty(value.as_deref()) { args.extend([flag.into(), value.into()]); }
         }
         if self.disable_grease { args.push("--disable-grease".into()); }
