@@ -1,7 +1,7 @@
 {
   "name": "whiteaesther",
   "private": true,
-  "version": "1.10.1",
+  "version": "1.10.2",
   "prerelease": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",

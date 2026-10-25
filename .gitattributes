@@ -1,2 +1,3 @@
 # These exact bytes are authenticated by core-source.json on every platform.
-patches/aether/*.patch text eol=lf
+# Unified diffs retain a space prefix on otherwise empty context lines.
+patches/aether/*.patch text eol=lf whitespace=-blank-at-eol

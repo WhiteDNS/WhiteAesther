@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { validateCoreContract, binaryArchitecture, checkWindowsRuntime } from "./core-contract.mjs";
+import { validateCoreContract, validateApiOptions, binaryArchitecture, checkWindowsRuntime } from "./core-contract.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const option = (name) => {
@@ -29,6 +29,7 @@ const run = (args) => execFileSync(source, args, { encoding: "utf8", timeout: 10
 if (version !== `aether ${expected.version}`) throw new Error(`Expected Aether ${expected.version}, got ${version}`);
 const capabilities = JSON.parse(run(["--desktop-capabilities"]));
 validateCoreContract(version, capabilities, expected);
+validateApiOptions(run);
 const bytes = await readFile(source);
 const architecture = binaryArchitecture(bytes);
 if (target.includes("windows")) checkWindowsRuntime(bytes);
