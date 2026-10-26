@@ -73,4 +73,4 @@ Aether is a trademark of CluvexStudio and the Aether project, used here by writt
 
 ## Aether 2.3 desktop integration
 
-See [the Persian settings and upgrade guide](docs/AETHER-2.3.fa.md), [v1.10.2 release notes](docs/releases/v1.10.2.md), [Aether 2.4 networking backports](docs/AETHER-2.4-BACKPORTS.md), and [verification evidence](docs/AETHER-2.3-VALIDATION.md).
+See [the Persian settings and upgrade guide](docs/AETHER-2.3.fa.md), [v1.10.3 release notes](docs/releases/v1.10.3.md), [Aether 2.4 networking backports](docs/AETHER-2.4-BACKPORTS.md), and [verification evidence](docs/AETHER-2.3-VALIDATION.md).
