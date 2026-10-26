@@ -80,8 +80,10 @@ export function Simple(props: SimpleProps) {
         : t("Tap to connect");
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-0 flex-1 gap-5 px-5 pt-5">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto">
+      {/* Keep the panels at their content height on short windows so the carry
+          picker follows them in the scroll area instead of covering settings. */}
+      <div className="flex min-h-fit flex-1 shrink-0 gap-5 px-5 pt-5">
         <aside
           className={[
             "flex w-[386px] shrink-0 flex-col items-center justify-center rounded-xl border",
@@ -107,7 +109,7 @@ export function Simple(props: SimpleProps) {
         </div>
       </div>
 
-      <div className="px-5 pb-4 pt-3.5">
+      <div className="shrink-0 px-5 pb-4 pt-3.5">
         <CarryPicker carry={props.carry} onCarry={props.onCarry} carryAddress={carryAddress} />
       </div>
     </div>
