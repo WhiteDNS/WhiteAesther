@@ -4,6 +4,18 @@ import { DEFAULT_PROFILE } from "../types.ts";
 import type { RaceWinner } from "./api.ts";
 import { profileForWinner } from "./winner.ts";
 
+test("the verified recipe clears stale tactics and retains the tested IP family", () => {
+  const profile = { ...DEFAULT_PROFILE, ech: "require", helloShape: "compact" as const };
+  const recipe = { protocol: "masque" as const, masqueTransport: "h2" as const,
+    fragmentClientHello: true, helloShape: "records" as const, fragmentSize: "16-32",
+    fragmentDelay: "2-10", fragmentSni: true, ech: null, ipFamily: "v6" as const, scanMode: "turbo" as const };
+  const session = profileForWinner(profile, winner({ recipe, peer: "[2001:db8::1]:443" }));
+  assert.equal(session.helloShape, "records");
+  assert.equal(session.ech, null);
+  assert.equal(session.ipFamily, "v6");
+  assert.equal(session.peer, "[2001:db8::1]:443");
+});
+
 function winner(overrides: Partial<RaceWinner>): RaceWinner {
   return {
     carrier: "aether",

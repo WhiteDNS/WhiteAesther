@@ -1,5 +1,7 @@
-export const REQUIRED_COMMANDS = ["scan-only", "scan-limit", "test-endpoint", "export-identity", "import-identity", "check-options"];
-export const REQUIRED_FEATURES = ["h2-ech", "h3-ech", "tls-ciphers", "tls-groups", "disable-grease", "enroll-address", "ech-dns", "ech-domain", "wg-over-masque", "verified", "scan-diversity", "history-8", "certificate-pinning", "api-handshake-race", "pending-enrollment-key", "engine-stack-8m", "network-scoped-endpoints", "api-host-fallback", "resumable-warp-activation", "held-proxy-ports", "gateway-cooldown", "strict-upstream"];
+import { readFileSync } from "node:fs";
+const contract = JSON.parse(readFileSync(new URL("../core-source.json", import.meta.url), "utf8"));
+export const REQUIRED_COMMANDS = contract.requiredCommands;
+export const REQUIRED_FEATURES = contract.requiredFeatures;
 
 export function validateCoreContract(version, capabilities, expected) {
   if (version !== `aether ${expected.version}` || capabilities.schema !== 1 || capabilities.version !== expected.version) throw new Error(`Expected Aether ${expected.version}, got ${version}`);
@@ -13,6 +15,17 @@ export function validateCoreContract(version, capabilities, expected) {
 // Exercise the compiled parser without provisioning or opening any sockets.
 export function validateApiOptions(run) {
   for (const [args, expected] of [
+    [["--hello-shape", "records"], true],
+    [["--hello-shape", "compact"], true],
+    [["--hello-shape", "unknown"], false],
+    [["--fragment-sni", "false"], true],
+    [["--scan-budget-ms", "18000"], true],
+    [["--scan-budget-ms", "0"], false],
+    [["--masque-sni", "www.cloudflare.com"], true],
+    [["--masque-sni", "203.0.113.10"], false],
+    [["--tls13-ciphers", "TLS_AES_128_GCM_SHA256"], true],
+    [["--tls13-ciphers", "INVALID-WHITEAESTHER-CIPHER"], false],
+    [["--tls-key-shares", "P-256:X25519"], true],
     [["--api-address", "203.0.113.10:443"], true],
     [["--api-host", "api.example.com", "--api-sni", "api.example.com"], true],
     [["--enroll-address", "203.0.113.10:443"], true],

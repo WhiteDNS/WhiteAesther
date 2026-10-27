@@ -9,11 +9,11 @@ The connection engine. WhiteAesther ships the `aether` executable inside its ins
 to connect, and in a reporting mode to populate the endpoint picker.
 
 - Original creator: [CluvexStudio](https://github.com/CluvexStudio), with the Aether contributors
-- Upstream: <https://github.com/CluvexStudio/Aether> — version 2.3.0
+- Upstream: <https://github.com/CluvexStudio/Aether> — version 2.4.0
 - Creator's Telegram channel and support information: <https://t.me/CluvexStudio>
-- The build used here: <https://github.com/WhiteDNS/Aether> at the immutable revision in `core-source.json` — a fork
-  retaining desktop scanner/identity contracts and the Android 2.3 networking fixes, with upstream history preserved and
-  every change reviewable as a diff against it
+- The build used here: the shared Android core in <https://github.com/WhiteDNS/WhiteAestherMobile>
+  at the immutable revision and source paths in `core-source.json`, with checksum-verified desktop
+  adapters for reporting, identity compatibility, process locks, stacks and persistent listeners.
 - Licence: GNU Affero General Public License v3.0 — see `LICENSE`, also installed as
   `licenses/whiteaesther-AGPL-3.0.txt`
 - Copyright: the Aether authors
@@ -23,10 +23,11 @@ derivative work and is licensed AGPL-3.0. Its complete source is public at <http
 
 ### BoringSSL build dependency
 
-The upgraded core uses Boring/tokio-boring 5.2 and official boring-sys 5.2.0. Its vendored
-source has one NASM include-path quoting correction for Windows workspaces containing spaces;
-cryptographic and certificate-validation code is unchanged. Source, provenance and original
-licences are in the core fork’s `third-party/boring-sys`. No Android NDK runtime library is packaged.
+The core uses Boring/tokio-boring 5.3 and the shared Android project's patched boring-sys 5.3.
+The source includes its post-quantum group compatibility patches and Windows/NASM build fixes.
+Source and original licences are under `native/third-party/boring-sys-5.3` in the pinned
+repository, copied to `third-party/boring-sys` by the desktop build. No Android NDK runtime
+library is packaged.
 
 ### Trademark
 

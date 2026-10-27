@@ -92,7 +92,7 @@ pub enum BridgeMode {
     Custom,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TorSettings {
     pub bridges: BridgeMode,
@@ -244,6 +244,15 @@ impl Tor {
         settings: &TorSettings,
         upstream: Option<SocketAddr>,
     ) -> Result<SocketAddr, String> {
+        self.start_with_budget(app, settings, upstream, BOOTSTRAP_TIMEOUT + CONTROL_FILE_TIMEOUT * 2)
+    }
+
+    pub fn start_for_search(&self, app: &AppHandle, settings: &TorSettings, budget: Duration) -> Result<SocketAddr, String> {
+        self.start_with_budget(app, settings, None, budget)
+    }
+
+    fn start_with_budget(&self, app: &AppHandle, settings: &TorSettings, upstream: Option<SocketAddr>, budget: Duration) -> Result<SocketAddr, String> {
+        let deadline = Instant::now() + budget;
         settings.validate()?;
         self.stop();
 
@@ -330,7 +339,7 @@ impl Tor {
             spawn_log_reader(app.clone(), inner.clone(), reader, generation);
         }
 
-        match self.wait_for_circuit(&control_port_file, &cookie_file, generation) {
+        match self.wait_for_circuit(&control_port_file, &cookie_file, generation, deadline) {
             Ok(address) => {
                 app.state::<CoreSupervisor>().record(
                     "tor",
@@ -355,13 +364,13 @@ impl Tor {
         control_port_file: &Path,
         cookie_file: &Path,
         generation: u64,
+        deadline: Instant,
     ) -> Result<SocketAddr, String> {
         let inner = &self.inner;
-        let control = read_control_port(control_port_file, CONTROL_FILE_TIMEOUT)?;
-        let cookie = read_cookie(cookie_file, CONTROL_FILE_TIMEOUT)?;
+        let control = read_control_port(control_port_file, deadline.saturating_duration_since(Instant::now()).min(CONTROL_FILE_TIMEOUT))?;
+        let cookie = read_cookie(cookie_file, deadline.saturating_duration_since(Instant::now()).min(CONTROL_FILE_TIMEOUT))?;
         let mut session = ControlSession::open(control, &cookie)?;
 
-        let deadline = Instant::now() + BOOTSTRAP_TIMEOUT;
         while Instant::now() < deadline {
             if inner.generation.load(Ordering::SeqCst) != generation {
                 return Err("Tor was stopped while it was starting".into());

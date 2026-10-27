@@ -540,7 +540,7 @@ function Idle({ snapshot, profile }: SimpleProps) {
         <Fact label={t("Local proxy")} value={profile.socksAddress} />
       </div>
       <p className="mt-auto pt-3 text-[12px] text-muted-foreground">
-        {t("Retries alternate MASQUE H2 and H3 automatically, up to")} {snapshot.maxAttempts}{" "}
+        {t("Retries try other connection methods automatically, up to")} {snapshot.maxAttempts}{" "}
         {t("attempts.")}
       </p>
     </Card>

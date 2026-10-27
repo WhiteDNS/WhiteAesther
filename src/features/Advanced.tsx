@@ -1334,6 +1334,13 @@ function Routes({ profile, onChange }: AdvancedProps) {
           </Row>
           {isH2 && profile.fragmentClientHello ? (
             <>
+              <Row title="ClientHello shape" help="Automatic recovery also tries these TLS record layouts.">
+                <Seg value={profile.helloShape} onChange={(helloShape) => set({ helloShape })}
+                  options={[["", "TCP fragments"], ["records", "TLS records"], ["compact", "Compact records"]]} />
+              </Row>
+              <Row title="Split inside the server name" help="Keeps the SNI boundary inside separate writes.">
+                <Switch checked={profile.fragmentSni} onCheckedChange={(fragmentSni) => set({ fragmentSni })} />
+              </Row>
               <Separator />
               <div className="grid grid-cols-2 gap-4 py-4">
                 <TextField
@@ -1431,7 +1438,25 @@ function AetherTlsSettings({ profile, onChange }: Pick<AdvancedProps, "profile" 
               help="The endpoint search goes through it too, so it never reveals the address the tunnel hides."
             />
           </div>
+          <div className="grid grid-cols-1 gap-4 pt-4 sm:grid-cols-2">
+            <TextField label="MASQUE server name" mono value={profile.masqueSni ?? ""} onChange={(value) => set({ masqueSni: value || null })} help="Empty uses the core default." />
+            <TextField label="WARP API host" mono value={profile.apiHost ?? ""} onChange={(value) => set({ apiHost: value || null })} help="Empty uses the core default." />
+            <TextField label="WARP API server name" mono value={profile.apiSni ?? ""} onChange={(value) => set({ apiSni: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS 1.3 cipher suites" mono value={profile.tls13Ciphers ?? ""} onChange={(value) => set({ tls13Ciphers: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS key shares" mono value={profile.tlsKeyShares ?? ""} onChange={(value) => set({ tlsKeyShares: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS signature algorithms" mono value={profile.tlsSigalgs ?? ""} onChange={(value) => set({ tlsSigalgs: value || null })} help="Empty uses the core default." />
+            <TextField label="Certificate compression" mono value={profile.tlsCertCompression ?? ""} onChange={(value) => set({ tlsCertCompression: value || null })} help="Empty uses the core default." />
+            <TextField label="ALPS codepoint" mono value={profile.tlsAlps ?? ""} onChange={(value) => set({ tlsAlps: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS trust anchor IDs" mono value={profile.tlsTrustAnchors ?? ""} onChange={(value) => set({ tlsTrustAnchors: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS server padding" mono value={profile.tlsServerPadding ?? ""} onChange={(value) => set({ tlsServerPadding: value || null })} help="Empty uses the core default." />
+          </div>
           <Row title="Disable GREASE" help="Off by default: GREASE remains enabled. Does not disable encryption or certificate verification."><Switch checked={profile.disableGrease} onCheckedChange={(disableGrease) => set({ disableGrease })} /></Row>
+          <Row title="Enable GREASE signature algorithms" help="Changes the TLS handshake fingerprint."><Switch checked={profile.enableGreaseSigalgs} onCheckedChange={(enableGreaseSigalgs) => set({ enableGreaseSigalgs })} /></Row>
+          <Row title="Enable ECH GREASE" help="Changes the TLS handshake fingerprint."><Switch checked={profile.enableEchGrease} onCheckedChange={(enableEchGrease) => set({ enableEchGrease })} /></Row>
+          <Row title="Disable OCSP stapling request" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableOcspStapling} onCheckedChange={(disableOcspStapling) => set({ disableOcspStapling })} /></Row>
+          <Row title="Disable signed certificate timestamps request" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableSct} onCheckedChange={(disableSct) => set({ disableSct })} /></Row>
+          <Row title="Disable session tickets" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableSessionTicket} onCheckedChange={(disableSessionTicket) => set({ disableSessionTicket })} /></Row>
+          <Row title="Disable TLS extension permutation" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableExtensionPermutation} onCheckedChange={(disableExtensionPermutation) => set({ disableExtensionPermutation })} /></Row>
   </CardContent></Card>;
 }
 
@@ -1450,8 +1475,8 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
         onToast={onToast}
         // Picking a candidate is only useful if it is actually used, so the mode
         // moves off Automatic at the same time.
-        onPick={(peer) =>
-          set({ peer, endpointMode: profile.endpointMode === "automatic" ? "custom-first" : profile.endpointMode })
+        onPick={(candidate) =>
+          set({ ...candidate.recipe, peer: candidate.peer, endpointMode: "custom-first" })
         }
       />
       <Card>

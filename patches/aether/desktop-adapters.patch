@@ -1,0 +1,2147 @@
+diff --git a/aether/Cargo.toml b/aether/Cargo.toml
+--- a/aether/Cargo.toml
++++ b/aether/Cargo.toml
+@@ -87,7 +87,7 @@
+ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tor"))'] }
+ 
+ [patch.crates-io]
+-boring-sys = { path = "../../third-party/boring-sys-5.3" }
++boring-sys = { path = "../third-party/boring-sys" }
+ 
+ [profile.release]
+ opt-level = 3
+diff --git a/aether/build.rs b/aether/build.rs
+new file mode 100644
+--- /dev/null
++++ b/aether/build.rs
+@@ -0,0 +1,42 @@
++use std::process::Command;
++fn main() {
++    println!("cargo:rerun-if-env-changed=AETHER_BUILD_REVISION");
++    println!("cargo:rerun-if-changed=src");
++    println!("cargo:rerun-if-changed=../.git/HEAD");
++    let git = |args: &[&str]| {
++        Command::new("git")
++            .args(args)
++            .output()
++            .ok()
++            .filter(|o| o.status.success())
++            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
++    };
++    if let Some(branch) = git(&["symbolic-ref", "HEAD"]) {
++        println!("cargo:rerun-if-changed=../.git/{branch}");
++    }
++    let revision = std::env::var("AETHER_BUILD_REVISION")
++        .ok()
++        .or_else(|| {
++            let text = std::fs::read_to_string("../.core-source.json").ok()?;
++            text.split("\"revision\"")
++                .nth(1)?
++                .split('"')
++                .nth(1)
++                .map(str::to_string)
++        })
++        .or_else(|| {
++            let revision = git(&["rev-parse", "HEAD"])?;
++            let clean = Command::new("git")
++                .args(["diff", "--quiet", "HEAD"])
++                .status()
++                .ok()?
++                .success();
++            Some(if clean {
++                revision
++            } else {
++                format!("{revision}-dirty")
++            })
++        })
++        .unwrap_or_else(|| "unknown".into());
++    println!("cargo:rustc-env=AETHER_BUILD_REVISION={revision}");
++}
+diff --git a/aether/src/account.rs b/aether/src/account.rs
+--- a/aether/src/account.rs
++++ b/aether/src/account.rs
+@@ -826,7 +826,7 @@
+         } else {
+             AetherError::Api(described)
+         };
+-        if !worth_retrying(status) {
++        if !worth_retrying(status) || !matches!(method, "GET" | "HEAD") {
+             return Err(last_error);
+         }
+         if let Some(wait) = cooldown {
+diff --git a/aether/src/api.rs b/aether/src/api.rs
+--- a/aether/src/api.rs
++++ b/aether/src/api.rs
+@@ -251,6 +251,54 @@
+             cert_usable: account::cert_still_usable(identity),
+         }
+     }
++}
++
++/// Ranks reachable MASQUE gateways without connecting to one.
++///
++/// Kept because the desktop client's endpoint scanner is built on it: it runs
++/// the binary with `--scan-only` and reads the JSON this produces. Losing it in
++/// a tree swap would take that feature out with no error anywhere -- the scan
++/// would simply stop being offered.
++pub async fn scan_ranked(
++    identity: &Identity,
++    request: &ScanRequest,
++    limit: usize,
++    cancel: &Cancel,
++) -> Result<Vec<Endpoint>> {
++    if !matches!(request.transport, Transport::Masque) {
++        return Err(AetherError::Other(
++            "ranked scanning is available for MASQUE only".into(),
++        ));
++    }
++    let probe = prober::MasqueProbe {
++        sni: quic::masque_sni()?,
++        authority: quic::default_authority().to_string(),
++        path: quic::default_path().to_string(),
++        cert_pem: Arc::from(identity.cert_pem.clone()),
++        key_pem: Arc::from(identity.key_pem.clone()),
++        ech_config_list: request.ech_config_list.clone().map(Arc::from),
++        noize: request.noize.clone(),
++        ports: request.ports.clone(),
++        ip: request.ip,
++        local_ipv4: crate::parse_local_v4(&identity.ipv4),
++    };
++    let mode = prober::ScanMode::parse(&request.mode);
++    // The prober takes a flag of its own so an in-process caller can stop it
++    // between probes; here the cancel guard drops the whole scan instead.
++    let cooperative = std::sync::atomic::AtomicBool::new(false);
++    let found = guard(
++        cancel,
++        prober::scan_gateways(&probe, mode, limit, &cooperative),
++    )
++    .await?;
++    Ok(found
++        .into_iter()
++        .map(|result| Endpoint {
++            ip: result.ip,
++            port: result.port,
++            rtt_ms: result.rtt.as_millis() as u64,
++        })
++        .collect())
+ }
+ 
+ pub fn identity_path(base: &str, transport: Transport, team: Option<&str>) -> String {
+@@ -514,7 +562,8 @@
+         Transport::Masque => {
+             // The check offers the job's ECH key, as its tunnel would.
+             let ech = spec.ech.clone();
+-            let attempt = async { Ok(crate::quick_verify_masque_peer(identity, peer, ech).await) };
++            let attempt =
++                async { Ok(crate::quick_verify_masque_with_ech(identity, peer, ech).await) };
+             guard(cancel, attempt).await
+         }
+         Transport::WireGuard => {
+@@ -556,7 +605,8 @@
+ 
+     match spec.transport {
+         Transport::Masque => {
+-            let attempt = crate::run_masque_tunnel(identity, peer, spec.ech.clone(), spec.socks);
++            let attempt =
++                crate::run_masque_tunnel(identity, peer, spec.ech.clone(), spec.socks, None);
+             guard(cancel, attempt).await
+         }
+         Transport::WireGuard => {
+@@ -565,6 +615,7 @@
+                 peer,
+                 spec.aethernoize.clone(),
+                 spec.socks,
++                None,
+             );
+             guard(cancel, attempt).await
+         }
+diff --git a/aether/src/cli.rs b/aether/src/cli.rs
+--- a/aether/src/cli.rs
++++ b/aether/src/cli.rs
+@@ -20,6 +20,8 @@
+   aether --mim                             two masque hops, for a different exit
+ 
+ Connection:
++  --hello-shape <mode>     TLS record shaping: records or compact
++  --fragment-sni <bool>    Split inside SNI (default true)
+   --bind <addr>            local SOCKS5 listen address (default 127.0.0.1:1819)
+   --http-proxy <addr>      also expose an HTTP CONNECT proxy on this address
+                            (off by default, e.g. 127.0.0.1:1820)
+@@ -75,6 +77,22 @@
+   --mim-scan               find the outer hop by scanning, ignoring any endpoint
+                            left in the environment
+ 
++Desktop contract (no network or identity provisioning):
++  --desktop-capabilities   version, revision, supported commands and features as JSON
++  --check-options          validate TLS/ECH/registration input as JSON
++
++Report gateways without connecting (prints one JSON object on stdout):
++  --provision-only        Prepare the saved MASQUE identity without scanning
++  --scan-budget-ms <ms>    Bound each endpoint search, preserving partial results
++  --scan-only              rank reachable MASQUE gateways by round-trip time
++  --scan-limit <n>         how many to report (default 8, max 64)
++  --test-endpoint <ip:port>
++                           validate one gateway with a real authenticated handshake
++
++Back up the identity without connecting (prints one JSON object on stdout):
++  --export-identity        every account this install holds, in the payload field
++  --import-identity <file> restore a file written by --export-identity
++
+ Scan mode:
+   --scan <mode>            turbo | balanced | thorough | stealth | ironclad
+   --turbo                  stop at the first candidate that answers
+@@ -103,7 +121,10 @@
+   --ech-domain <name>      domain whose HTTPS record holds the ECH key
+   --tls-ciphers <list>     TLS 1.2 cipher list (BoringSSL names, ':' separated)
+   --disable-grease         omit GREASE from TLS handshakes
+-  --enroll-address <host>  WARP registration address, with optional :port
++  --api-address <host>     WARP API address, with optional :port
++  --api-host <name>        WARP API HTTP host
++  --api-sni <name>         WARP API TLS server name
++  --enroll-address <host>  legacy address override using the old API name
+   --no-data-check          skip the end-to-end data-plane validation
+   --validate-secs <n>      seconds to wait for data-plane validation (default 10)
+   --startup-secs <n>       total MASQUE startup deadline (default 30)
+@@ -337,6 +358,7 @@
+ 
+ pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
+     let mut i = 0;
++    let mut check_options = false;
+ 
+     while i < args.len() {
+         let arg = args[i].as_str();
+@@ -351,6 +373,20 @@
+         }
+ 
+         match arg {
++            "--desktop-capabilities" => {
++                println!(
++                    "{}",
++                    serde_json::json!({
++                        "schema": 1, "version": env!("CARGO_PKG_VERSION"),
++                        "revision": env!("AETHER_BUILD_REVISION"),
++                        "patchset": "desktop-android-parity-v1",
++                        "commands": ["scan-only", "scan-limit", "test-endpoint", "export-identity", "import-identity", "check-options", "hello-shape", "fragment-sni", "scan-budget-ms", "provision-only"],
++                        "features": ["h2-ech", "h3-ech", "tls-ciphers", "tls-groups", "disable-grease", "enroll-address", "ech-dns", "ech-domain", "wg-over-masque", "verified", "scan-diversity", "history-8", "certificate-pinning", "api-handshake-race", "pending-enrollment-key", "engine-stack-8m", "network-scoped-endpoints", "api-host-fallback", "resumable-warp-activation", "held-proxy-ports", "gateway-cooldown", "strict-upstream", "tls13-ciphers", "tls-key-shares", "masque-sni", "extended-tls-fingerprint", "hello-shape", "bounded-discovery"]
++                    })
++                );
++                return Ok(Parsed::Done);
++            }
++            "--check-options" => check_options = true,
+             "-v" | "--version" => {
+                 println!("aether {}", env!("CARGO_PKG_VERSION"));
+                 return Ok(Parsed::Done);
+@@ -458,12 +494,22 @@
+                 set("AETHER_WG_RECONNECT_SECS", &value);
+             }
+             "--dns" => set("AETHER_DNS", next_value!()),
++            "--hello-shape" => set("AETHER_HELLO_SHAPE", next_value!()),
++            "--fragment-sni" => set("AETHER_MASQUE_H2_FRAGMENT_SNI", next_value!()),
+             "--fragment" => set("AETHER_MASQUE_H2_FRAGMENT", "1"),
+             "--fragment-size" => set("AETHER_MASQUE_H2_FRAGMENT_SIZE", next_value!()),
+             "--fragment-delay" => set("AETHER_MASQUE_H2_FRAGMENT_DELAY", next_value!()),
+ 
+             "--keepalive" => set("AETHER_WG_KEEPALIVE", next_value!()),
+             "--no-profile-retry" => set("AETHER_WG_NO_PROFILE_RETRY", "1"),
++
++            "--provision-only" => set("AETHER_PROVISION_ONLY", "1"),
++            "--scan-budget-ms" => set("AETHER_SCAN_BUDGET_MS", next_value!()),
++            "--scan-only" => set("AETHER_SCAN_ONLY", "1"),
++            "--scan-limit" => set("AETHER_SCAN_LIMIT", next_value!()),
++            "--test-endpoint" => set("AETHER_TEST_ENDPOINT", next_value!()),
++            "--export-identity" => set("AETHER_EXPORT_IDENTITY", "1"),
++            "--import-identity" => set("AETHER_IMPORT_IDENTITY", next_value!()),
+ 
+             "--config" => set("AETHER_CONFIG", next_value!()),
+             "--wg-config" => set("AETHER_WG_CONFIG", next_value!()),
+@@ -495,7 +541,62 @@
+         i += 1;
+     }
+ 
++    if check_options {
++        let result = check_network_options();
++        match result {
++            Ok(()) => println!("{}", serde_json::json!({"ok": true})),
++            Err(error) => println!(
++                "{}",
++                serde_json::json!({"ok": false, "error": error.to_string()})
++            ),
++        }
++        return Ok(Parsed::Done);
++    }
+     Ok(Parsed::Run)
++}
++
++/// Checks user input without opening sockets, looking up ECH or registering.
++pub fn check_network_options() -> crate::error::Result<()> {
++    crate::upstream::check_setting()?;
++    crate::tls::check_tls_options()?;
++    crate::quic::masque_sni()?;
++    match env::var("AETHER_HELLO_SHAPE").as_deref() {
++        Ok("") | Ok("records") | Ok("compact") | Err(_) => {}
++        Ok(_) => {
++            return Err(crate::AetherError::Other(
++                "--hello-shape must be records or compact".into(),
++            ))
++        }
++    }
++    if let Ok(value) = env::var("AETHER_SCAN_BUDGET_MS") {
++        if !value
++            .parse::<u64>()
++            .is_ok_and(|ms| (1..=360_000).contains(&ms))
++        {
++            return Err(crate::AetherError::Other(
++                "--scan-budget-ms must be between 1 and 360000".into(),
++            ));
++        }
++    }
++    crate::account::check_enroll_address()?;
++    let ech = env::var("AETHER_ECH").unwrap_or_default();
++    let ech = ech.trim();
++    if !ech.is_empty() && !ech.eq_ignore_ascii_case("off") {
++        if !ech.eq_ignore_ascii_case("auto") && !ech.eq_ignore_ascii_case("require") {
++            crate::tls::ensure_offerable(&crate::tls::decode_ech_config_list(ech)?)?;
++        }
++        if let Ok(resolver) = env::var("AETHER_ECH_DNS") {
++            crate::dns::EchDns::parse(&resolver).map_err(crate::error::AetherError::Ech)?;
++        }
++        if let Ok(domain) = env::var("AETHER_ECH_DOMAIN") {
++            if !domain.trim().is_empty() && !crate::dns::valid_domain(&domain) {
++                return Err(crate::error::AetherError::Ech(
++                    "--ech-domain: invalid domain".into(),
++                ));
++            }
++        }
++    }
++    Ok(())
+ }
+ 
+ fn set(key: &str, value: &str) {
+diff --git a/aether/src/engine_thread.rs b/aether/src/engine_thread.rs
+new file mode 100644
+--- /dev/null
++++ b/aether/src/engine_thread.rs
+@@ -0,0 +1,199 @@
++//! Construct and poll engine futures on a stack owned by the engine. Tokio's
++//! worker stack setting does not cover the thread calling Runtime::block_on.
++use std::future::Future;
++
++use crate::error::{AetherError, Result};
++
++pub const STACK_BYTES: usize = 8 * 1024 * 1024;
++
++fn runtime() -> Result<tokio::runtime::Runtime> {
++    tokio::runtime::Builder::new_multi_thread()
++        .thread_stack_size(STACK_BYTES)
++        .enable_all()
++        .build()
++        .map_err(AetherError::from)
++}
++
++/// `make` runs inside the new thread, including construction of its future.
++pub fn run<T, F, Fut>(make: F) -> Result<T>
++where
++    T: Send + 'static,
++    F: FnOnce() -> Fut + Send + 'static,
++    Fut: Future<Output = Result<T>>,
++{
++    std::thread::Builder::new()
++        .name("aether-engine".into())
++        .stack_size(STACK_BYTES)
++        .spawn(move || {
++            let runtime = runtime()?;
++            let result = runtime.block_on(Box::pin(make()));
++            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
++            result
++        })?
++        .join()
++        .map_err(|_| AetherError::Other("engine thread panicked".into()))?
++}
++
++/// Dropping the awaiting caller closes the channel, drops the root future and
++/// releases its sockets and runtime. No detached preparation survives cancel.
++pub async fn dispatch<T, F, Fut>(make: F) -> Result<T>
++where
++    T: Send + 'static,
++    F: FnOnce() -> Fut + Send + 'static,
++    Fut: Future<Output = Result<T>>,
++{
++    let upstream = crate::upstream::scoped();
++    let (mut reply, answer) = tokio::sync::oneshot::channel();
++    std::thread::Builder::new()
++        .name("aether-prepare".into())
++        .stack_size(STACK_BYTES)
++        .spawn(move || {
++            let result = match runtime() {
++                Ok(runtime) => runtime.block_on(Box::pin(async {
++                    let operation = async {
++                        match upstream {
++                            Some(proxy) => {
++                                crate::upstream::through(
++                                    proxy,
++                                    async move { Box::pin(make()).await },
++                                )
++                                .await
++                            }
++                            None => Box::pin(make()).await,
++                        }
++                    };
++                    tokio::select! {
++                        biased;
++                        _ = reply.closed() => return None,
++                        result = Box::pin(operation) => Some(result),
++                    }
++                })),
++                Err(error) => Some(Err(error)),
++            };
++            if let Some(result) = result {
++                let _ = reply.send(result);
++            }
++        })?;
++    answer
++        .await
++        .map_err(|_| AetherError::Other("engine preparation thread panicked".into()))?
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::{
++        atomic::{AtomicBool, Ordering},
++        Arc,
++    };
++
++    #[tokio::test]
++    async fn scoped_upstreams_survive_dispatch_and_remain_isolated() {
++        let _settings = crate::upstream::hold_setting().await;
++        let first = crate::upstream::Upstream::parse("socks5h://127.0.0.1:18001").unwrap();
++        let second = crate::upstream::Upstream::parse("socks5h://127.0.0.1:18002").unwrap();
++        let (a, b) = tokio::join!(
++            crate::upstream::through(
++                first.clone(),
++                dispatch(|| {
++                    let constructed_with = crate::upstream::configured();
++                    async move {
++                        assert_eq!(constructed_with, crate::upstream::configured());
++                        Ok(constructed_with)
++                    }
++                })
++            ),
++            crate::upstream::through(
++                second.clone(),
++                dispatch(|| async { Ok(crate::upstream::configured()) })
++            ),
++        );
++        assert_eq!(a.unwrap(), Some(first));
++        assert_eq!(b.unwrap(), Some(second));
++        assert!(crate::upstream::configured().is_none());
++    }
++
++    #[inline(never)]
++    fn stack_heavy() -> u64 {
++        let bytes = std::hint::black_box([7u8; 512 * 1024]);
++        bytes.iter().map(|byte| *byte as u64).sum()
++    }
++
++    #[test]
++    fn prepare_and_root_polling_are_safe_from_a_small_caller_stack() {
++        std::thread::Builder::new()
++            .stack_size(256 * 1024)
++            .spawn(|| {
++                assert_eq!(run(|| async { Ok(stack_heavy()) }).unwrap(), 7 * 512 * 1024);
++                let rt = tokio::runtime::Builder::new_current_thread()
++                    .enable_all()
++                    .build()
++                    .unwrap();
++                rt.block_on(async {
++                    let _settings = crate::upstream::hold_setting().await;
++                    let previous = std::env::var("AETHER_ENROLL_ADDRESS").ok();
++                    std::env::set_var("AETHER_ENROLL_ADDRESS", "https://invalid.example");
++                    let config = crate::EmbeddedConfig {
++                        config_path: "unused-small-stack-test.toml".into(),
++                        listen: "127.0.0.1:0".parse().unwrap(),
++                        peer: None,
++                        peer_fallback: false,
++                        scan_mode: "turbo".into(),
++                        ip_scan: "4".into(),
++                        protocol: "masque".into(),
++                        access: crate::socks::Access::default(),
++                    };
++                    let prepare = crate::prepare_embedded(&config);
++                    assert!(std::mem::size_of_val(&prepare) < 16 * 1024);
++                    // Real preparation stops at offline option validation, before
++                    // any public registration or endpoint probe is possible.
++                    assert!(matches!(Box::pin(prepare).await, Err(AetherError::Api(_))));
++                    match previous {
++                        Some(value) => std::env::set_var("AETHER_ENROLL_ADDRESS", value),
++                        None => std::env::remove_var("AETHER_ENROLL_ADDRESS"),
++                    }
++                    assert_eq!(
++                        dispatch(|| async {
++                            let root = stack_heavy();
++                            let worker = tokio::spawn(async { stack_heavy() }).await.unwrap();
++                            Ok(root + worker)
++                        })
++                        .await
++                        .unwrap(),
++                        14 * 512 * 1024
++                    );
++                });
++            })
++            .unwrap()
++            .join()
++            .unwrap();
++    }
++
++    #[tokio::test]
++    async fn cancellation_drops_the_operation_and_its_resources() {
++        struct Resource(Arc<AtomicBool>);
++        impl Drop for Resource {
++            fn drop(&mut self) {
++                self.0.store(true, Ordering::SeqCst);
++            }
++        }
++        let dropped = Arc::new(AtomicBool::new(false));
++        let flag = dropped.clone();
++        let (started, ready) = tokio::sync::oneshot::channel();
++        let operation = tokio::spawn(dispatch(move || async move {
++            let _resource = Resource(flag);
++            let _ = started.send(());
++            std::future::pending::<Result<()>>().await
++        }));
++        ready.await.unwrap();
++        operation.abort();
++        let _ = operation.await;
++        tokio::time::timeout(std::time::Duration::from_secs(3), async {
++            while !dropped.load(Ordering::SeqCst) {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .unwrap();
++    }
++}
+diff --git a/aether/src/fragment.rs b/aether/src/fragment.rs
+--- a/aether/src/fragment.rs
++++ b/aether/src/fragment.rs
+@@ -46,9 +46,11 @@
+         let size_min = size_min.max(1) as usize;
+         let size_max = (size_max.max(size_min as u64)) as usize;
+ 
+-        let sni_split = std::env::var("AETHER_MASQUE_H2_FRAGMENT_SNI")
+-            .map(|v| is_truthy(&v))
+-            .unwrap_or(true);
++        let sni_split = sni_split_setting(
++            std::env::var("AETHER_MASQUE_H2_FRAGMENT_SNI")
++                .ok()
++                .as_deref(),
++        );
+ 
+         Self {
+             enabled,
+@@ -151,6 +153,12 @@
+     }
+ 
+     None
++}
++
++/// On unless switched off: the split inside the server name is what asking
++/// for fragmentation is for.
++fn sni_split_setting(value: Option<&str>) -> bool {
++    value.map(is_truthy).unwrap_or(true)
+ }
+ 
+ pub struct FragmentingStream<S> {
+@@ -299,7 +307,7 @@
+ }
+ 
+ #[cfg(test)]
+-mod tests {
++mod desktop_split_tests {
+     use super::*;
+ 
+     fn client_hello(host: &str) -> Vec<u8> {
+@@ -461,3 +469,99 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn client_hello(host: &str) -> Vec<u8> {
++        let mut sni = vec![0x00];
++        sni.extend_from_slice(&(host.len() as u16).to_be_bytes());
++        sni.extend_from_slice(host.as_bytes());
++
++        let mut list = (sni.len() as u16).to_be_bytes().to_vec();
++        list.extend_from_slice(&sni);
++
++        let mut ext = vec![0x00, 0x00];
++        ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
++        ext.extend_from_slice(&list);
++
++        let mut body = vec![0x03, 0x03];
++        body.extend_from_slice(&[0u8; 32]);
++        body.push(0x00);
++        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
++        body.extend_from_slice(&[0x01, 0x00]);
++        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
++        body.extend_from_slice(&ext);
++
++        let mut handshake = vec![0x01];
++        handshake.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
++        handshake.extend_from_slice(&body);
++
++        let mut record = vec![0x16, 0x03, 0x01];
++        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
++        record.extend_from_slice(&handshake);
++        record
++    }
++
++    #[test]
++    fn the_server_name_is_located_inside_a_client_hello() {
++        let host = "api.cloudflareclient.com";
++        let hello = client_hello(host);
++        let (start, end) = sni_host_range(&hello).expect("the name is in there");
++        assert_eq!(&hello[start..end], host.as_bytes());
++    }
++
++    #[test]
++    fn a_split_lands_in_the_middle_of_the_server_name() {
++        let host = "api.cloudflareclient.com";
++        let hello = client_hello(host);
++        let (start, end) = sni_host_range(&hello).expect("the name is in there");
++        let split = start + (end - start) / 2;
++        assert!(split > start && split < end);
++    }
++
++    #[test]
++    fn anything_that_is_not_a_client_hello_is_left_alone() {
++        assert!(sni_host_range(b"").is_none());
++        assert!(sni_host_range(&[0x17, 0x03, 0x03, 0x00, 0x05, 0x01]).is_none());
++        let truncated = &client_hello("example.com")[..20];
++        assert!(sni_host_range(truncated).is_none());
++    }
++
++    #[test]
++    fn targeted_splitting_is_on_by_default_once_fragmenting_is_asked_for() {
++        assert!(!FragmentConfig::disabled().sni_split);
++    }
++
++    #[test]
++    fn the_server_name_split_is_on_unless_switched_off() {
++        assert!(sni_split_setting(None));
++        assert!(sni_split_setting(Some("1")));
++        assert!(!sni_split_setting(Some("0")));
++    }
++
++    #[tokio::test]
++    async fn the_first_write_of_a_client_hello_ends_inside_the_server_name() {
++        use tokio::io::AsyncWriteExt;
++
++        let hello = client_hello("api.cloudflareclient.com");
++        let (start, end) = sni_host_range(&hello).expect("the name is in there");
++        // Chunks far smaller than the distance to the name, so a write that
++        // ignored it could not end inside it by chance.
++        let cfg = FragmentConfig {
++            enabled: true,
++            size_min: 16,
++            size_max: 32,
++            delay_min_ms: 0,
++            delay_max_ms: 0,
++            sni_split: true,
++        };
++        let mut stream = FragmentingStream::new(Vec::new(), cfg);
++        let written = stream.write(&hello).await.unwrap();
++        assert!(
++            start < written && written < end,
++            "{start} < {written} < {end}"
++        );
++    }
++}
+diff --git a/aether/src/https.rs b/aether/src/https.rs
+--- a/aether/src/https.rs
++++ b/aether/src/https.rs
+@@ -162,7 +162,9 @@
+     };
+     // Nothing goes over a handshake that went without the key it was given.
+     if ech.is_some() && !tls.ssl().ech_accepted() {
+-        return Err(AetherError::Ech("the handshake went without ECH".into()));
++        return Err(AetherError::Ech(
++            "ECH_REJECTED: the handshake went without ECH".into(),
++        ));
+     }
+     Ok(tls)
+ }
+diff --git a/aether/src/identity.rs b/aether/src/identity.rs
+--- a/aether/src/identity.rs
++++ b/aether/src/identity.rs
+@@ -140,7 +140,7 @@
+     pub warp_enabled: bool,
+     /// Only registrations made by this build need activation. Legacy/imported
+     /// identities remain usable without another API call on every start.
+-    #[serde(default)]
++    #[serde(default, alias = "warp_activation_pending")]
+     pub activation_pending: bool,
+     #[serde(default)]
+     pub activation_retry_at: u64,
+@@ -724,9 +724,53 @@
+     config::write_private(store_path, &store.to_text()?)
+ }
+ 
++/// Desktop trials are separate processes. An in-process provisioning mutex
++/// cannot keep them from registering twice or overwriting a pending key.
++/// The OS releases this lock even when a losing sidecar is killed.
++pub async fn lock_store(store_path: &str) -> Result<std::fs::File> {
++    let path = std::path::PathBuf::from(format!("{store_path}.lock"));
++    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
++        std::fs::create_dir_all(parent)?;
++    }
++    let file = std::fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(path)?;
++    loop {
++        match file.try_lock() {
++            Ok(()) => return Ok(file),
++            Err(std::fs::TryLockError::WouldBlock) => {
++                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
++            }
++            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[tokio::test]
++    async fn sidecars_wait_for_the_same_store_and_cancel_without_retaining_the_lock() {
++        let dir = scratch("process-lock");
++        let path = dir.join("identity.toml").to_string_lossy().into_owned();
++        let first = lock_store(&path).await.unwrap();
++        assert!(
++            tokio::time::timeout(std::time::Duration::from_millis(100), lock_store(&path))
++                .await
++                .is_err()
++        );
++        drop(first);
++        let next = tokio::time::timeout(std::time::Duration::from_secs(1), lock_store(&path))
++            .await
++            .unwrap()
++            .unwrap();
++        drop(next);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
+ 
+     fn wireguard_device(token: &str) -> Device {
+         Device {
+@@ -1265,3 +1309,18 @@
+         assert_eq!(identity.assigned_endpoint, back.assigned_endpoint);
+     }
+ }
++
++#[cfg(test)]
++mod desktop_compatibility_tests {
++    use super::*;
++    #[test]
++    fn old_desktop_pending_activation_is_read_without_losing_the_identity() {
++        let original = device_from(&crate::account::handshake_identity(), 1);
++        let mut json = serde_json::to_value(&original).unwrap();
++        json.as_object_mut().unwrap().remove("activation_pending");
++        json["warp_activation_pending"] = true.into();
++        let device: Device = serde_json::from_value(json).unwrap();
++        assert!(device.activation_pending);
++        assert_eq!(device.access_token, original.access_token);
++    }
++}
+diff --git a/aether/src/lib.rs b/aether/src/lib.rs
+--- a/aether/src/lib.rs
++++ b/aether/src/lib.rs
+@@ -9,24 +9,24 @@
+ pub mod consts;
+ pub mod dns;
+ pub mod egress;
++pub mod engine_thread;
+ pub mod error;
+ // Upstream's own C API is deliberately not vendored. Nothing here calls it --
+ // native/android-bridge is this project's FFI and predates it -- and its
+ // spawn_job wrapper around run_with does not satisfy Send for our merged
+ // engine, so carrying it would mean carrying a build failure for an interface
+ // we do not ship.
+-pub mod exitloc;
+ pub mod fragment;
+ mod hello_shape;
+ pub mod https;
+ pub mod identity;
+ pub mod lastconn;
++mod listeners;
+ pub mod masque;
+ pub mod masque_h2;
+ pub mod netstack;
+ pub mod noize;
+ pub mod prober;
+-pub mod psiphon;
+ pub mod quic;
+ pub mod routing;
+ pub mod scan;
+@@ -140,14 +140,22 @@
+ 
+     install_netstack_panic_guard();
+ 
++    // Reporting modes answer a question and exit. They never open a tunnel, so
++    // they run before any of the connection setup below.
++    if let Some(command) = report_command() {
++        return run_report(command).await;
++    }
++
++    cli::check_network_options()?;
+     let listen: SocketAddr = std::env::var("AETHER_SOCKS")
+         .ok()
+         .and_then(|s| s.parse().ok())
+         .unwrap_or_else(|| "127.0.0.1:1819".parse().unwrap());
+ 
+-    drop(socks::bind_listener("socks5", listen).await?);
+-    drop(bind_http_proxy().await?);
+-
++    let socks_listener = socks::bind_listener("socks5", listen).await?;
++    let http_listener = bind_http_proxy().await?;
++
++    listeners::scope(socks_listener, listen, http_listener, http_proxy_listen(), async {
+     let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
+ 
+     if tor::mode() == tor::Mode::Only {
+@@ -302,6 +310,7 @@
+             run_mim(primary, secondary, ech, listen).await
+         }
+     }
++    }).await?
+ }
+ 
+ /// The port Cloudflare's WireGuard edges usually answer on. It is only ever
+@@ -831,6 +840,7 @@
+         let identity = config::parse(&text)?;
+         let pending = value
+             .get("activation_pending")
++            .or_else(|| value.get("warp_activation_pending"))
+             .and_then(toml::Value::as_bool)
+             .unwrap_or(false);
+         let retry_at = value
+@@ -996,6 +1006,12 @@
+ }
+ 
+ pub async fn prepare_embedded(config: &EmbeddedConfig) -> Result<EmbeddedPrepared> {
++    let config = config.clone();
++    engine_thread::dispatch(move || async move { Box::pin(prepare_embedded_inner(&config)).await })
++        .await
++}
++
++async fn prepare_embedded_inner(config: &EmbeddedConfig) -> Result<EmbeddedPrepared> {
+     tls::check_tls_options()?;
+     quic::masque_sni()?;
+     upstream::check_setting()?;
+@@ -1857,7 +1873,7 @@
+ ) -> Result<SocketAddr> {
+     if let Some(peer) = config.peer {
+         if peer_matches_ip_scan(peer, &config.ip_scan)
+-            && quick_verify_masque_peer(identity, peer, attempt_ech().await?).await
++            && quick_verify_masque_with_ech(identity, peer, attempt_ech().await?).await
+         {
+             return Ok(peer);
+         }
+@@ -1874,7 +1890,7 @@
+         .and_then(|value| value.parse::<SocketAddr>().ok())
+     {
+         if peer_matches_ip_scan(assigned, &config.ip_scan)
+-            && quick_verify_masque_peer(identity, assigned, attempt_ech().await?).await
++            && quick_verify_masque_with_ech(identity, assigned, attempt_ech().await?).await
+         {
+             return Ok(assigned);
+         }
+@@ -1891,7 +1907,7 @@
+         for cached in candidates {
+             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
+                 if peer_matches_ip_scan(peer, &config.ip_scan)
+-                    && quick_verify_masque_peer(identity, peer, attempt_ech().await?).await
++                    && quick_verify_masque_with_ech(identity, peer, attempt_ech().await?).await
+                 {
+                     return Ok(peer);
+                 }
+@@ -1915,7 +1931,7 @@
+     // refused every protocol.
+     if let Some(peer) = stored_masque_peer(identity) {
+         if peer_matches_ip_scan(peer, &config.ip_scan)
+-            && quick_verify_masque_peer(identity, peer, attempt_ech().await?).await
++            && quick_verify_masque_with_ech(identity, peer, attempt_ech().await?).await
+         {
+             return Ok(peer);
+         }
+@@ -1927,7 +1943,7 @@
+             continue;
+         }
+         if peer_matches_ip_scan(peer, &config.ip_scan)
+-            && quick_verify_masque_peer(identity, peer, attempt_ech().await?).await
++            && quick_verify_masque_with_ech(identity, peer, attempt_ech().await?).await
+         {
+             log::info!("[+] the endpoint Cloudflare assigned this device answered: {peer}");
+             return Ok(peer);
+@@ -2039,6 +2055,7 @@
+ 
+ async fn persist_masque_profile(site: &IdentitySite, identity: &account::Identity) -> Result<()> {
+     let _provisioning = provisioning_lock().lock().await;
++    let _store_lock = identity::lock_store(&site.store_path).await?;
+     let mut loaded = identity::load(&site.store_path, &site.legacy)?;
+     // A late result must not replace a different identity installed meanwhile.
+     if loaded.store.device_id(site.slot) == Some(identity.device_id.as_str()) {
+@@ -2449,6 +2466,7 @@
+         outer_peer = Some(peer);
+         inner_peer = Some(inner_peer_now);
+ 
++        let started = Instant::now();
+         match run_warp_in_warp(
+             primary.clone(),
+             secondary.clone(),
+@@ -2461,7 +2479,7 @@
+             Ok(()) => log::warn!("[-] gool tunnel closed; reconnecting"),
+             Err(e) => log::warn!("[-] gool tunnel ended: {e}; reconnecting"),
+         }
+-        consecutive_fails += 1;
++        consecutive_fails = count_tunnel_end(consecutive_fails, started.elapsed());
+ 
+         tokio::time::sleep(wg_reconnect_delay()).await;
+     }
+@@ -2976,7 +2994,23 @@
+             wait: device.activation_retry_at - now,
+         });
+     }
++    let through_proxy = upstream::configured().is_some();
++    registration_may_go(store, through_proxy, now)?;
+     if let Err(error) = account::enable_warp(&identity.device_id, &identity.access_token).await {
++        let refused = matches!(error, AetherError::IdentityRefused(_)) && keep_saved_identity();
++        if refused {
++            if let Some(device) = store.device_mut(&identity.device_id) {
++                device.refused_at = now;
++            }
++        }
++        if refused || matches!(error, AetherError::RateLimited { .. }) {
++            store.registration_budget(through_proxy).failed(
++                now,
++                &error.to_string(),
++                error.retry_after(),
++            );
++            identity::save(&site.store_path, store)?;
++        }
+         if let AetherError::RateLimited { retry_after, .. } = &error {
+             if let Some(device) = store.device_mut(&identity.device_id) {
+                 device.activation_retry_at = now.saturating_add(retry_after.unwrap_or(60).max(1));
+@@ -2996,6 +3030,7 @@
+ 
+ async fn load_or_provision_warp(site: &IdentitySite) -> Result<account::Identity> {
+     let _provisioning = provisioning_lock().lock().await;
++    let _store_lock = identity::lock_store(&site.store_path).await?;
+     let mut loaded = identity::load(&site.store_path, &site.legacy)?;
+ 
+     if let Some((id, device)) = loaded.store.take_usable(site.slot) {
+@@ -3041,6 +3076,11 @@
+     );
+     Ok(identity)
+ }
++
++/// Save registration and the remaining activation step before another await.
++
++/// The caller holds both provisioning and OS store locks. An interrupted or
++/// refused activation retains the registration and resumes this idempotent step.
+ 
+ fn pending_enrollment_key(store: &identity::Store, id: &str) -> Result<account::MasqueKeyPair> {
+     let pending = store
+@@ -3094,7 +3134,22 @@
+     }
+     identity::save(&site.store_path, store)?;
+ 
+-    let enrollment = account::ensure_masque_enrolled_with_key(&identity, Some(pair)).await?;
++    let through_proxy = upstream::configured().is_some();
++    registration_may_go(store, through_proxy, account::now_unix())?;
++    let enrollment = match account::ensure_masque_enrolled_with_key(&identity, Some(pair)).await {
++        Ok(enrollment) => enrollment,
++        Err(error) => {
++            if matches!(error, AetherError::RateLimited { .. }) {
++                store.registration_budget(through_proxy).failed(
++                    account::now_unix(),
++                    &error.to_string(),
++                    error.retry_after(),
++                );
++                identity::save(&site.store_path, store)?;
++            }
++            return Err(error);
++        }
++    };
+     let identity = enrollment.apply(identity);
+     let identity = adopt_team_profile(identity).await;
+     record(store, site, &identity)?;
+@@ -3108,6 +3163,7 @@
+ 
+ async fn load_or_provision_masque(site: &IdentitySite) -> Result<account::Identity> {
+     let _provisioning = provisioning_lock().lock().await;
++    let _store_lock = identity::lock_store(&site.store_path).await?;
+     let mut loaded = identity::load(&site.store_path, &site.legacy)?;
+ 
+     if let Some((id, device)) = loaded.store.take_usable(site.slot) {
+@@ -3200,6 +3256,26 @@
+ 
+     match protocol {
+         Protocol::Masque | Protocol::MasqueInMasque | Protocol::WireGuardOverMasque => {
++            // The address Cloudflare assigned this device, before hunting for
++            // one. `select_embedded_peer` has done this since the assigned
++            // endpoint was found to be the answer the server had been giving
++            // all along -- but that is the path the Android client calls into,
++            // and the desktop client runs this binary, so it went on
++            // brute-forcing a hard-coded pool while holding the answer.
++            //
++            // Both candidates, and in order: the endpoint stored locally, then
++            // the one on a freshly fetched device record. Cloudflare moves a
++            // device between edges, so the stored one goes stale -- measured on
++            // one account minutes apart, registration said 162.159.192.x and the
++            // device record said 162.159.198.x.
++            for peer in assigned_masque_peers(identity).await {
++                if quick_verify_masque_peer(identity, peer).await {
++                    log::info!("[+] the endpoint Cloudflare assigned this device answered: {peer}");
++                    return Ok(peer);
++                }
++                log::info!("[-] the assigned endpoint {peer} did not answer; hunting instead");
++            }
++
+             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
+             let mode = prober::ScanMode::parse(&mode_str);
+             let probe = prober::MasqueProbe {
+@@ -3363,7 +3439,7 @@
+     CACHED.get_or_init(|| tokio::sync::Mutex::new(None))
+ }
+ 
+-/// Retain a server's retry key for later Android attempts with the same policy.
++/// Retain a server's retry key for later connection attempts with the same policy.
+ /// A nonblocking lock avoids reversing the cache/TLS lock order during probes.
+ pub(crate) fn remember_ech_retry(retry: &[u8]) {
+     if let Ok(mut cache) = ech_cache().try_lock() {
+@@ -3384,35 +3460,10 @@
+     tls::use_ech(None);
+ }
+ 
+-/// Whether ECH is a requirement rather than a preference.
+-///
+-/// `off` (or unset) never asks for one; `auto` asks and carries on without when
+-/// the answer does not come; `require` refuses to connect instead. The third is
+-/// the only one that keeps a promise: without it a resolver that quietly fails
+-/// downgrades a user who asked for their SNI to be hidden, and tells them
+-/// nothing.
+-fn ech_required() -> bool {
+-    matches!(
+-        std::env::var("AETHER_ECH").as_deref(),
+-        Ok(v) if v.eq_ignore_ascii_case("require")
+-    )
+-}
+-
+-/// Fails when ECH was required and could not be had.
+-///
+-/// Checked once, where a connect begins, rather than at each of the places that
+-/// would otherwise carry on regardless.
++/// `auto`, legacy `require`, and a manual key all require offerable ECH.
++/// Lookup or handshake failure cannot turn an ECH attempt into plaintext SNI.
+ pub async fn ech_policy_satisfied() -> Result<()> {
+-    if !ech_required() || attempt_ech().await?.is_some() {
+-        return Ok(());
+-    }
+-    Err(AetherError::Ech(if masque_h2::enabled() {
+-        "ECH was required, and the HTTP/2 framing does not carry it; choose H3 or set          AETHER_ECH=auto"
+-            .into()
+-    } else {
+-        "ECH was required and no ECHConfigList could be resolved; refusing to send the SNI in          cleartext"
+-            .into()
+-    }))
++    attempt_ech().await.map(|_| ())
+ }
+ 
+ /// The shape this attempt is being made with.
+@@ -3596,18 +3647,201 @@
+     std::time::Duration::from_secs(secs)
+ }
+ 
++/// A question about gateways, asked without connecting to one.
++///
++/// A client that only spawns the binary can start a tunnel and read the log,
++/// but it cannot offer an endpoint picker: there is no way to ask which
++/// gateways are reachable, how fast each one is, or whether one specific
++/// address works, short of committing to a connection and watching what
++/// happens.
++enum ReportCommand {
++    Provision,
++    /// Rank reachable gateways by round-trip time.
++    Scan {
++        limit: usize,
++    },
++    /// Validate one gateway with a real authenticated handshake.
++    Test {
++        peer: Option<SocketAddr>,
++    },
++    /// Every account this install holds, in the backup format.
++    ExportIdentity,
++    /// Restore a backup from this file.
++    ImportIdentity {
++        path: String,
++    },
++}
++
++fn report_command() -> Option<ReportCommand> {
++    if std::env::var("AETHER_PROVISION_ONLY").is_ok() {
++        return Some(ReportCommand::Provision);
++    }
++    if let Ok(path) = std::env::var("AETHER_IMPORT_IDENTITY") {
++        return Some(ReportCommand::ImportIdentity { path });
++    }
++    if std::env::var("AETHER_EXPORT_IDENTITY").is_ok() {
++        return Some(ReportCommand::ExportIdentity);
++    }
++    if let Ok(value) = std::env::var("AETHER_TEST_ENDPOINT") {
++        // A bad address is still answered in the reporting shape rather than
++        // falling through into a connection attempt.
++        return Some(ReportCommand::Test {
++            peer: value.parse::<SocketAddr>().ok(),
++        });
++    }
++    if std::env::var("AETHER_SCAN_ONLY").is_err() {
++        return None;
++    }
++    let limit = std::env::var("AETHER_SCAN_LIMIT")
++        .ok()
++        .and_then(|value| value.parse::<usize>().ok())
++        .filter(|count| (1..=64).contains(count))
++        .unwrap_or(8);
++    Some(ReportCommand::Scan { limit })
++}
++
++/// Writes exactly one JSON object to stdout and exits successfully, whether the
++/// answer is a list of gateways or a failure. Logs go to stderr, so a caller can
++/// parse stdout without filtering it.
++async fn run_report(command: ReportCommand) -> Result<()> {
++    let report = match report_answer(command).await {
++        Ok(value) => value,
++        Err(error) => serde_json::json!({"ok": false, "error": error.to_string()}),
++    };
++    println!("{report}");
++    Ok(())
++}
++
++async fn report_answer(command: ReportCommand) -> Result<serde_json::Value> {
++    if matches!(
++        command,
++        ReportCommand::Provision | ReportCommand::Scan { .. } | ReportCommand::Test { .. }
++    ) {
++        cli::check_network_options()?;
++    }
++    let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
++
++    // Answered before anything below can provision: a backup that registered a
++    // device to have something to back up would spend the very registration it
++    // exists to save.
++    match &command {
++        ReportCommand::ExportIdentity => {
++            return Ok(
++                serde_json::json!({ "ok": true, "payload": export_identity(&base_config)? }),
++            );
++        }
++        ReportCommand::ImportIdentity { path } => {
++            let payload = std::fs::read_to_string(path)
++                .map_err(|e| AetherError::Other(format!("cannot read the identity file: {e}")))?;
++            import_identity(&base_config, &payload)?;
++            return Ok(serde_json::json!({ "ok": true }));
++        }
++        _ => {}
++    }
++    let _ech_session = tls::EchSession::start(attempt_ech().await?);
++    // Through the identity store, as every other caller now does. This asked
++    // for a bare path, which was the whole interface before the store existed.
++    let identity =
++        load_or_provision_masque(&identity_site(&base_config, identity::Slot::Masque)).await?;
++
++    match command {
++        ReportCommand::Provision => Ok(serde_json::json!({"ok": true})),
++        ReportCommand::Scan { limit } => {
++            let mut request = api::ScanRequest::for_transport(api::Transport::Masque)
++                .with_mode(&std::env::var("AETHER_SCAN").unwrap_or_else(|_| "balanced".into()))
++                .with_ip(prober::IpScan::parse(
++                    &std::env::var("AETHER_IP").unwrap_or_else(|_| "v4".into()),
++                ))
++                .with_profile(&std::env::var("AETHER_NOIZE").unwrap_or_else(|_| "firewall".into()));
++            request.ech_config_list = attempt_ech().await?;
++            let found = api::scan_ranked(&identity, &request, limit, &api::Cancel::new()).await?;
++            Ok(serde_json::json!({
++                "ok": true,
++                "results": found
++                    .iter()
++                    .map(|endpoint| serde_json::json!({
++                        "peer": endpoint.socket().to_string(),
++                        "rttMs": endpoint.rtt_ms,
++                    }))
++                    .collect::<Vec<_>>(),
++            }))
++        }
++        ReportCommand::Test { peer: None } => Err(AetherError::Other(
++            "the endpoint must be a numeric address and port".into(),
++        )),
++        ReportCommand::Test { peer: Some(peer) } => {
++            // Timed here rather than inside the verifier: what the caller is
++            // being told is how long a real authenticated handshake took, which
++            // is the only number that means anything for this address.
++            let started = Instant::now();
++            if std::env::var("AETHER_SCAN").as_deref() == Ok("ironclad") {
++                let probe = masque_probe(
++                    &identity,
++                    prober::IpScan::parse(
++                        &std::env::var("AETHER_IP").unwrap_or_else(|_| "both".into()),
++                    ),
++                )
++                .await?;
++                prober::verify_gateway_traffic(&probe, peer).await?;
++            } else {
++                verify_masque_peer(&identity, peer).await?;
++            }
++            Ok(serde_json::json!({
++                "ok": true,
++                "peer": peer.to_string(),
++                "rttMs": started.elapsed().as_millis() as u64,
++            }))
++        }
++        // Both answered above, before an identity could be provisioned.
++        ReportCommand::ExportIdentity | ReportCommand::ImportIdentity { .. } => Err(
++            AetherError::Other("identity commands are answered first".into()),
++        ),
++    }
++}
++
+ async fn hunt_masque_peer(
+     identity: &account::Identity,
+     mode_str: &str,
+     ip: prober::IpScan,
+ ) -> Result<SocketAddr> {
++    hunt_masque_peer_excluding(identity, mode_str, ip, &HashSet::new()).await
++}
++
++async fn hunt_masque_peer_excluding(
++    identity: &account::Identity,
++    mode_str: &str,
++    ip: prober::IpScan,
++    avoid: &HashSet<IpAddr>,
++) -> Result<SocketAddr> {
++    // The address Cloudflare assigned this device, before hunting for one.
++    //
++    // `select_embedded_peer` has done this since the assigned endpoint turned
++    // out to be the answer the server had been giving all along -- but that is
++    // the path the Android client calls into, and the desktop client runs this
++    // binary, which arrives here. So it went on brute-forcing a hard-coded pool
++    // while holding the answer: 2,572 candidates against one address the
++    // registration response had already named.
++    //
++    // Both candidates, in order: the endpoint stored locally, then the one on a
++    // freshly fetched device record. Cloudflare moves a device between edges,
++    // so the stored one goes stale -- measured on one account minutes apart,
++    // registration said 162.159.192.x while the device record said
++    // 162.159.198.x, and only the second answered.
++    for peer in assigned_masque_peers(identity).await {
++        if !avoid.contains(&peer.ip()) && quick_verify_masque_peer(identity, peer).await {
++            log::info!("[+] the endpoint Cloudflare assigned this device answered: {peer}");
++            return Ok(peer);
++        }
++        log::info!("[-] the assigned endpoint {peer} did not answer; hunting instead");
++    }
++
+     log::info!(
+         "[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)"
+     );
+     let mode = prober::ScanMode::parse(mode_str);
+     let probe = masque_probe(identity, ip).await?;
+ 
+-    let best = prober::hunt_best_gateway(&probe, mode).await?;
++    let best = prober::hunt_best_gateway_avoiding(&probe, mode, avoid).await?;
+     log::info!(
+         "[+] selected MASQUE gateway {}:{} (rtt {:?})",
+         best.ip,
+@@ -3651,10 +3885,34 @@
+ /// `aether-masque-lastconn.toml` -- so nobody loses a remembered endpoint and
+ /// re-scans on the first connect after updating.
+ fn lastconn_path(config_path: &str) -> String {
+-    derive_sibling_path(config_path, "lastconn")
+-}
+-
+-async fn quick_verify_masque_peer(
++    match std::env::var("AETHER_NETWORK_KEY").ok().as_deref() {
++        None => derive_sibling_path(config_path, "lastconn"),
++        Some("unknown") => {
++            static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++            let nonce = NONCE.get_or_init(|| hex::encode(rand::random::<[u8; 16]>()));
++            derive_sibling_path(config_path, &format!("lastconn-unknown-{nonce}"))
++        }
++        Some(network) => {
++            let hash = ring::digest::digest(&ring::digest::SHA256, network.as_bytes());
++            derive_sibling_path(
++                config_path,
++                &format!("lastconn-{}", hex::encode(&hash.as_ref()[..12])),
++            )
++        }
++    }
++}
++
++async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
++    match attempt_ech().await {
++        Ok(ech) => quick_verify_masque_with_ech(identity, peer, ech).await,
++        Err(error) => {
++            log::warn!("endpoint ECH validation refused: {error}");
++            false
++        }
++    }
++}
++
++async fn quick_verify_masque_with_ech(
+     identity: &account::Identity,
+     peer: SocketAddr,
+     ech: Option<Vec<u8>>,
+@@ -3755,6 +4013,7 @@
+     listen: SocketAddr,
+     lastconn_path: String,
+ ) -> Result<()> {
++    let _ech_session = tls::EchSession::start(ech);
+     let forced = std::env::var("AETHER_PEER").ok();
+ 
+     let mut quick_peer: Option<SocketAddr> = None;
+@@ -3765,7 +4024,7 @@
+             .and_then(|value| value.parse::<SocketAddr>().ok())
+         {
+             log::info!("[*] verifying the endpoint the organization assigned: {assigned}");
+-            if quick_verify_masque_peer(&identity, assigned, attempt_ech().await?).await {
++            if quick_verify_masque_with_ech(&identity, assigned, attempt_ech().await?).await {
+                 log::info!("[+] the assigned endpoint {assigned} works; skipping the scan");
+                 quick_peer = Some(assigned);
+             } else {
+@@ -3782,7 +4041,8 @@
+                 if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
+                     if want_quick_reconnect(&cached).await {
+                         log::info!("[*] verifying cached gateway {peer} before reuse");
+-                        if quick_verify_masque_peer(&identity, peer, attempt_ech().await?).await {
++                        if quick_verify_masque_with_ech(&identity, peer, attempt_ech().await?).await
++                        {
+                             log::info!("[+] cached gateway {peer} still works; skipping scan");
+                             quick_peer = Some(peer);
+                             break;
+@@ -3804,15 +4064,24 @@
+     };
+ 
+     let mut last_good_peer: Option<SocketAddr> = None;
++    let mut strikes = GatewayStrikes::default();
+ 
+     loop {
++        if forced.is_none()
++            && strikes
++                .give_up(Instant::now(), MASQUE_GATEWAY_REST)
++                .is_some()
++        {
++            last_good_peer = None;
++            quick_peer = None;
++        }
+         let peer = if let Some(p) = quick_peer.take() {
+             p
+         } else {
+             let retried = match last_good_peer {
+                 Some(p) => {
+                     log::info!("[*] retrying last known-good gateway {p} before rescanning");
+-                    if quick_verify_masque_peer(&identity, p, attempt_ech().await?).await {
++                    if quick_verify_masque_with_ech(&identity, p, attempt_ech().await?).await {
+                         Some(p)
+                     } else {
+                         log::warn!(
+@@ -3834,7 +4103,14 @@
+                         }
+                         Err(_) => return Err(AetherError::Other(format!("bad peer address {p}"))),
+                     },
+-                    None => match hunt_masque_peer(&identity, &mode_str, ip).await {
++                    None => match hunt_masque_peer_excluding(
++                        &identity,
++                        &mode_str,
++                        ip,
++                        &strikes.left_out(Instant::now()),
++                    )
++                    .await
++                    {
+                         Ok(peer) => peer,
+                         Err(e) => {
+                             log::warn!(
+@@ -3852,24 +4128,91 @@
+ 
+         last_good_peer = Some(peer);
+ 
+-        // Recorded after the session, not before it. A tunnel that closes
+-        // having carried traffic returns Ok; one that never established
+-        // returns an error naming why, which is not a memory worth keeping.
+-        match run_masque_tunnel(&identity, peer, ech.clone(), listen).await {
++        strikes.using(peer);
++        let started = Instant::now();
++        let memory = forced
++            .is_none()
++            .then(|| (lastconn_path.clone(), attempt_proof(masque_framing())));
++        match run_masque_tunnel(&identity, peer, attempt_ech().await?, listen, memory).await {
+             Ok(()) => {
+-                if forced.is_none() {
+-                    lastconn::save(
+-                        &lastconn_path,
+-                        &peer.to_string(),
+-                        &attempt_proof(masque_framing()),
+-                    );
+-                }
+                 log::warn!("[-] MASQUE tunnel closed; reconnecting");
+             }
+             Err(e) => log::warn!("[-] MASQUE tunnel ended: {e}; reconnecting"),
+         }
+ 
++        strikes.ended(started.elapsed());
+         tokio::time::sleep(masque_reconnect_delay()).await;
++    }
++}
++
++/// How long a tunnel has to stay up for its end not to count against the MASQUE gateways or
++/// WireGuard endpoints it went through: one that carried the traffic this long proves them good,
++/// so its end, a network change say, clears the ends counted before it. Only tunnels that end
++/// sooner, one after another, make a run leave a gateway or an endpoint: the MASQUE run (gool over
++/// masque too), the WireGuard run, the classic gool run and the masque-in-masque run alike.
++const TUNNEL_STAYED_UP: std::time::Duration = std::time::Duration::from_secs(300);
++
++/// The ends in a row of the tunnels through one gateway or endpoint, `in_a_row` before, after one
++/// more that `lasted` this long: one more, or none once that tunnel stayed up [`TUNNEL_STAYED_UP`].
++fn count_tunnel_end(in_a_row: u32, lasted: std::time::Duration) -> u32 {
++    if lasted >= TUNNEL_STAYED_UP {
++        0
++    } else {
++        in_a_row.saturating_add(1)
++    }
++}
++
++/// How many times in a row the tunnel through a MASQUE gateway may end, each time sooner than
++/// [`TUNNEL_STAYED_UP`], before the run leaves the gateway, as the WireGuard run leaves an endpoint.
++const MASQUE_GATEWAY_STRIKES: u32 = 2;
++
++/// How long a MASQUE gateway the run left stays out of its scans: as long as a WireGuard endpoint
++/// by default (`wg_endpoint_cooldown`).
++const MASQUE_GATEWAY_REST: std::time::Duration = std::time::Duration::from_secs(300);
++
++/// The gateways that failed a MASQUE run: the one in use, how many times in a row its tunnel
++/// ended soon after it started, and those left out of the scans until a while has passed. The
++/// check before a reconnect only proves that a gateway answers, so a tunnel that ends every time,
++/// as it does on an exit the exit rule refuses, would otherwise hold the run on one gateway for
++/// good.
++#[derive(Debug, Default)]
++struct GatewayStrikes {
++    current: Option<SocketAddr>,
++    in_a_row: u32,
++    resting: HashMap<IpAddr, Instant>,
++}
++
++impl GatewayStrikes {
++    /// The tunnel goes through `peer` now; another gateway than the last starts with none.
++    fn using(&mut self, peer: SocketAddr) {
++        if self.current != Some(peer) {
++            self.current = Some(peer);
++            self.in_a_row = 0;
++        }
++    }
++
++    /// The tunnel through the gateway in use ended, for whatever reason, after it `lasted` this
++    /// long, see [`count_tunnel_end`].
++    fn ended(&mut self, lasted: std::time::Duration) {
++        self.in_a_row = count_tunnel_end(self.in_a_row, lasted);
++    }
++
++    /// The gateway in use, once its tunnel ended `MASQUE_GATEWAY_STRIKES` times in a row: its
++    /// address rests until `rest` after `now`, out of the scans, and the count starts over.
++    fn give_up(&mut self, now: Instant, rest: std::time::Duration) -> Option<SocketAddr> {
++        if self.in_a_row < MASQUE_GATEWAY_STRIKES {
++            return None;
++        }
++        self.in_a_row = 0;
++        let peer = self.current.take()?;
++        self.resting.insert(peer.ip(), now + rest);
++        Some(peer)
++    }
++
++    /// The addresses the scans leave out at `now`.
++    fn left_out(&mut self, now: Instant) -> HashSet<IpAddr> {
++        self.resting.retain(|_, until| *until > now);
++        self.resting.keys().copied().collect()
+     }
+ }
+ 
+@@ -4003,6 +4346,7 @@
+     peer: SocketAddr,
+     ech: Option<Vec<u8>>,
+     listen: SocketAddr,
++    memory: Option<(String, lastconn::Proof)>,
+ ) -> Result<()> {
+     let h2 = masque_h2::enabled();
+     let dial = if h2 { masque_h2::h2_peer(peer) } else { peer };
+@@ -4023,6 +4367,11 @@
+ 
+     let socks_listener = socks::bind_listener("socks5", listen).await?;
+     let http_listener = bind_http_proxy().await?;
++
++    // establish_masque has confirmed the data plane; both listeners bound.
++    if let Some((path, proof)) = memory {
++        lastconn::save(&path, &peer.to_string(), &proof);
++    }
+ 
+     let mut tasks = TaskGuard::new();
+ 
+@@ -4464,6 +4813,7 @@
+     ech: Option<Vec<u8>>,
+     listen: SocketAddr,
+ ) -> Result<()> {
++    let _ech_session = tls::EchSession::start(ech);
+     let pinned = mim_endpoints_from_env()?;
+ 
+     match (pinned.outer, pinned.inner) {
+@@ -4549,12 +4899,13 @@
+ 
+         outer_peer = Some(outer);
+ 
++        let started = Instant::now();
+         match run_masque_in_masque(
+             &primary,
+             &secondary,
+             outer,
+             &candidates,
+-            ech.clone(),
++            attempt_ech().await?,
+             listen,
+         )
+         .await
+@@ -4562,7 +4913,7 @@
+             Ok(()) => log::warn!("[-] masque-in-masque tunnel closed; reconnecting"),
+             Err(e) => log::warn!("[-] masque-in-masque tunnel ended: {e}; reconnecting"),
+         }
+-        consecutive_fails += 1;
++        consecutive_fails = count_tunnel_end(consecutive_fails, started.elapsed());
+ 
+         tokio::time::sleep(masque_reconnect_delay()).await;
+     }
+@@ -5119,27 +5470,26 @@
+         let remembered_profile = profile_name.clone();
+         last_good = Some((peer, profile.clone(), profile_name));
+ 
+-        match run_wireguard_tunnel(identity.clone(), peer, profile, listen).await {
++        let memory = forced.is_none().then(|| {
++            (
++                lastconn_path.clone(),
++                lastconn::Proof {
++                    profile: remembered_profile,
++                    ..attempt_proof("wg")
++                },
++            )
++        });
++        let started = Instant::now();
++        match run_wireguard_tunnel(identity.clone(), peer, profile, listen, memory).await {
+             Ok(()) => {
+-                if forced.is_none() {
+-                    lastconn::save(
+-                        &lastconn_path,
+-                        &peer.to_string(),
+-                        &lastconn::Proof {
+-                            profile: remembered_profile,
+-                            ..attempt_proof("wg")
+-                        },
+-                    );
+-                }
+                 log::warn!("[-] WireGuard tunnel closed; reconnecting");
+-                consecutive_fails_on_peer += 1;
+             }
+             Err(e) => {
+                 log::warn!("[-] WireGuard tunnel ended: {e}; reconnecting");
+-                consecutive_fails_on_peer += 1;
+             }
+         }
+ 
++        consecutive_fails_on_peer = count_tunnel_end(consecutive_fails_on_peer, started.elapsed());
+         tokio::time::sleep(wg_reconnect_delay()).await;
+     }
+ }
+@@ -5159,6 +5509,7 @@
+     peer: SocketAddr,
+     aethernoize: aethernoize::AetherNoizeConfig,
+     listen: SocketAddr,
++    memory: Option<(String, lastconn::Proof)>,
+ ) -> Result<()> {
+     let private_key = identity.private_key_bytes()?;
+     let peer_public = identity.peer_public_key_bytes()?;
+@@ -5204,6 +5555,11 @@
+ 
+     let socks_listener = socks::bind_listener("socks5", listen).await?;
+     let http_listener = bind_http_proxy().await?;
++
++    // verify_endpoint_keep_session proved traffic; record before serving it.
++    if let Some((path, proof)) = memory {
++        lastconn::save(&path, &peer.to_string(), &proof);
++    }
+ 
+     let socks_stack = stack.clone();
+     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
+@@ -5384,6 +5740,13 @@
+     }
+ }
+ 
++/// Points replies at whichever address last sent, and returns the one it
++/// moved from, if it moved.
++fn follow_sender(known: &mut Option<SocketAddr>, from: SocketAddr) -> Option<SocketAddr> {
++    let previous = known.replace(from);
++    previous.filter(|previous| *previous != from)
++}
++
+ async fn spawn_udp_forwarder(
+     outer: &netstack::StackHandle,
+     remote: SocketAddr,
+@@ -5406,14 +5769,8 @@
+         // used dropped everything after the move and killed the tunnel, so
+         // replies follow whichever port it last sent from.
+         while let Ok((n, from)) = up_sock.recv_from(&mut buf).await {
+-            {
+-                let mut known = up_peer.lock().await;
+-                if *known != Some(from) {
+-                    if let Some(previous) = *known {
+-                        log::debug!("inner udp forwarder follows {from} now, was {previous}");
+-                    }
+-                    *known = Some(from);
+-                }
++            if let Some(previous) = follow_sender(&mut *up_peer.lock().await, from) {
++                log::debug!("inner udp forwarder follows {from} now, was {previous}");
+             }
+             if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
+                 break;
+@@ -5757,6 +6114,26 @@
+ #[cfg(test)]
+ mod identity_tests {
+     use super::*;
++
++    #[tokio::test]
++    async fn desktop_endpoint_memory_is_scoped_without_moving_the_identity() {
++        let _settings = crate::upstream::hold_setting().await;
++        let config = "/identity/aether-masque.toml";
++        let previous = std::env::var("AETHER_NETWORK_KEY").ok();
++        std::env::remove_var("AETHER_NETWORK_KEY");
++        let legacy = lastconn_path(config);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-one");
++        let first = lastconn_path(config);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-two");
++        assert_ne!(first, lastconn_path(config));
++        assert_ne!(first, legacy);
++        std::env::set_var("AETHER_NETWORK_KEY", "network-one");
++        assert_eq!(first, lastconn_path(config));
++        match previous {
++            Some(value) => std::env::set_var("AETHER_NETWORK_KEY", value),
++            None => std::env::remove_var("AETHER_NETWORK_KEY"),
++        }
++    }
+ 
+     /// Clears the environment these paths read, so a developer's own settings
+     /// cannot decide whether the suite passes.
+@@ -5800,11 +6177,249 @@
+         }
+     }
+ 
++    #[test]
++    fn short_tunnels_rotate_a_gateway_but_long_connections_reset_its_strikes() {
++        use std::time::Duration;
++        let peer = "203.0.113.9:443".parse().unwrap();
++        let mut strikes = GatewayStrikes::default();
++        strikes.using(peer);
++        strikes.ended(Duration::from_secs(1));
++        assert!(strikes
++            .give_up(Instant::now(), MASQUE_GATEWAY_REST)
++            .is_none());
++        strikes.ended(Duration::from_secs(300));
++        assert!(strikes
++            .give_up(Instant::now(), MASQUE_GATEWAY_REST)
++            .is_none());
++        strikes.ended(Duration::from_secs(1));
++        strikes.ended(Duration::from_secs(1));
++        let now = Instant::now();
++        assert_eq!(strikes.give_up(now, MASQUE_GATEWAY_REST), Some(peer));
++        assert!(strikes.left_out(now).contains(&peer.ip()));
++        assert!(strikes.left_out(now + MASQUE_GATEWAY_REST).is_empty());
++        assert_eq!(count_tunnel_end(1, Duration::from_secs(3600)), 0);
++    }
++
++    #[tokio::test]
++    async fn interrupted_activation_resumes_the_saved_identity_and_finishes_once() {
++        let _proxy = upstream::hold_setting().await;
++        let _options = tls::hold_options().await;
++        let dir = scratch("activation-resume");
++        let site = identity_site(
++            dir.join("aether.toml").to_str().unwrap(),
++            identity::Slot::Wireguard,
++        );
++        let identity = wireguard_identity("activation-device");
++        let mut store = identity::Store::default();
++        record_registration(&mut store, &site, &identity).unwrap();
++        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        std::env::set_var(
++            "AETHER_ENROLL_ADDRESS",
++            stalled.local_addr().unwrap().to_string(),
++        );
++        assert!(tokio::time::timeout(
++            std::time::Duration::from_millis(100),
++            load_or_provision_warp(&site)
++        )
++        .await
++        .is_err());
++        let saved = identity::load(&site.store_path, &site.legacy).unwrap();
++        assert_eq!(saved.store.ids().count(), 1);
++        assert!(
++            saved
++                .store
++                .device("activation-device")
++                .unwrap()
++                .activation_pending
++        );
++        drop(stalled);
++
++        let (address, listener, acceptor) = https::test_server(b"\x02h2").await;
++        std::env::set_var("AETHER_ENROLL_ADDRESS", address.to_string());
++        let api = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let tls = tokio_boring::accept(&acceptor, tcp).await.unwrap();
++            let mut h2 = h2::server::handshake(tls).await.unwrap();
++            let (mut request, mut reply) = h2.accept().await.unwrap().unwrap();
++            assert_eq!(request.method(), "PATCH");
++            assert!(request.uri().path().ends_with("/reg/activation-device"));
++            let mut body = Vec::new();
++            while let Some(data) = request.body_mut().data().await {
++                body.extend_from_slice(&data.unwrap());
++            }
++            assert_eq!(
++                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["warp_enabled"],
++                true
++            );
++            let mut response = reply
++                .send_response(
++                    http::Response::builder().status(200).body(()).unwrap(),
++                    false,
++                )
++                .unwrap();
++            response
++                .send_data(
++                    bytes::Bytes::from_static(b"{\"id\":\"activation-device\"}"),
++                    true,
++                )
++                .unwrap();
++            while h2.accept().await.is_some() {}
++        });
++        assert_eq!(
++            load_or_provision_warp(&site).await.unwrap().device_id,
++            "activation-device"
++        );
++        tokio::time::timeout(std::time::Duration::from_secs(3), api)
++            .await
++            .unwrap()
++            .unwrap();
++        let saved = identity::load(&site.store_path, &site.legacy).unwrap();
++        let device = saved.store.device("activation-device").unwrap();
++        assert!(device.warp_enabled);
++        assert!(!device.activation_pending);
++        assert_eq!(saved.store.ids().count(), 1);
++        // A subsequent start uses the identity without dialing the now-closed API.
++        assert!(load_or_provision_warp(&site).await.is_ok());
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
++    #[tokio::test]
++    async fn old_identities_do_not_require_an_activation_api_call() {
++        let dir = scratch("activation-legacy");
++        let site = identity_site(
++            dir.join("aether.toml").to_str().unwrap(),
++            identity::Slot::Wireguard,
++        );
++        let identity = wireguard_identity("old-device");
++        let mut store = identity::Store::default();
++        record(&mut store, &site, &identity).unwrap();
++        assert!(!store.device("old-device").unwrap().activation_pending);
++        activate_and_record(&mut store, &site, identity.clone())
++            .await
++            .unwrap();
++        assert!(!store.device("old-device").unwrap().warp_enabled);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
++    #[tokio::test]
++    async fn refused_activation_preserves_the_record_and_holds_new_registration() {
++        let _proxy = upstream::hold_setting().await;
++        let _options = tls::hold_options().await;
++        let previous = std::env::var("AETHER_REPROVISION").ok();
++        std::env::set_var("AETHER_REPROVISION", "1");
++        let dir = scratch("activation-refused");
++        let site = identity_site(
++            dir.join("aether.toml").to_str().unwrap(),
++            identity::Slot::Wireguard,
++        );
++        let mut store = identity::Store::default();
++        record_registration(&mut store, &site, &wireguard_identity("refused-device")).unwrap();
++        let (address, listener, acceptor) = https::test_server(b"\x02h2").await;
++        std::env::set_var("AETHER_ENROLL_ADDRESS", address.to_string());
++        let api = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let tls = tokio_boring::accept(&acceptor, tcp).await.unwrap();
++            let mut h2 = h2::server::handshake(tls).await.unwrap();
++            let (request, mut reply) = h2.accept().await.unwrap().unwrap();
++            assert_eq!(request.method(), "PATCH");
++            let mut response = reply
++                .send_response(
++                    http::Response::builder().status(401).body(()).unwrap(),
++                    false,
++                )
++                .unwrap();
++            response
++                .send_data(
++                    bytes::Bytes::from_static(b"{\"errors\":[{\"message\":\"device revoked\"}]}"),
++                    true,
++                )
++                .unwrap();
++            while h2.accept().await.is_some() {}
++        });
++        assert!(matches!(
++            load_or_provision_warp(&site).await,
++            Err(AetherError::IdentityRefused(_))
++        ));
++        tokio::time::timeout(std::time::Duration::from_secs(3), api)
++            .await
++            .unwrap()
++            .unwrap();
++        let mut saved = identity::load(&site.store_path, &site.legacy)
++            .unwrap()
++            .store;
++        assert_eq!(saved.ids().count(), 1);
++        assert!(saved.device("refused-device").unwrap().refused_at > 0);
++        assert!(matches!(
++            registration_may_go(&mut saved, false, account::now_unix()),
++            Err(AetherError::RegistrationOnHold { .. })
++        ));
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        match previous {
++            Some(value) => std::env::set_var("AETHER_REPROVISION", value),
++            None => std::env::remove_var("AETHER_REPROVISION"),
++        }
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
+     fn scratch(name: &str) -> std::path::PathBuf {
+         let dir = std::env::temp_dir().join(format!("aether-{name}-{}", std::process::id()));
+         let _ = std::fs::remove_dir_all(&dir);
+         std::fs::create_dir_all(&dir).unwrap();
+         dir
++    }
++
++    #[tokio::test]
++    async fn an_enrollment_rate_limit_survives_restart_with_the_same_pending_key() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++        let _upstream = crate::upstream::hold_setting().await;
++        let _options = crate::tls::hold_options().await;
++        isolated();
++        let dir = scratch("enrollment-hold");
++        let base = dir.join("aether.toml");
++        let site = identity_site(base.to_str().unwrap(), identity::Slot::Masque);
++        let identity = account::handshake_identity();
++        let mut store = identity::Store::default();
++        record(&mut store, &site, &identity).unwrap();
++        let (address, listener, acceptor) = https::test_server(b"\x08http/1.1").await;
++        std::env::set_var("AETHER_ENROLL_ADDRESS", address.to_string());
++        let server = tokio::spawn(async move {
++            let (tcp, _) = listener.accept().await.unwrap();
++            let mut tls = tokio_boring::accept(&acceptor, tcp).await.unwrap();
++            let mut request = Vec::new();
++            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
++                let mut chunk = [0; 1024];
++                let count = tls.read(&mut chunk).await.unwrap();
++                assert!(count > 0);
++                request.extend_from_slice(&chunk[..count]);
++            }
++            assert!(request.starts_with(b"PATCH "));
++            tls.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3600\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
++        });
++        let error = enrol_and_record(&mut store, &site, identity)
++            .await
++            .unwrap_err();
++        assert_eq!(error.retry_after(), Some(3600));
++        server.await.unwrap();
++        let first = identity::load(&site.store_path, &site.legacy).unwrap();
++        let key = first
++            .store
++            .device("device")
++            .unwrap()
++            .pending_key_pem
++            .clone();
++        assert!(!key.is_empty());
++        assert!(matches!(
++            load_or_provision_masque(&site).await,
++            Err(AetherError::RegistrationOnHold {
++                wait: 3598..=3600,
++                ..
++            })
++        ));
++        let second = identity::load(&site.store_path, &site.legacy).unwrap();
++        assert_eq!(second.store.device("device").unwrap().pending_key_pem, key);
++        std::env::remove_var("AETHER_ENROLL_ADDRESS");
++        std::fs::remove_dir_all(dir).unwrap();
+     }
+ 
+     #[test]
+@@ -7593,10 +8208,7 @@
+         }
+     }
+ 
+-    /// The framing that cannot carry ECH does not go looking for one.
+-    ///
+-    /// It was fetched regardless, which is a DNS round trip on the way to a
+-    /// connect, spent on something no part of the H2 path reads.
++    /// H2 resolves the same offerable ECH key as H3 before the handshake.
+     #[tokio::test]
+     async fn the_http2_framing_resolves_the_key_it_will_offer() {
+         let _serial = one_at_a_time();
+@@ -7917,3 +8529,21 @@
+         assert!(!migrate_running_tunnel());
+     }
+ }
++
++#[cfg(test)]
++mod udp_forwarder_tests {
++    use super::follow_sender;
++    use std::net::SocketAddr;
++
++    #[test]
++    fn replies_follow_the_inner_engine_when_it_rebinds() {
++        let first: SocketAddr = "127.0.0.1:50000".parse().unwrap();
++        let rebound: SocketAddr = "127.0.0.1:50001".parse().unwrap();
++        let mut known = None;
++
++        assert_eq!(follow_sender(&mut known, first), None);
++        assert_eq!(follow_sender(&mut known, first), None);
++        assert_eq!(follow_sender(&mut known, rebound), Some(first));
++        assert_eq!(known, Some(rebound));
++    }
++}
+diff --git a/aether/src/listeners.rs b/aether/src/listeners.rs
+new file mode 100644
+--- /dev/null
++++ b/aether/src/listeners.rs
+@@ -0,0 +1,89 @@
++//! CLI listener ownership spans provisioning, scanning and every reconnect.
++//! Task-local ownership keeps independent embedded sessions isolated.
++use crate::error::Result;
++use std::{future::Future, net::SocketAddr};
++use tokio::net::TcpListener;
++
++struct Held {
++    sockets: Vec<(&'static str, SocketAddr, std::net::TcpListener)>,
++}
++
++tokio::task_local! { static HELD: Held; }
++
++pub(crate) async fn scope<T>(
++    socks: TcpListener,
++    requested: SocketAddr,
++    http: Option<TcpListener>,
++    http_requested: Option<SocketAddr>,
++    future: impl Future<Output = T>,
++) -> Result<T> {
++    let mut sockets = vec![("socks5", requested, socks.into_std()?)];
++    if let Some(http) = http {
++        sockets.push((
++            "http proxy",
++            http_requested.unwrap_or(http.local_addr()?),
++            http.into_std()?,
++        ));
++    }
++    Ok(HELD.scope(Held { sockets }, future).await)
++}
++
++/// Each tunnel gets a duplicate of the held socket. Closing that duplicate
++/// cannot release the port while the CLI run is still alive.
++pub(crate) fn duplicate(kind: &str, requested: SocketAddr) -> Option<Result<TcpListener>> {
++    HELD.try_with(|held| {
++        held.sockets
++            .iter()
++            .find(|(name, original, socket)| {
++                *name == kind
++                    && (*original == requested || socket.local_addr().ok() == Some(requested))
++            })
++            .map(|(_, _, socket)| {
++                socket
++                    .try_clone()
++                    .and_then(TcpListener::from_std)
++                    .map_err(Into::into)
++            })
++    })
++    .ok()
++    .flatten()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[tokio::test]
++    async fn socks_and_http_ports_stay_owned_between_tunnels_and_release_on_exit() {
++        let requested = "127.0.0.1:0".parse().unwrap();
++        let socks = TcpListener::bind(requested).await.unwrap();
++        let http = TcpListener::bind(requested).await.unwrap();
++        let socks_at = socks.local_addr().unwrap();
++        let http_at = http.local_addr().unwrap();
++        scope(socks, requested, Some(http), Some(requested), async {
++            for _ in 0..2 {
++                let socks = crate::socks::bind_listener("socks5", requested)
++                    .await
++                    .unwrap();
++                let http = crate::socks::bind_listener("http proxy", requested)
++                    .await
++                    .unwrap();
++                assert_eq!(socks.local_addr().unwrap(), socks_at);
++                assert_eq!(http.local_addr().unwrap(), http_at);
++                drop((socks, http));
++                assert!(TcpListener::bind(socks_at).await.is_err());
++                assert!(TcpListener::bind(http_at).await.is_err());
++            }
++            // A separate task must not accidentally share these ports.
++            assert!(tokio::spawn(
++                async move { crate::socks::bind_listener("socks5", socks_at).await }
++            )
++            .await
++            .unwrap()
++            .is_err());
++        })
++        .await
++        .unwrap();
++        assert!(TcpListener::bind(socks_at).await.is_ok());
++        assert!(TcpListener::bind(http_at).await.is_ok());
++    }
++}
+diff --git a/aether/src/main.rs b/aether/src/main.rs
+--- a/aether/src/main.rs
++++ b/aether/src/main.rs
+@@ -3,14 +3,6 @@
+ // Rust 1.98 built it.
+ #![recursion_limit = "256"]
+ 
+-use std::time::Duration;
+-
+ fn main() -> aether::error::Result<()> {
+-    let runtime = tokio::runtime::Runtime::new()?;
+-    let result = runtime.block_on(aether::run());
+-    // A question the core put on the terminal can still be waiting there for a line, a read that
+-    // no task can stop: the core does not wait for it as it ends. Its tasks are still dropped, Tor
+-    // and Psiphon with them, given this long to go.
+-    runtime.shutdown_timeout(Duration::from_secs(5));
+-    result
++    aether::engine_thread::run(aether::run)
+ }
+diff --git a/aether/src/prober.rs b/aether/src/prober.rs
+--- a/aether/src/prober.rs
++++ b/aether/src/prober.rs
+@@ -595,6 +595,13 @@
+             strategy.per_probe_timeout = Duration::from_secs(3);
+             strategy.concurrency = 8;
+         }
++        if let Ok(value) = std::env::var("AETHER_SCAN_BUDGET_MS") {
++            if let Ok(ms) = value.parse::<u64>() {
++                strategy.overall_deadline = strategy
++                    .overall_deadline
++                    .min(Duration::from_millis(ms.clamp(1, 360_000)));
++            }
++        }
+         strategy
+     }
+ }
+diff --git a/aether/src/socks.rs b/aether/src/socks.rs
+--- a/aether/src/socks.rs
++++ b/aether/src/socks.rs
+@@ -267,6 +267,9 @@
+ }
+ 
+ pub async fn bind_listener_for(kind: &str, listen: SocketAddr, flag: &str) -> Result<TcpListener> {
++    if let Some(listener) = crate::listeners::duplicate(kind, listen) {
++        return listener;
++    }
+     TcpListener::bind(listen).await.map_err(|error| {
+         AetherError::Other(format!(
+             "the {kind} listener cannot use {listen}: {error}{}",
+diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
+--- a/aether/src/upstream.rs
++++ b/aether/src/upstream.rs
+@@ -70,10 +70,13 @@
+ ///
+ /// Parsing a short string per connection costs less than being wrong about it.
+ pub fn configured() -> Option<Upstream> {
+-    SCOPED_UPSTREAM
+-        .try_with(Clone::clone)
+-        .ok()
+-        .or_else(|| Upstream::from_value(&std::env::var("AETHER_UPSTREAM").unwrap_or_default()))
++    scoped().or_else(|| Upstream::from_value(&std::env::var("AETHER_UPSTREAM").unwrap_or_default()))
++}
++
++/// Operation-local routing must survive an engine thread dispatch. Environment
++/// routing remains dynamic and is deliberately not snapshotted here.
++pub(crate) fn scoped() -> Option<Upstream> {
++    SCOPED_UPSTREAM.try_with(Clone::clone).ok()
+ }
+ 
+ tokio::task_local! {
+@@ -89,9 +92,6 @@
+ /// Stops aether when AETHER_UPSTREAM, which --upstream sets, names a proxy it cannot dial through:
+ /// [`configured`] sets such a setting aside, and every connection would then go straight out,
+ /// around the proxy the user named. A blank setting names none.
+-pub fn check_setting() -> Result<()> {
+-    usable(&std::env::var("AETHER_UPSTREAM").unwrap_or_default())
+-}
+ 
+ /// Whether `raw`, a setting of AETHER_UPSTREAM, is blank or names a proxy aether can dial through.
+ fn usable(raw: &str) -> Result<()> {
+@@ -142,6 +142,17 @@
+     let upstream = Upstream::from_value(&raw);
+     *seen = Some((raw, upstream.clone()));
+     upstream
++}
++
++/// Reject a configured proxy before any provisioning or network operation.
++pub fn check_setting() -> Result<()> {
++    let value = std::env::var("AETHER_UPSTREAM").unwrap_or_default();
++    if value.trim().is_empty() {
++        return Ok(());
++    }
++    Upstream::parse(&value)
++        .map(drop)
++        .map_err(|error| AetherError::Other(format!("--upstream cannot be used: {error}")))
+ }
+ 
+ impl Upstream {
+diff --git a/aether/src/wg_masque.rs b/aether/src/wg_masque.rs
+--- a/aether/src/wg_masque.rs
++++ b/aether/src/wg_masque.rs
+@@ -54,6 +54,7 @@
+         // the next attempt reuses that key rather than spending another registration.
+         let inner = load_or_provision_warp(&site).await?;
+         let _lock = provisioning_lock().lock().await;
++        let _store_lock = identity::lock_store(&site.store_path).await?;
+         let mut loaded = identity::load(&site.store_path, &site.legacy)?;
+         let enabled = loaded
+             .store
+@@ -67,6 +68,7 @@
+                 .cloned()
+                 .ok_or_else(|| AetherError::Other("inner WARP identity disappeared".into()))?;
+             device.warp_enabled = true;
++            device.activation_pending = false;
+             loaded.store.put(&inner.device_id, device);
+             identity::save(&site.store_path, &loaded.store)?;
+         }

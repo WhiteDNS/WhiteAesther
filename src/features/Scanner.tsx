@@ -20,7 +20,7 @@ const SCAN_LIMIT = 16;
 interface ScannerProps {
   profile: ConnectionProfile;
   snapshot: CoreSnapshot;
-  onPick: (endpoint: string) => void;
+  onPick: (candidate: ScanCandidate) => void;
   onToast: (title: string, message: string, error?: boolean) => void;
 }
 
@@ -55,7 +55,7 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
       if (!live.current) return;
       setCandidates(outcome.candidates);
       if (outcome.candidates.length === 0) {
-        setNote(t("Nothing answered on either transport. This network is filtering hard."));
+        setNote(outcome.diagnostics?.slice(-2).join(" · ") || t("Nothing answered on either transport. This network is filtering hard."));
       } else {
         setNote(
           outcome.fellBack
@@ -181,15 +181,16 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
                   </span>
                 </div>
                 {members.map((candidate) => {
-                  const chosen = pinned === candidate.peer;
+                  const chosen = pinned === candidate.peer && (!candidate.recipe ||
+                    Object.entries(candidate.recipe).every(([key,value]) => profile[key as keyof ConnectionProfile] === value));
                   const rank = candidates.indexOf(candidate) + 1;
                   return (
                     <button
-                      key={candidate.peer}
+                      key={candidate.peer + JSON.stringify(candidate.recipe)}
                       type="button"
                       onClick={() => {
-                        onPick(candidate.peer);
-                        onToast("Endpoint pinned", `${candidate.peer} — set Endpoint mode to use it.`);
+                        onPick(candidate);
+                        onToast("Endpoint pinned", candidate.peer);
                       }}
                       className={[
                         "flex w-full items-center justify-between gap-3 border-b px-3.5 py-2.5 text-start transition-colors last:border-b-0",
@@ -202,6 +203,10 @@ export function Scanner({ profile, snapshot, onPick, onToast }: ScannerProps) {
                           {rank}
                         </span>
                         <span className="truncate font-mono text-[13px]">{candidate.peer}</span>
+                        {candidate.recipe ? <span className="shrink-0 text-[10px] text-muted-foreground">
+                          {candidate.recipe.masqueTransport.toUpperCase()} {candidate.recipe.helloShape}
+                          {candidate.successfulChecks ? ` · ${candidate.successfulChecks}/${candidate.attemptedChecks}` : ""}
+                        </span> : null}
                         {chosen ? <CheckCircle2 className="size-4 shrink-0 text-primary" /> : null}
                       </div>
                       <div className="flex shrink-0 items-center gap-2.5">

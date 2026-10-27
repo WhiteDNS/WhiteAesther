@@ -35,4 +35,5 @@ playwright-report/
 .core-work/
 .core-reference/
 aether-core/
+aether-source/
 artifacts/restricted-networks/

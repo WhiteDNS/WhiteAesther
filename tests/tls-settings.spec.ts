@@ -7,7 +7,9 @@ test.beforeEach(async ({ page }) => {
   await page.exposeFunction('validateCoreOptions', (profile: typeof DEFAULT_PROFILE) => {
     if (!process.env.WHITEAESTHER_TEST_CORE) return { ok: true };
     const args = ['--check-options'];
-    for (const [flag, value] of [['--tls-groups', profile.tlsGroups], ['--tls-ciphers', profile.tlsCiphers], ['--enroll-address', profile.enrollAddress]]) {
+    for (const [flag, value] of [['--tls-groups', profile.tlsGroups], ['--tls-ciphers', profile.tlsCiphers], ['--enroll-address', profile.enrollAddress],
+      ['--masque-sni', profile.masqueSni], ['--api-host', profile.apiHost], ['--api-sni', profile.apiSni],
+      ['--tls13-ciphers', profile.tls13Ciphers], ['--tls-key-shares', profile.tlsKeyShares]]) {
       if (value?.trim()) args.push(flag!, value.trim());
     }
     if (profile.disableGrease) args.push('--disable-grease');
@@ -23,6 +25,8 @@ test.beforeEach(async ({ page }) => {
     state.testPendingSaves = [];
     state.testSavedProfiles = [];
     state.testHoldSave = false;
+    state.testStartCalls = 0;
+    state.testRaceCalls = 0;
     state.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     state.__TAURI_INTERNALS__ = {
       transformCallback: () => 1,
@@ -31,7 +35,9 @@ test.beforeEach(async ({ page }) => {
         if (command === 'core_status') return idle;
         if (command === 'core_logs') return [];
         if (command === 'runtime_info') return { os: 'windows', arch: 'x86_64' };
-        if (command === 'probe_core') return { available: true, path: 'aether.exe', version: 'aether 2.3.0', message: 'Ready' };
+        if (command === 'probe_core') return { available: true, path: 'aether.exe', version: 'aether 2.4.0', message: 'Ready' };
+        if (command === 'race_carriers') { state.testRaceCalls++; return { winner: null, lanes: [], cancelled: true }; }
+        if (command === 'start_core') { state.testStartCalls++; return idle; }
         if (command === 'carriers_available') return ['aether', 'psiphon', 'tor'];
         if (command === 'save_profile') {
           state.testSavedProfiles.push(args.profile);
@@ -57,12 +63,24 @@ test.beforeEach(async ({ page }) => {
 });
 
 const fields = [
+  ['MASQUE server name', 'www.cloudflare.com', 'masqueSni'],
+  ['WARP API host', 'api.devices.cloudflare.com', 'apiHost'],
+  ['TLS 1.3 cipher suites', 'TLS_AES_128_GCM_SHA256', 'tls13Ciphers'],
+  ['TLS key shares', 'P-256:X25519', 'tlsKeyShares'],
   ['TLS 1.2 cipher suites', 'ECDHE-RSA-AES128-GCM-SHA256', 'tlsCiphers'],
   ['TLS groups', 'X25519:P-256:P-384', 'tlsGroups'],
   ['WARP registration address', '203.0.113.10:443', 'enrollAddress'],
   ['ECH resolver', 'https://1.1.1.1/dns-query', 'echResolver'],
   ['ECH key domain', 'cloudflare-ech.com', 'echDomain'],
 ];
+
+test('a cancelled automatic search never starts a late connection', async ({ page }) => {
+  await page.evaluate(defaults => localStorage.setItem('test-stored-profile', JSON.stringify({ ...defaults, autoRoute: true })), DEFAULT_PROFILE);
+  await page.reload();
+  await page.keyboard.press('ControlOrMeta+Enter');
+  await expect.poll(() => page.evaluate(() => (window as any).testRaceCalls)).toBe(1);
+  expect(await page.evaluate(() => (window as any).testStartCalls)).toBe(0);
+});
 for (const [label, text, key] of fields) {
   test(`${label}: typing, old Save, paste, clear and reload`, async ({ page }) => {
     const input = page.getByLabel(label, { exact: true });
@@ -87,6 +105,10 @@ for (const [label, text, key] of fields) {
     await page.reload();
     await page.getByRole('button', { name: 'Routes & transports', exact: true }).click();
     await expect(page.getByLabel(label, { exact: true })).toHaveValue(text);
+    if (key === 'tls13Ciphers') {
+      await page.getByLabel(label, { exact: true }).scrollIntoViewIfNeeded();
+      await page.screenshot({ path: 'artifacts/diagnostics/desktop-mobile-2026-10-27/tls-controls.png' });
+    }
   });
 }
 

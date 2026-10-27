@@ -32,6 +32,31 @@ const STORAGE_KEY = "whiteaesther.language";
  * understands is worse than an English one they can paste into a search.
  */
 const FA: Record<string, string> = {
+  "ClientHello shape": "شکل ClientHello",
+  "Automatic recovery also tries these TLS record layouts.": "بازیابی خودکار این شکل‌های رکورد TLS را هم امتحان می‌کند.",
+  "TCP fragments": "تکه‌های TCP",
+  "TLS records": "رکوردهای TLS",
+  "Compact records": "رکوردهای فشرده",
+  "Split inside the server name": "تکه‌کردن درون نام سرور",
+  "Keeps the SNI boundary inside separate writes.": "بخش SNI را در ارسال‌های جداگانه قرار می‌دهد.",
+  "Empty uses the core default.": "خالی بماند تا پیش‌فرض هسته استفاده شود.",
+  "MASQUE server name": "نام سرور MASQUE",
+  "WARP API host": "میزبان API وارپ",
+  "WARP API server name": "نام سرور API وارپ",
+  "TLS 1.3 cipher suites": "مجموعه‌رمزهای TLS 1.3",
+  "TLS key shares": "سهم‌های کلید TLS",
+  "TLS signature algorithms": "الگوریتم‌های امضای TLS",
+  "Certificate compression": "فشرده‌سازی گواهی",
+  "ALPS codepoint": "کد ALPS",
+  "TLS trust anchor IDs": "شناسه‌های لنگر اعتماد TLS",
+  "TLS server padding": "پدینگ سرور TLS",
+  "Enable GREASE signature algorithms": "فعال‌کردن الگوریتم‌های امضای GREASE",
+  "Enable ECH GREASE": "فعال‌کردن ECH GREASE",
+  "Disable OCSP stapling request": "غیرفعال‌کردن درخواست OCSP stapling",
+  "Disable signed certificate timestamps request": "غیرفعال‌کردن درخواست زمان‌مهرهای گواهی",
+  "Disable session tickets": "غیرفعال‌کردن بلیت‌های نشست",
+  "Disable TLS extension permutation": "غیرفعال‌کردن جابه‌جایی افزونه‌های TLS",
+  "Changes the TLS handshake fingerprint.": "اثر انگشت دست‌دادن TLS را تغییر می‌دهد.",
   "TLS and ECH": "TLS و ECH",
   "Applies to Aether handshakes and registration, including Aether hops in a carrier chain.": "برای دست‌دادن و ثبت‌نام Aether، از جمله مرحله‌های Aether در زنجیرهٔ carrier اعمال می‌شود.",
 
@@ -183,8 +208,8 @@ const FA: Record<string, string> = {
   "testing gateways": "در حال آزمودن دروازه‌ها",
   Attempt: "تلاش",
   of: "از",
-  "Retries alternate MASQUE H2 and H3 automatically, up to":
-    "تلاش‌های بعدی خودکار بین MASQUE H2 و H3 جابه‌جا می‌شوند، تا",
+  "Retries try other connection methods automatically, up to":
+    "تلاش‌های بعدی خودکار روش‌های دیگر اتصال را امتحان می‌کنند، تا",
   "attempts.": "بار.",
   "Switch search depth to": "عمق جستجو را بگذارید روی",
   "quieter probing, slower to connect": "آزمودن کم‌سروصداتر، اتصال کندتر",

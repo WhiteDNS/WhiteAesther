@@ -7,7 +7,7 @@ Cross-platform desktop control surface for the Aether connection core.
 The [Aether connection core](https://github.com/CluvexStudio/Aether) was created by
 [CluvexStudio](https://github.com/CluvexStudio). Credit for the original core and its networking
 work belongs to CluvexStudio and the Aether contributors. WhiteAesther provides the desktop
-interface and integration around [our Aether fork](https://github.com/WhiteDNS/Aether).
+interface and integration around the [shared Android Aether core](https://github.com/WhiteDNS/WhiteAestherMobile/tree/v1.15.0/native/aether).
 
 Please visit [CluvexStudio's Telegram channel](https://t.me/CluvexStudio) for updates and information
 on supporting the original developer's work. Thank you to CluvexStudio for developing Aether.
@@ -19,8 +19,8 @@ on supporting the original developer's work. Thank you to CluvexStudio for devel
 - Exposes MASQUE H2, MASQUE H3, WireGuard and WARP-in-WARP profile controls
 - Maps discovery, validation, fragmentation, reconnect, DNS, routing and Zero Trust settings to validated core arguments
 - Streams real process logs and derives connection state, edge and latency from core events
-- Retries a failed core on a widening delay, up to eight attempts, and reports which attempt it is on
-- Alternates MASQUE H2 and H3 across those retries, so a network that blocks UDP does not fail eight times over QUIC
+- Retries failed connections on a widening delay, up to twelve attempts, and reports the current attempt
+- Shares Android's H2/H3, record shaping, ECH, IPv6, WOM and MIM recovery recipes across discovery and reconnects; Automatic also rechecks alternate carriers
 - Pins a specific endpoint with a choice of falling back to discovery when it fails, or reporting the failure rather than silently substituting
 - Builds a reviewable diagnostics report that redacts addresses by default and carries no Zero Trust credentials
 - Persists profiles locally while keeping Access secrets and tokens memory-only
@@ -35,7 +35,16 @@ A full-device tunnel remains a roadmap item and is labeled as such in the UI.
 
 Requirements: Node.js 24+, pnpm 10+, Rust 1.88 and the platform-specific Tauri prerequisites. The unit tests are TypeScript run directly on Node's test runner, which needs 22.18 or newer for type stripping; 24 is what CI uses.
 
-The endpoint scanner needs the reporting modes added in [WhiteDNS/Aether](https://github.com/WhiteDNS/Aether), so builds use that fork rather than upstream. Clone it beside this repository as `Aether-whiteaesther`, or set `AETHER_CORE_SOURCE` to an executable built from it. Then run:
+Builds use the pinned Android Aether 2.4 source with desktop adapters, including BoringSSL 5.3. Prepare and compile the shared core first:
+
+```sh
+git clone https://github.com/WhiteDNS/WhiteAestherMobile.git aether-source
+git -C aether-source checkout --detach 2409297365e23e3fd320a87c0da73d0656bee67c
+node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
+cargo build --release --locked --manifest-path aether-core/aether/Cargo.toml
+```
+
+The staging script checks the exact revision, patchset, required capabilities and executable architecture. Windows core builds need the static CRT (`-C target-feature=+crt-static`). Then run:
 
 ```text
 pnpm install
@@ -71,6 +80,6 @@ its source stays public.
 Aether is a trademark of CluvexStudio and the Aether project, used here by written permission. See
 `THIRD_PARTY_NOTICES.md`. WhiteAesther is not an official Aether product.
 
-## Aether 2.3 desktop integration
+## Android and desktop connection parity
 
-See [the Persian settings and upgrade guide](docs/AETHER-2.3.fa.md), [v1.10.3 release notes](docs/releases/v1.10.3.md), [Aether 2.4 networking backports](docs/AETHER-2.4-BACKPORTS.md), and [verification evidence](docs/AETHER-2.3-VALIDATION.md).
+See [the parity matrix and validation](docs/ANDROID-DESKTOP-PARITY.md). Earlier integration history remains in [the Persian guide](docs/AETHER-2.3.fa.md), [the selected 2.4 backports](docs/AETHER-2.4-BACKPORTS.md) and [the earlier verification evidence](docs/AETHER-2.3-VALIDATION.md).

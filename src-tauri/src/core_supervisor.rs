@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 const MAX_LOGS: usize = 1_000;
 /// A permanently refused identity would otherwise retry forever, which reads on
 /// screen as an endless "connecting" and keeps the network busy for nothing.
-const MAX_ATTEMPTS: u32 = 8;
+const MAX_ATTEMPTS: u32 = 12;
 /// 3s, 6s, 12s, 24s, 48s, then a minute between attempts.
 const BASE_RETRY_SECS: u64 = 3;
 const MAX_RETRY_SECS: u64 = 60;
@@ -31,6 +31,34 @@ const MAX_RETRY_SECS: u64 = 60;
 const MAX_REPORT_BYTES: usize = 1_048_576;
 /// Matches the timeout `scripts/stage-core.mjs` already applies to the same `--version` call.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+mod parity_reconnect_tests {
+    use super::*;
+    #[test]
+    fn a_winning_ech_recipe_does_not_become_a_permanent_user_requirement() {
+        let original=CoreProfile::default();
+        let mut selected=original.clone();
+        selected.ech=Some("auto".into());
+        selected.scan_mode="turbo".into();
+        selected.recovery_base=Some(crate::recovery::EngineRecipe::from_profile(&original));
+        let tried=(0..=MAX_ATTEMPTS).map(|n|profile_for_attempt(&selected,n)).collect::<Vec<_>>();
+        assert!(tried.iter().any(|p|p.ech.is_none()));
+        assert!(tried.iter().any(|p|p.hello_shape=="records"));
+        let manual=CoreProfile{ech:Some("require".into()),auto_route:false,..Default::default()};
+        assert!((0..=MAX_ATTEMPTS).all(|n|profile_for_attempt(&manual,n).ech.as_deref()==Some("require")));
+    }
+    #[test]
+    fn cancelling_a_search_releases_its_lease_for_the_next_connection() {
+        let supervisor=CoreSupervisor::new();
+        let stop=supervisor.begin_search().unwrap();
+        assert!(supervisor.begin_search().is_err());
+        supervisor.cancel_scan();
+        assert!(stop.load(Ordering::SeqCst));
+        supervisor.finish_search(&stop);
+        assert!(supervisor.begin_search().is_ok());
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -58,6 +86,12 @@ pub struct CoreProfile {
     pub fragment_client_hello: bool,
     pub fragment_size: String,
     pub fragment_delay: String,
+    pub hello_shape: String,
+    #[serde(default = "yes")]
+    pub fragment_sni: bool,
+    pub recovery_base: Option<crate::recovery::EngineRecipe>,
+    #[serde(flatten)]
+    pub tls: crate::tls_options::TlsOverrides,
     pub data_check: bool,
     pub h2_peer: Option<String>,
     pub ech: Option<String>,
@@ -192,9 +226,13 @@ impl Default for CoreProfile {
             startup_secs: 30,
             reconnect_secs: 2,
             dns: vec!["1.1.1.1".into(), "1.0.0.1".into()],
-            fragment_client_hello: true,
+            fragment_client_hello: false,
             fragment_size: "16-32".into(),
             fragment_delay: "2-10".into(),
+            hello_shape: String::new(),
+            fragment_sni: true,
+            recovery_base: None,
+            tls: Default::default(),
             data_check: true,
             h2_peer: None,
             ech: None,
@@ -301,7 +339,7 @@ impl CoreProfile {
         }
         // Minimum is per-field: a fragment size of 0 silently disables the fragmentation the UI
         // still shows as enabled, but a delay of 0 ("no inter-write pause") is legitimate.
-        validate_range("fragment size", &self.fragment_size, 1, 1_500)?;
+        validate_range("fragment size", &self.fragment_size, 1, 16_384)?;
         validate_range("fragment delay", &self.fragment_delay, 0, 10_000)?;
         validate_peer("peer", self.peer.as_deref())?;
         validate_peer("WireGuard peer", self.wg_peer.as_deref())?;
@@ -434,7 +472,12 @@ impl CoreProfile {
     }
 
     pub(crate) fn tls_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
+        let mut args = self.tls.args();
+        if self.fragment_client_hello && !self.hello_shape.is_empty()
+            && matches!(self.protocol.as_str(), "masque" | "mim" | "wom") && self.masque_transport == "h2" {
+            args.extend(["--hello-shape".into(), self.hello_shape.clone()]);
+        }
+        args.extend(["--fragment-sni".into(), self.fragment_sni.to_string()]);
         if non_empty(self.ech.as_deref()).is_some_and(|v| v.eq_ignore_ascii_case("off")) {
             args.extend(["--ech".into(), "off".into()]);
         }
@@ -565,6 +608,7 @@ struct SupervisorInner {
     /// A reporting run of the core -- a scan or an endpoint test. Separate from
     /// `child` because it is short-lived and independently cancellable.
     scan_child: Mutex<Option<Child>>,
+    search_stop: Mutex<Option<Arc<AtomicBool>>>,
     /// The local HTTP proxy the system proxy points at. Only alive while the
     /// system proxy is applied, and dropped with it.
     bridge: Mutex<Option<HttpBridge>>,
@@ -603,6 +647,7 @@ impl CoreSupervisor {
                 generation: AtomicU64::new(0),
                 proxy_route: Mutex::new(None),
                 scan_child: Mutex::new(None),
+                search_stop: Mutex::new(None),
                 bridge: Mutex::new(None),
                 pending: Mutex::new(Vec::new()),
                 snapshot_dirty: AtomicBool::new(false),
@@ -630,6 +675,25 @@ impl CoreSupervisor {
         snapshot.state = if searching { "scanning".into() } else { "idle".into() };
         snapshot.status_message = message;
         mark_snapshot_dirty(&self.inner);
+    }
+
+    pub fn begin_search(&self) -> Result<Arc<AtomicBool>, String> {
+        let mut active = lock(&self.inner.search_stop);
+        if active.is_some() { return Err("a connection search is already running".into()); }
+        self.require_idle("Disconnect before searching for a route")?;
+        let stop = Arc::new(AtomicBool::new(false));
+        *active = Some(stop.clone());
+        Ok(stop)
+    }
+
+    pub fn current_generation(&self) -> u64 { self.inner.generation.load(Ordering::SeqCst) }
+
+    pub fn finish_search(&self, stop: &Arc<AtomicBool>) {
+        let mut active = lock(&self.inner.search_stop);
+        if active.as_ref().is_some_and(|current| Arc::ptr_eq(current, stop)) {
+            active.take();
+            self.show_search(false, None);
+        }
     }
 
     /// Writes a line into the diagnostics log from outside this module.
@@ -754,6 +818,11 @@ impl CoreSupervisor {
     }
 
     pub fn cancel_scan(&self) -> bool {
+        if let Some(stop) = lock(&self.inner.search_stop).as_ref() { stop.store(true, Ordering::SeqCst); }
+        self.stop_scan_process()
+    }
+
+    pub fn stop_scan_process(&self) -> bool {
         let Some(mut child) = lock(&self.inner.scan_child).take() else {
             return false;
         };
@@ -1201,6 +1270,7 @@ pub(crate) fn set_engine_environment(command: &mut Command, profile: &CoreProfil
     command.env("AETHER_REPROVISION", if profile.auto_reprovision { "1" } else { "0" });
 
     crate::tls_options::clear_inherited(command);
+    command.env("AETHER_CONNECT_FAST", if profile.scan_mode == "turbo" { "1" } else { "0" });
     command.env("AETHER_NETWORK_KEY", crate::route_memory::current_network().unwrap_or_else(|| "unknown".into()));
 }
 
@@ -1781,7 +1851,8 @@ pub async fn save_profile(app: AppHandle, profile: CoreProfile) -> Result<CorePr
 
 fn save_profile_blocking(app: AppHandle, profile: CoreProfile) -> Result<CoreProfile, String> {
     profile.validate()?;
-    if profile.tls_groups.as_deref().is_some_and(|v| !v.trim().is_empty())
+    if !profile.tls.args().is_empty() || !profile.hello_shape.is_empty()
+        || profile.tls_groups.as_deref().is_some_and(|v| !v.trim().is_empty())
         || profile.tls_ciphers.as_deref().is_some_and(|v| !v.trim().is_empty())
         || profile.ech_setting().is_some()
         || profile.enroll_address.as_deref().is_some_and(|v| !v.trim().is_empty()) {
@@ -2272,7 +2343,8 @@ fn handle_exit(app: &AppHandle, inner: &Arc<SupervisorInner>, generation: u64, r
     // A required key that cannot be fetched or parsed cannot be repaired by
     // restarting the same sidecar, including while the kill switch is holding.
     let detail = lock(&inner.snapshot).last_error.clone();
-    if let Some(detail) = detail.filter(|message| terminal_ech_failure(message)) {
+    let automatic = lock(&inner.session).as_ref().is_some_and(|session| session.profile.auto_route);
+    if let Some(detail) = detail.filter(|message| terminal_ech_failure(message) && !automatic) {
         let profile = {
             let mut session = lock(&inner.session);
             if !session.as_ref().is_some_and(|current| current.generation == generation) { return; }
@@ -2297,6 +2369,24 @@ fn handle_exit(app: &AppHandle, inner: &Arc<SupervisorInner>, generation: u64, r
         ExitDecision::Hold { profile } => return hold(app, inner, generation, profile, reason),
         ExitDecision::Retry { attempt, profile } => (attempt, profile),
     };
+
+    if base_profile.auto_route && base_profile.auto_reconnect {
+        app.state::<Chain>().stop();
+        app.state::<LanDoor>().close();
+        stop_all_hops(app, inner);
+        if !holding { clear_system_proxy(app, inner); }
+        let Ok(_) = inner.generation.compare_exchange(generation, generation + 1, Ordering::SeqCst, Ordering::SeqCst) else { return; };
+        let next = generation + 1;
+        *lock(&inner.session) = None;
+        {
+            let mut snapshot = lock(&inner.snapshot);
+            snapshot.state = "error".into();
+            snapshot.status_message = Some("Finding another connection method".into());
+            mark_snapshot_dirty(inner);
+        }
+        schedule_carrier_recovery(app, inner, next, base_profile, attempt, holding);
+        return;
+    }
 
     // The tunnel this proxy points at is gone, and the bridge in front of it
     // answers nothing. Left applied through the backoff and the next attempt,
@@ -2460,12 +2550,13 @@ fn hold(
 /// to alternate to.
 fn profile_for_attempt(base: &CoreProfile, attempt: u32) -> CoreProfile {
     let mut profile = base.clone();
-    if attempt > 0 && base.protocol == "masque" && attempt % 2 == 1 {
-        profile.masque_transport = if base.masque_transport == "h2" {
-            "h3".into()
-        } else {
-            "h2".into()
-        };
+    if base.auto_route || base.protocol == "masque" {
+        let policy = base.recovery_base.as_ref().map(|r|r.apply(base)).unwrap_or_else(||base.clone());
+        let remembered = base.recovery_base.as_ref().map(|_|crate::recovery::EngineRecipe::from_profile(base));
+        let recipes = crate::recovery::recipes(&policy, remembered.as_ref(), None);
+        if let Some(recipe) = recipes.get(attempt as usize % recipes.len()) {
+            profile = recipe.apply(base);
+        }
     }
     // "Custom first" means exactly one go at the pinned address. Retrying it
     // eight times is what the mode exists to avoid -- if it were reachable the
@@ -2816,6 +2907,69 @@ const CARRIER_WATCH: Duration = Duration::from_secs(2);
 /// The traffic itself is not leaking in that state -- mihomo has nowhere to
 /// send it, so it fails closed -- but "connected and carrying nothing" is the
 /// exact fault this whole port was written to avoid.
+
+/// Reconnect a failed carrier using the same policy as initial Automatic.
+/// The caller has stopped the old hops. A kill-switch proxy stays applied
+/// until a replacement route is ready; a user stop invalidates this generation.
+fn schedule_carrier_recovery(app: &AppHandle, inner: &Arc<SupervisorInner>,
+    generation: u64, base: CoreProfile, first_attempt: u32, holding: bool) {
+    let app=app.clone();
+    let inner=inner.clone();
+    thread::spawn(move || {
+        for attempt in first_attempt..=MAX_ATTEMPTS {
+            let deadline=Instant::now()+retry_delay(attempt);
+            while Instant::now()<deadline {
+                if !inner.is_current(generation) { return; }
+                thread::sleep(Duration::from_millis(200));
+            }
+            if !inner.is_current(generation) { return; }
+            let supervisor=CoreSupervisor{inner:inner.clone()};
+            let mut profile=base.clone();
+            if base.auto_route {
+                let result=crate::race::search_blocking(app.clone(),supervisor.clone(),base.clone());
+                if !inner.is_current(generation) { return; }
+                match result {
+                    Ok(report) if report.cancelled => return,
+                    Ok(report) => match report.winner {
+                        Some(winner)=>profile=winner.apply(&base),
+                        None=> {
+                            supervisor_log(&inner,"warn","automatic recovery found no verified route".into());
+                            continue;
+                        }
+                    },
+                    Err(error)=> {
+                        supervisor_log(&inner,"warn",format!("automatic recovery: {error}"));
+                        if lock(&inner.search_stop).is_some() { return; }
+                        continue;
+                    }
+                }
+            }
+            if !inner.is_current(generation) { return; }
+            *lock(&inner.session)=Some(Session{generation,profile:profile.clone(),attempt});
+            let result=if profile.carriers.is_lone_aether() {
+                launch(&app,&inner,&profile,attempt,generation,true)
+                    .map(|_|lock(&inner.snapshot).clone())
+            } else {
+                start_carrier_blocking(&app,&inner,&profile,generation)
+            };
+            match result {
+                Ok(_)=>return,
+                Err(error)=>supervisor_log(&inner,"warn",format!("reconnect {attempt}: {error}")),
+            }
+            app.state::<Chain>().stop();
+            app.state::<LanDoor>().close();
+            stop_all_hops(&app,&inner);
+            if !holding { clear_system_proxy(&app,&inner); }
+            if !inner.is_current(generation) { return; }
+            *lock(&inner.session)=None;
+            let mut snapshot=lock(&inner.snapshot);
+            snapshot.state="error".into();
+            snapshot.last_error=Some("Connection recovery has not found a route yet".into());
+            mark_snapshot_dirty(&inner);
+        }
+    });
+}
+
 fn spawn_carrier_watch(app: &AppHandle, inner: &Arc<SupervisorInner>, generation: u64) {
     let app = app.clone();
     let inner = inner.clone();
@@ -2859,6 +3013,9 @@ fn carrier_died(
     generation: u64,
     kind: CarrierKind,
 ) {
+    let stable = lock(&inner.snapshot).started_at.is_some_and(|at|now_millis().saturating_sub(at)>=300_000);
+    let retry = lock(&inner.session).as_ref().filter(|session|session.generation==generation)
+        .map(|session|(session.profile.clone(),if stable {1} else {session.attempt.saturating_add(1)}));
     let (holding, chained) = {
         let session = lock(&inner.session);
         let holding = session
@@ -2922,8 +3079,15 @@ fn carrier_died(
     // running" and the only way back is to press Stop on something that already
     // stopped. The generation moves with it, so nothing still in flight for the
     // dead session can act after this point.
-    inner.generation.fetch_add(1, Ordering::SeqCst);
+    let Ok(_) = inner.generation.compare_exchange(generation, generation + 1, Ordering::SeqCst, Ordering::SeqCst) else { return; };
+    let next = generation + 1;
     *lock(&inner.session) = None;
+
+    if let Some((profile, attempt)) = retry.filter(|(profile,_)|profile.auto_reconnect) {
+        if !holding { clear_system_proxy(app, inner); }
+        schedule_carrier_recovery(app, inner, next, profile, attempt, holding);
+        return;
+    }
 
     // The kill switch bites here exactly as it does on the engine path: the
     // proxy is left pointing at a listener that is gone, so applications fail
@@ -3685,6 +3849,9 @@ fn parse_latency_ms(message: &str) -> Option<f64> {
 }
 
 fn stop_inner(inner: &SupervisorInner, app: &AppHandle) -> Result<(), String> {
+    if let Some(stop) = lock(&inner.search_stop).as_ref() {
+        stop.store(true, Ordering::SeqCst);
+    }
     // The chain exists only to carry a live tunnel's traffic; without one it
     // would sit there dialling a SOCKS port nothing is answering on. The same
     // is true of the door other devices come in through: left open over a dead
@@ -3772,6 +3939,7 @@ pub(crate) fn resolve_core_path(app: &AppHandle, requested: Option<&str>) -> Res
             .unwrap_or_default()
             .to_ascii_lowercase();
         if filename == "aether" || filename.starts_with("aether-") {
+            crate::tls_options::check_runtime_core(&canonical)?;
             return Ok(canonical);
         }
     }
@@ -4192,24 +4360,25 @@ mod tests {
     }
 
     #[test]
-    fn retries_alternate_masque_transports() {
+    fn retries_cover_the_complete_handshake_recovery_ladder() {
         let profile = CoreProfile::default();
         assert_eq!(profile.masque_transport, "h2");
         // The first retry switches, because it follows two minutes of evidence
         // that the configured transport is not getting out. Then it alternates,
         // so a network that blocks UDP is not retried eight times over QUIC.
-        for (attempt, expected) in [(0, "h2"), (1, "h3"), (2, "h2"), (3, "h3"), (4, "h2")] {
-            assert_eq!(
-                profile_for_attempt(&profile, attempt).masque_transport,
-                expected,
-                "attempt {attempt}",
-            );
+        let mut tried = Vec::new();
+        for attempt in 0..=MAX_ATTEMPTS {
+            tried.push(crate::recovery::EngineRecipe::from_profile(&profile_for_attempt(&profile, attempt)).label());
+        }
+        for method in ["aether h2", "aether h3", "aether h2+records", "aether h2+compact", "aether h3+ech", "aether wom", "aether mim"] {
+            assert!(tried.iter().any(|name|name==method), "{method}");
         }
     }
 
     #[test]
     fn retries_leave_single_transport_protocols_alone() {
         let mut profile = CoreProfile::default();
+        profile.auto_route = false;
         profile.protocol = "wg".into();
         for attempt in 0..=MAX_ATTEMPTS {
             let attempted = profile_for_attempt(&profile, attempt);
@@ -4617,7 +4786,8 @@ mod tests {
         let delays: Vec<u64> = (1..=MAX_ATTEMPTS)
             .map(|attempt| retry_delay(attempt).as_secs())
             .collect();
-        assert_eq!(delays, vec![3, 6, 12, 24, 48, 60, 60, 60]);
+        assert_eq!(&delays[..5], &[3, 6, 12, 24, 48]);
+        assert!(delays[5..].iter().all(|delay| *delay == 60));
     }
 
     #[test]

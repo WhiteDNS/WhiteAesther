@@ -298,6 +298,14 @@ impl Psiphon {
         settings: &PsiphonSettings,
         upstream: Option<SocketAddr>,
     ) -> Result<SocketAddr, String> {
+        self.start_with_budget(app, settings, upstream, ESTABLISH_TIMEOUT)
+    }
+
+    pub fn start_for_search(&self, app: &AppHandle, settings: &PsiphonSettings, budget: Duration) -> Result<SocketAddr, String> {
+        self.start_with_budget(app, settings, None, budget)
+    }
+
+    fn start_with_budget(&self, app: &AppHandle, settings: &PsiphonSettings, upstream: Option<SocketAddr>, budget: Duration) -> Result<SocketAddr, String> {
         settings.validate()?;
         self.stop();
 
@@ -315,7 +323,9 @@ impl Psiphon {
             .map_err(|error| format!("cannot prepare the Psiphon directory: {error}"))?;
 
         let config_path = home.join("config.json");
-        std::fs::write(&config_path, render_config(settings, &home, upstream))
+        let mut config: serde_json::Value = serde_json::from_str(&render_config(settings, &home, upstream)).map_err(|e|e.to_string())?;
+        config["EstablishTunnelTimeoutSeconds"] = budget.as_secs().saturating_sub(15).max(1).into();
+        std::fs::write(&config_path, config.to_string())
             .map_err(|error| format!("cannot write the Psiphon config: {error}"))?;
 
         {
@@ -381,7 +391,7 @@ impl Psiphon {
             });
         }
 
-        match self.wait_for_tunnel(generation) {
+        match self.wait_for_tunnel(generation, budget) {
             Ok(address) => {
                 app.state::<CoreSupervisor>().record(
                     "psiphon",
@@ -404,9 +414,9 @@ impl Psiphon {
     }
 
     /// Waits for `Tunnels` to report at least one, or for the process to die.
-    fn wait_for_tunnel(&self, generation: u64) -> Result<SocketAddr, String> {
+    fn wait_for_tunnel(&self, generation: u64, budget: Duration) -> Result<SocketAddr, String> {
         let inner = &self.inner;
-        let deadline = Instant::now() + ESTABLISH_TIMEOUT;
+        let deadline = Instant::now() + budget;
         while Instant::now() < deadline {
             if inner.generation.load(Ordering::SeqCst) != generation {
                 return Err("Psiphon was stopped while it was starting".into());
@@ -436,7 +446,7 @@ impl Psiphon {
         }
         Err(format!(
             "Psiphon did not find a way out in {}s",
-            ESTABLISH_TIMEOUT.as_secs()
+            budget.as_secs()
         ))
     }
 
