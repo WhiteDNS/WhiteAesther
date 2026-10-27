@@ -100,11 +100,16 @@ export async function subscribeTrayActions(onAction: (action: TrayAction) => voi
 }
 
 export interface ScanCandidate {
+  recipe?: EngineRecipe | null;
+  successfulChecks?: number;
+  attemptedChecks?: number;
+  jitterMs?: number;
   peer: string;
   rttMs: number;
 }
 
 export interface ScanOutcome {
+  diagnostics?: string[];
   candidates: ScanCandidate[];
   /** Which transport produced these, which is not always the one configured. */
   transport: string;
@@ -158,7 +163,13 @@ export async function probeCarrier(): Promise<string | null> {
   return invoke("probe_carrier");
 }
 
+export type EngineRecipe = Pick<ConnectionProfile,
+  "protocol" | "masqueTransport" | "fragmentClientHello" | "helloShape" | "fragmentSize" | "fragmentDelay" | "fragmentSni" | "ech" | "ipFamily" | "scanMode"
+>;
+
 export interface RaceWinner {
+  recipe?: EngineRecipe | null;
+  tor?: ConnectionProfile["tor"] | null;
   /** The carrier that proved itself, named as the profile names it. */
   carrier: CarrierKind;
   /** Which MASQUE framing won, when the winner was the engine on one. */
@@ -193,6 +204,7 @@ export interface LaneOutcome {
  * route being discarded, which leaves no trace unless the attempt writes one.
  */
 export interface RaceReport {
+  cancelled?: boolean;
   winner: RaceWinner | null;
   lanes: LaneOutcome[];
 }

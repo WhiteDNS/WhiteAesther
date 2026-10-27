@@ -49,7 +49,7 @@ pub const MAX_NETWORKS: usize = 32;
 ///
 /// Built from the lane's own arguments rather than its name, so a tactic the
 /// user switched on by hand is remembered as part of what worked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Route {
     /// As the profile names it: `aether`, `psiphon`, `tor`.
@@ -66,6 +66,12 @@ pub struct Route {
     /// The ECH setting the lane ran with, when it had one.
     #[serde(default)]
     pub ech: Option<String>,
+    #[serde(default)]
+    pub recipe: Option<crate::recovery::EngineRecipe>,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub tor: Option<crate::tor::TorSettings>,
 }
 
 impl Route {
@@ -505,6 +511,7 @@ mod tests {
             transport: Some("h2".into()),
             fragment: true,
             ech: None,
+            ..Default::default()
         }
     }
 
@@ -515,6 +522,7 @@ mod tests {
             transport: None,
             fragment: false,
             ech: None,
+            ..Default::default()
         }
     }
 

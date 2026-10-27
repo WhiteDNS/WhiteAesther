@@ -218,6 +218,7 @@ export default function App() {
       let chosen = effective;
       if (effective.autoRoute) {
         const report = await raceCarriers(effective);
+        if (report.cancelled) return;
         if (report.winner) chosen = profileForWinner(effective, report.winner);
         // No winner is not a reason to refuse to try. The configured carrier
         // still gets its ordinary attempt, with the supervisor's own retries

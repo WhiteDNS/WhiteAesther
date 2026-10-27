@@ -8,6 +8,12 @@ import type { RaceWinner } from "./api";
  * ClientHello through would see the race get out and the connect fail.
  */
 export function profileForWinner(profile: ConnectionProfile, winner: RaceWinner): ConnectionProfile {
+  const recoveryBase = profile.recoveryBase ?? {
+    protocol: profile.protocol, masqueTransport: profile.masqueTransport,
+    fragmentClientHello: profile.fragmentClientHello, helloShape: profile.helloShape,
+    fragmentSize: profile.fragmentSize, fragmentDelay: profile.fragmentDelay,
+    fragmentSni: profile.fragmentSni, ech: profile.ech, ipFamily: profile.ipFamily, scanMode: profile.scanMode,
+  };
   return {
     ...profile,
     carriers: { first: winner.carrier, second: null },
@@ -17,5 +23,8 @@ export function profileForWinner(profile: ConnectionProfile, winner: RaceWinner)
     ech: winner.ech ?? profile.ech,
     endpointMode: winner.endpointMode ?? profile.endpointMode,
     peer: winner.peer ?? profile.peer,
+    ...(winner.recipe ?? {}),
+    tor: winner.tor ?? profile.tor,
+    recoveryBase: winner.recipe ? recoveryBase : profile.recoveryBase,
   };
 }

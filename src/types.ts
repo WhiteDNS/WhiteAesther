@@ -170,6 +170,25 @@ export interface ConnectionProfile {
   fragmentClientHello: boolean;
   fragmentSize: string;
   fragmentDelay: string;
+  helloShape: "" | "records" | "compact";
+  fragmentSni: boolean;
+  recoveryBase?: Pick<ConnectionProfile, "protocol" | "masqueTransport" | "fragmentClientHello" | "helloShape" | "fragmentSize" | "fragmentDelay" | "fragmentSni" | "ech" | "ipFamily" | "scanMode"> | null;
+  masqueSni: string | null;
+  apiHost: string | null;
+  apiSni: string | null;
+  tls13Ciphers: string | null;
+  tlsKeyShares: string | null;
+  tlsSigalgs: string | null;
+  tlsCertCompression: string | null;
+  tlsAlps: string | null;
+  tlsTrustAnchors: string | null;
+  tlsServerPadding: string | null;
+  enableGreaseSigalgs: boolean;
+  enableEchGrease: boolean;
+  disableOcspStapling: boolean;
+  disableSct: boolean;
+  disableSessionTicket: boolean;
+  disableExtensionPermutation: boolean;
   dataCheck: boolean;
   h2Peer: string | null;
   ech: string | null;
@@ -304,9 +323,28 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   startupSecs: 30,
   reconnectSecs: 2,
   dns: ["1.1.1.1", "1.0.0.1"],
-  fragmentClientHello: true,
+  fragmentClientHello: false,
   fragmentSize: "16-32",
   fragmentDelay: "2-10",
+  helloShape: "",
+  fragmentSni: true,
+  recoveryBase: null,
+  masqueSni: null,
+  apiHost: null,
+  apiSni: null,
+  tls13Ciphers: null,
+  tlsKeyShares: null,
+  tlsSigalgs: null,
+  tlsCertCompression: null,
+  tlsAlps: null,
+  tlsTrustAnchors: null,
+  tlsServerPadding: null,
+  enableGreaseSigalgs: false,
+  enableEchGrease: false,
+  disableOcspStapling: false,
+  disableSct: false,
+  disableSessionTicket: false,
+  disableExtensionPermutation: false,
   dataCheck: true,
   h2Peer: null,
   ech: null,

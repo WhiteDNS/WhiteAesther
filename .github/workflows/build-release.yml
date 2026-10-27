@@ -25,7 +25,7 @@ concurrency:
 env:
   # The fork adds the reporting modes the endpoint scanner needs. Pinned to a
   # commit rather than a branch so a release is reproducible.
-  AETHER_REVISION: 9d91b294f613d2e6961f04f3a1d5a01e3353615b
+  AETHER_REVISION: 2409297365e23e3fd320a87c0da73d0656bee67c
   # BoringSSL's C++ runtime must not depend on a developer's installed VC DLLs.
   # Target-specific: ignored by the macOS/Linux jobs; also applies to Tauri.
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
@@ -180,12 +180,12 @@ jobs:
       - name: Check out the pinned Aether core
         uses: actions/checkout@v7
         with:
-          repository: WhiteDNS/Aether
+          repository: WhiteDNS/WhiteAestherMobile
           ref: ${{ env.AETHER_REVISION }}
-          path: aether-core
+          path: aether-source
 
       - name: Apply and verify the desktop core patches
-        run: node scripts/apply-core-patches.mjs aether-core
+        run: node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'

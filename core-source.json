@@ -1,23 +1,66 @@
 {
-  "repository": "WhiteDNS/Aether",
-  "version": "2.3.0",
-  "revision": "9d91b294f613d2e6961f04f3a1d5a01e3353615b",
-  "patchset": "restricted-networks-v2",
-  "patches": [
+  "repository": "WhiteDNS/WhiteAestherMobile",
+  "version": "2.4.0",
+  "revision": "2409297365e23e3fd320a87c0da73d0656bee67c",
+  "sourceDirectory": "native/aether",
+  "overlays": [
     {
-      "path": "patches/aether/restricted-networks.patch",
-      "sha256": "032cadb555bf656b1a1cbcccdb3e4e7d01b4269ada81f3f7100eba253531903b"
+      "source": "native/third-party/boring-sys-5.3",
+      "destination": "third-party/boring-sys"
     }
   ],
-  "upstreamBackports": {
+  "patchset": "desktop-android-parity-v1",
+  "patches": [
+    {
+      "path": "patches/aether/desktop-adapters.patch",
+      "sha256": "349f0a68038f108982810db30dc4b68bf4bd91a46be152b48c3675e186ab55f9"
+    }
+  ],
+  "upstream": {
+    "repository": "CluvexStudio/Aether",
     "version": "2.4.0",
-    "revision": "d58f9d568083129ce2c767c85054021eb3ee6a38",
-    "features": [
-      "api-host-fallback",
-      "resumable-warp-activation",
-      "held-proxy-ports",
-      "gateway-cooldown",
-      "strict-upstream"
-    ]
-  }
+    "revision": "d58f9d568083129ce2c767c85054021eb3ee6a38"
+  },
+  "requiredCommands": [
+    "scan-only",
+    "scan-limit",
+    "test-endpoint",
+    "export-identity",
+    "import-identity",
+    "check-options",
+    "hello-shape",
+    "fragment-sni",
+    "scan-budget-ms",
+    "provision-only"
+  ],
+  "requiredFeatures": [
+    "h2-ech",
+    "h3-ech",
+    "tls-ciphers",
+    "tls-groups",
+    "disable-grease",
+    "enroll-address",
+    "ech-dns",
+    "ech-domain",
+    "wg-over-masque",
+    "verified",
+    "scan-diversity",
+    "history-8",
+    "certificate-pinning",
+    "api-handshake-race",
+    "pending-enrollment-key",
+    "engine-stack-8m",
+    "network-scoped-endpoints",
+    "api-host-fallback",
+    "resumable-warp-activation",
+    "held-proxy-ports",
+    "gateway-cooldown",
+    "strict-upstream",
+    "tls13-ciphers",
+    "tls-key-shares",
+    "masque-sni",
+    "extended-tls-fingerprint",
+    "hello-shape",
+    "bounded-discovery"
+  ]
 }
