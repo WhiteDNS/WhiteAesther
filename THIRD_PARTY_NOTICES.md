@@ -107,6 +107,34 @@ only inside its own clients; ours is the value used by open-source clients with 
 IDs (Oblivion, MSN-GUARD, Aether_Desktop), and it is checked rather than trusted: it validates all 430
 entries in this list, and `scripts/stage-psiphon.mjs` refuses to stage a list it does not validate.
 
+
+## Xray-core
+
+The Cloudflare Worker carrier. WhiteAesther ships the `xray` executable inside its installers and
+drives it as a child process that opens a SOCKS5 listener on loopback. No Xray code is linked into
+WhiteAesther.
+
+- Upstream: <https://github.com/XTLS/Xray-core>
+- The build shipped here: **built from source** by `scripts/stage-xray.mjs` at the module revision
+  pinned in `native/xray/go.mod` (`v1.260327.1-0.20261031132019-a4a3dff5b20c`, locked by
+  `native/xray/go.sum`), with `CGO_ENABLED=0 go build -trimpath`. One file is changed:
+  `transport/internet/browser_dialer/dialer.go`, so the Browser Dialer page and its WebSocket accept
+  only their own loopback origin instead of any origin.
+- Licence: Mozilla Public License 2.0 — the full text is in `licenses/xray-core-MPL-2.0.txt`, copied
+  from that revision and installed alongside the binary
+- Copyright: XTLS and Project X contributors
+
+## BPB Worker script
+
+`src-tauri/assets/worker.js` is the script WhiteAesther deploys to the user's own Cloudflare account.
+It is adapted from `bia-pain-bache/BPB-VPN` `worker/worker.js` at commit
+`381df1270e3b81feaa7a878603ae049cf79a560f` and is identical to the WhiteAestherMobile 1.15.1 asset.
+It runs on Cloudflare, not on this machine.
+
+- Upstream: <https://github.com/bia-pain-bache/BPB-VPN>
+- Licence: GNU General Public License v3.0 only — the full text is in
+  `licenses/bpb-worker-GPL-3.0.txt`
+
 ## Tor, and the lyrebird pluggable transport
 
 The Tor carrier. WhiteAesther ships `tor` and `lyrebird` inside its installers and drives `tor` as a

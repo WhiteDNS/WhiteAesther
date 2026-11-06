@@ -44,13 +44,12 @@ const option = (name) => {
  * asset alive. Expect to bump this on roughly Tor Browser's release cadence,
  * and note that a green build says nothing about tomorrow.
  *
- * The digests below did not change between 15.0.22 and 15.0.23: the expert
- * bundle is byte-identical across those two, so only the version in the URL
- * moved. Worth checking rather than assuming on the next bump -- if the sums
- * *do* change, that is the pin doing its job and the new ones have to come from
- * Tor's manifest, never from whatever arrived.
+ * The digests below are from 16.0's `sha256sums-signed-build.txt`; they changed
+ * from 15.0.23, as they will whenever Tor itself changes. New ones always come
+ * from Tor's manifest, never from whatever arrived. Versions can be two-part
+ * (16.0) as well as three-part (15.0.23).
  */
-const VERSION = "15.0.23";
+const VERSION = "16.0";
 
 /**
  * Rust target triple to the bundle that serves it, with the SHA-256 Tor
@@ -73,19 +72,19 @@ const VERSION = "15.0.23";
 const BUNDLES = {
   "x86_64-pc-windows-msvc": {
     asset: `tor-expert-bundle-windows-x86_64-${VERSION}.tar.gz`,
-    sha256: "231dad6b9cb401a54c260db7046965ef04e4f72ff071b140d423fb5da281ab1e",
+    sha256: "2ee123e9167318a3742778ff704e75f01d4780f05a14522d451fe011011077c4",
   },
   "x86_64-apple-darwin": {
     asset: `tor-expert-bundle-macos-x86_64-${VERSION}.tar.gz`,
-    sha256: "be1be1cb13cd093713f02a0beade0d2471b61119011bfeb0efc08353eadf2e4e",
+    sha256: "5b1860215c26f2d408392d1d79e798a2f81d65eb939510bb94c11f237bd0bfc3",
   },
   "aarch64-apple-darwin": {
     asset: `tor-expert-bundle-macos-aarch64-${VERSION}.tar.gz`,
-    sha256: "e8ea3f667c83309abad34280f0f9e1cfae52843da6b8db111ca15d6221051db5",
+    sha256: "b8da251eccbe9e82f3681ee3af3c97fb4291c4a4e153e5b824bde48a1117cd6a",
   },
   "x86_64-unknown-linux-gnu": {
     asset: `tor-expert-bundle-linux-x86_64-${VERSION}.tar.gz`,
-    sha256: "08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985",
+    sha256: "cc950ebe9acb80188325c3a2cd8817def7dd7237d6fdcd861bb87b234a0cb2fd",
   },
 };
 
@@ -306,7 +305,7 @@ async function currentVersion() {
     const response = await fetch("https://dist.torproject.org/torbrowser/");
     if (!response.ok) return null;
     const body = await response.text();
-    const versions = [...body.matchAll(/href="(\d+\.\d+\.\d+)\//g)].map((match) => match[1]);
+    const versions = [...body.matchAll(/href="(\d+\.\d+(?:\.\d+)?)\//g)].map((match) => match[1]);
     if (versions.length === 0) return null;
     return versions.sort(compareVersions).at(-1);
   } catch {

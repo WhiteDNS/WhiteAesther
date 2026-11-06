@@ -293,6 +293,8 @@ fn run_lane(
                 Some(TrialEngine(child)),
             )
         }
+        // Needs a deployment the user made, so the search never builds a lane for it.
+        CarrierKind::Worker => return Err("The Cloudflare Worker is not part of the automatic search".into()),
         CarrierKind::Psiphon => {
             let mut settings = p.psiphon.clone();
             settings.egress_region.clear();

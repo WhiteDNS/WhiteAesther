@@ -81,6 +81,8 @@ const CARRIER_DEADLINE_MS: Record<CarrierKind, number> = {
   aether: 190_000,
   psiphon: 315_000,
   tor: 180_000,
+  // Never searched: it needs a deployment the user made. Mirrors START_TIMEOUT in worker.rs.
+  worker: 90_000,
 };
 
 /**

@@ -11,6 +11,7 @@ export type SectionId =
   | "routes"
   | "endpoint"
   | "chain"
+  | "worker"
   | "traffic"
   | "identity"
   | "diagnostics"
@@ -30,6 +31,7 @@ export const SECTION_LABELS: Record<SectionId, string> = {
   routes: "Routes & transports",
   endpoint: "Endpoint",
   chain: "Exit chain",
+  worker: "Cloudflare Workers",
   traffic: "Traffic & DNS",
   identity: "Identity",
   diagnostics: "Diagnostics",
@@ -37,6 +39,7 @@ export const SECTION_LABELS: Record<SectionId, string> = {
 };
 
 export const SETTINGS: SettingEntry[] = [
+  { label: "Cloudflare Workers", section: "worker", where: "Cloudflare Workers", keywords: "worker pages bpb deploy api token cloudflare proxy ip nat64 browser dialer fragment" },
   { label: "Live event log", section: "status", where: "Status", keywords: "log console output events stderr debug what is happening" },
   { label: "What will run", section: "status", where: "Status", keywords: "command line arguments flags cli invocation" },
   { label: "Round-trip chart", section: "status", where: "Status", keywords: "latency ping ms speed graph chart rtt" },

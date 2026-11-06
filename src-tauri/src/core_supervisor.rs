@@ -191,6 +191,9 @@ pub struct CoreProfile {
     /// How the Tor carrier should run. Ignored unless `carrier` selects it.
     #[serde(default)]
     pub tor: crate::tor::TorSettings,
+    /// Which deployment the Worker carrier uses. Ignored unless chosen.
+    #[serde(default)]
+    pub worker: crate::worker::WorkerSelection,
     /// Whether other devices on this network may use the tunnel, and on what
     /// terms.
     #[serde(default)]
@@ -249,6 +252,7 @@ impl Default for CoreProfile {
             chain: ChainSettings::default(),
             psiphon: crate::psiphon::PsiphonSettings::default(),
             tor: crate::tor::TorSettings::default(),
+            worker: crate::worker::WorkerSelection::default(),
             lan_share: LanSettings::default(),
             kill_switch: false,
             noize: "balanced".into(),
@@ -2994,6 +2998,7 @@ fn spawn_carrier_watch(app: &AppHandle, inner: &Arc<SupervisorInner>, generation
         let dead = kinds.into_iter().find(|kind| match kind {
             CarrierKind::Psiphon => !app.state::<crate::psiphon::Psiphon>().is_alive(),
             CarrierKind::Tor => !app.state::<crate::tor::Tor>().is_alive(),
+            CarrierKind::Worker => !app.state::<crate::worker::Worker>().is_alive(),
             // The engine's child, which is where a chained Aether lives. A
             // lone Aether has its own exit monitor and never reaches here.
             CarrierKind::Aether => !aether_hop_is_alive(&inner),
@@ -3115,6 +3120,7 @@ fn carrier_died(
 fn stop_carriers(app: &AppHandle) {
     app.state::<crate::psiphon::Psiphon>().stop();
     app.state::<crate::tor::Tor>().stop();
+    app.state::<crate::worker::Worker>().stop(app);
 }
 
 /// Whether a chained Aether's process is still running.
@@ -3188,6 +3194,16 @@ fn start_hop(
             tor.start(app, &profile.tor, upstream)?;
             tor.carrier()
                 .ok_or_else(|| "Tor reported a listener and then stopped carrying".into())
+        }
+        CarrierKind::Worker => {
+            if upstream.is_some() {
+                return Err("The Cloudflare Worker is a connection method of its own and cannot be chained.".into());
+            }
+            let worker = app.state::<crate::worker::Worker>();
+            worker.start(app, &profile.worker)?;
+            worker
+                .carrier()
+                .ok_or_else(|| "The Worker reported a listener and then stopped carrying".into())
         }
         CarrierKind::Aether => start_aether_hop(app, inner, profile, upstream, generation),
     }
@@ -3445,7 +3461,7 @@ fn aether_identity_exists(app: &AppHandle) -> bool {
 fn hop_exit_region(app: &AppHandle, kind: CarrierKind) -> Option<String> {
     match kind {
         CarrierKind::Psiphon => app.state::<crate::psiphon::Psiphon>().snapshot().exit_region,
-        CarrierKind::Tor | CarrierKind::Aether => None,
+        CarrierKind::Tor | CarrierKind::Aether | CarrierKind::Worker => None,
     }
 }
 
@@ -3526,6 +3542,7 @@ fn current_carrier(app: &AppHandle, inner: &SupervisorInner) -> Option<Carrier> 
     match kind {
         CarrierKind::Psiphon => return app.state::<crate::psiphon::Psiphon>().carrier(),
         CarrierKind::Tor => return app.state::<crate::tor::Tor>().carrier(),
+        CarrierKind::Worker => return app.state::<crate::worker::Worker>().carrier(),
         CarrierKind::Aether => {}
     }
 

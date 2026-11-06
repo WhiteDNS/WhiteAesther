@@ -37,6 +37,8 @@ pub enum CarrierKind {
     Psiphon,
     /// Tor, through three relays and optionally a bridge.
     Tor,
+    /// The user's own Cloudflare Worker, reached through Xray. TCP only.
+    Worker,
 }
 
 impl CarrierKind {
@@ -51,6 +53,7 @@ impl CarrierKind {
             Self::Aether => "aether",
             Self::Psiphon => "psiphon",
             Self::Tor => "tor",
+            Self::Worker => "worker",
         }
     }
 
@@ -85,6 +88,13 @@ impl CarrierKind {
                     "tor"
                 }
             }
+            Self::Worker => {
+                if cfg!(windows) {
+                    "xray.exe"
+                } else {
+                    "xray"
+                }
+            }
         }
     }
 
@@ -111,7 +121,9 @@ impl CarrierKind {
     pub fn carries_udp(self) -> bool {
         match self {
             Self::Aether => true,
-            Self::Psiphon | Self::Tor => false,
+            // The Worker script refuses every UDP command, and Xray blocks UDP
+            // before it reaches the Worker.
+            Self::Psiphon | Self::Tor | Self::Worker => false,
         }
     }
 
@@ -121,6 +133,7 @@ impl CarrierKind {
             Self::Aether => "Aether",
             Self::Psiphon => "Psiphon",
             Self::Tor => "Tor",
+            Self::Worker => "Cloudflare Worker",
         }
     }
 }
@@ -230,6 +243,11 @@ impl CarrierChain {
     /// attempt, not for validation.
     pub fn refusal(&self) -> Option<String> {
         let second = self.second?;
+        if self.first == CarrierKind::Worker || second == CarrierKind::Worker {
+            // An independent connection method, as on Android: Xray dials the
+            // Worker itself and is not wired to another carrier's listener.
+            return Some("The Cloudflare Worker is a connection method of its own and cannot be chained.".into());
+        }
         if second == self.first {
             // Two hops of the same carrier buy nothing: the second would dial
             // its own servers through the first, doubling the latency to reach
@@ -395,6 +413,7 @@ mod tests {
         assert!(CarrierKind::Aether.carries_udp());
         assert!(!CarrierKind::Psiphon.carries_udp());
         assert!(!CarrierKind::Tor.carries_udp());
+        assert!(!CarrierKind::Worker.carries_udp());
     }
 
     #[test]
@@ -402,7 +421,7 @@ mod tests {
         // Two carriers sharing a proxy name would render a config where one
         // node's dialer-proxy silently points at the other carrier; two sharing
         // a process name would exempt the wrong executable from the TUN device.
-        let kinds = [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor];
+        let kinds = [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor, CarrierKind::Worker];
         for (index, one) in kinds.iter().enumerate() {
             for other in &kinds[index + 1..] {
                 assert_ne!(one.proxy_name(), other.proxy_name());
@@ -419,6 +438,7 @@ mod tests {
             (CarrierKind::Aether, "\"aether\""),
             (CarrierKind::Psiphon, "\"psiphon\""),
             (CarrierKind::Tor, "\"tor\""),
+            (CarrierKind::Worker, "\"worker\""),
         ] {
             assert_eq!(serde_json::to_string(&kind).unwrap(), stored);
             assert_eq!(serde_json::from_str::<CarrierKind>(stored).unwrap(), kind);
@@ -607,6 +627,15 @@ mod tests {
             }
         }
         assert_eq!(allowed, 6, "there are six orderings of three carriers taken two at a time");
+    }
+
+    #[test]
+    fn the_worker_is_never_one_hop_of_a_chain() {
+        for other in [CarrierKind::Aether, CarrierKind::Psiphon, CarrierKind::Tor] {
+            assert!(CarrierChain { first: CarrierKind::Worker, second: Some(other) }.refusal().is_some());
+            assert!(CarrierChain { first: other, second: Some(CarrierKind::Worker) }.refusal().is_some());
+        }
+        assert!(CarrierChain { first: CarrierKind::Worker, second: None }.refusal().is_none());
     }
 
     #[test]

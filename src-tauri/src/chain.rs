@@ -694,7 +694,7 @@ fn unusable_behind_the_carrier(kind: &str, carrier: Option<CarrierKind>) -> Opti
              choose a node on another protocol, or turn off \"Dial nodes through the tunnel\" \
              under Routes and transports."
         }
-        Some(CarrierKind::Psiphon) => {
+        Some(CarrierKind::Psiphon | CarrierKind::Worker) => {
             "Choose a node on another protocol, or turn off \"Dial nodes through the tunnel\" \
              under Routes and transports."
         }

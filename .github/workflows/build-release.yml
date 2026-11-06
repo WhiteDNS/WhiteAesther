@@ -195,10 +195,11 @@ jobs:
         # answering. apt retries without a deadline by default, so the job never
         # failed and never finished, which is the worst of both.
         #
-        # Bound the wait and make the failure loud: ten minutes is far longer
-        # than this step has ever legitimately needed, and a re-run of one job
-        # costs minutes where a hang costs the whole cycle.
-        timeout-minutes: 10
+        # Bound the wait and make the failure loud. A stalled request already
+        # fails on its own (Acquire::http::Timeout, 3 retries), so this cap only
+        # has to outlast a slow mirror: the Azure one has needed over ten minutes
+        # while still downloading steadily, at about a package a second.
+        timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
           # needrestart asks which services to restart, on a terminal nobody is
@@ -297,6 +298,8 @@ jobs:
       - name: Install Go for the Psiphon carrier
         uses: actions/setup-go@v6
         with:
+          # 1.26, not newer: psiphon-tunnel-core v2.0.41's TLS fork panics under
+          # Go 1.27 ("ConnectionState ... struct field count mismatch: 18 vs 17").
           go-version: "1.26"
           # Keyed on the pinned revision rather than a lockfile: the checkout is
           # made by the staging script and there is no go.sum in this repo.
@@ -304,6 +307,19 @@ jobs:
 
       - name: Stage the Psiphon carrier
         run: pnpm stage:psiphon
+
+      # The Worker carrier's engine: Xray-core at the revision the Android client
+      # pins, built from source with the Browser Dialer restricted to its own
+      # origin. The script writes the checksum the app verifies before running it.
+      # Xray's go.mod needs Go 1.27, so this step alone fetches that toolchain;
+      # Go verifies the download against its checksum database.
+      - name: Stage the Worker engine
+        env:
+          GOTOOLCHAIN: auto
+        run: pnpm stage:xray
+
+      - name: Test the Worker script
+        run: pnpm test:worker
 
       # Downloaded and checked against the digest Tor publishes for it, so the
       # check is against their number rather than one computed from whatever

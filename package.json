@@ -1,8 +1,8 @@
 {
   "name": "whiteaesther",
   "private": true,
-  "version": "1.10.4",
-  "prerelease": true,
+  "version": "1.11.0",
+  "prerelease": false,
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -14,11 +14,13 @@
     "stage:core": "node scripts/stage-core.mjs",
     "stage:chain": "node scripts/stage-chain.mjs",
     "update:iran-routes": "node scripts/update-iran-routes.mjs",
-    "desktop:dev": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && tauri dev",
-    "desktop:build": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && tauri build",
+    "desktop:dev": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && pnpm stage:xray && tauri dev",
+    "desktop:build": "pnpm stage:core && pnpm stage:chain && pnpm stage:psiphon && pnpm stage:tor && pnpm stage:xray && tauri build",
     "tauri": "tauri",
     "stage:psiphon": "node scripts/stage-psiphon.mjs",
     "stage:tor": "node scripts/stage-tor.mjs",
+    "stage:xray": "node scripts/stage-xray.mjs",
+    "test:worker": "node scripts/test-worker.mjs",
     "test:ui": "playwright test"
   },
   "dependencies": {
