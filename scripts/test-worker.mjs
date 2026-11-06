@@ -93,3 +93,31 @@ for (const pips of [[], ['relay.example.com:443']]) {
 context.fetch = async () => ({ json: async () => ({ Answer: [{ type: 1, data: '10.0.0.1' }] }) });
 await assert.rejects(vm.runInContext('nat64Address("internal.example.com", "2a02:898:146:64::")', context), /no public IPv4/);
 console.log('Worker NAT64: used without a relay and after a failing relay; private answers refused.');
+
+// Two of three NAT64 gateways dead (one refuses, one never opens): the third still carries the site.
+for (let run = 0; run < 12; run++) {
+    const dialed = [];
+    const sent = [];
+    context.setTimeout = (fn) => setImmediate(fn); // the connect timeout fires on the next turn
+    context.fetch = async () => ({ json: async () => ({ Answer: [{ type: 1, data: '104.16.124.96' }] }) });
+    context.connect = ({ hostname }) => {
+        dialed.push(hostname);
+        if (!hostname.startsWith('[2')) throw new Error('blocked');
+        if (hostname.startsWith('[2a02:898:146:64')) throw new Error('gateway down');
+        const hangs = hostname.startsWith('[2602:fc59:11:64');
+        return {
+            opened: hangs ? new Promise(() => {}) : Promise.resolve(),
+            closed: new Promise(() => {}),
+            close() {},
+            writable: { getWriter: () => ({ async write() {}, releaseLock() {} }) },
+            readable: { async pipeTo(sink) { await sink.getWriter().write(new Uint8Array([42])); } },
+        };
+    };
+    context.remote = { value: null };
+    context.socket = { readyState: 1, send(value) { sent.push(value); }, close() { this.readyState = 3; } };
+    await vm.runInContext('handleTCPOutBound(remote, "www.cloudflare.com", 443, new Uint8Array([1]), socket, new Uint8Array([0,0]), {pips: []})', context);
+    for (let i = 0; i < 50 && !sent.length; i++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.length, 1, `run ${run}: response returned through the working gateway (dialed ${dialed.join(' ')})`);
+    assert.match(dialed.at(-1), /^\[2602:fc59:b0:64::6810:7c60\]$/);
+}
+console.log('Worker NAT64: every gateway is tried in turn; dead or silent gateways do not fail the site.');

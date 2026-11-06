@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Adapted from bia-pain-bache/BPB-VPN worker/worker.js, commit 381df1270e3b81feaa7a878603ae049cf79a560f.
-// Changes: destination validation, bounded header buffering, awaited TCP setup, user relay first, then public NAT64 fallback.
+// Changes: destination validation, bounded header buffering, awaited TCP setup, user relay first, then public NAT64 fallback
+// across every gateway in turn, with a connect timeout.
 import { connect } from 'cloudflare:sockets';
 
 const WS_READY_STATE_OPEN = 1;
@@ -187,6 +188,10 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
         const tcpSocket = connect({ hostname: address, port });
         remoteSocket.value = tcpSocket;
         tcpSocket.closed.catch(() => { });
+        // A dead gateway never opens; give up so the next fallback gets its turn.
+        if (tcpSocket.opened) {
+            await Promise.race([tcpSocket.opened, new Promise((_, reject) => setTimeout(() => reject(new Error('connect timed out')), CONNECT_TIMEOUT_MS))]);
+        }
         const writer = tcpSocket.writable.getWriter();
         try { await writer.write(rawClientData); }
         finally { writer.releaseLock(); }
@@ -201,9 +206,9 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
         return connectAndWrite(host, port);
     }
 
-    async function viaNat64() {
-        return connectAndWrite(await nat64Address(addressRemote, randomItem(NAT64_PREFIXES)), portRemote);
-    }
+    // Every gateway, in random order: public NAT64 gateways go down, and one dead one must not fail the site.
+    const viaNat64 = shuffled(NAT64_PREFIXES).map((prefix) =>
+        async () => connectAndWrite(await nat64Address(addressRemote, prefix), portRemote));
 
     const fallbacks = (settings.pips.length ? [viaProxyIp] : []).concat(viaNat64);
 
@@ -228,6 +233,8 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 }
 
 const randomItem = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const shuffled = (arr) => arr.map((item) => [Math.random(), item]).sort((a, b) => a[0] - b[0]).map(([, item]) => item);
+const CONNECT_TIMEOUT_MS = 5000;
 
 // Public NAT64 gateways (the same defaults BPB ships). They see the destination, never the TLS content.
 const NAT64_PREFIXES = ['2a02:898:146:64::', '2602:fc59:b0:64::', '2602:fc59:11:64::'];
