@@ -27,6 +27,9 @@ use crate::http_bridge::socks5_connect;
 /// A routing rule that sends this address direct would measure the direct path
 /// instead; that is a deliberate choice by whoever wrote the rule.
 const TARGET_HOST: &str = "1.1.1.1";
+/// A Cloudflare Worker cannot `connect()` to Cloudflare addresses, so through
+/// the Worker carrier the round trip is timed to a host outside Cloudflare.
+const WORKER_TARGET_HOST: &str = "www.google.com";
 /// Port 80, because the probe now asks for a byte back and needs a server that
 /// will answer in the clear. There is no TLS client in this crate, and nothing
 /// here is secret -- it is a fixed request to a public resolver's web front.
@@ -43,17 +46,22 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the caller polls this on a timer, and a disconnect is an ordinary outcome,
 /// not a failure worth surfacing to the user.
 #[tauri::command]
-pub async fn probe_latency(supervisor: State<'_, CoreSupervisor>) -> Result<Option<f64>, String> {
+pub async fn probe_latency(
+    app: tauri::AppHandle,
+    supervisor: State<'_, CoreSupervisor>,
+) -> Result<Option<f64>, String> {
     let Some(socks) = supervisor.connected_socks() else {
         return Ok(None);
     };
     let address: SocketAddr = socks
         .parse()
         .map_err(|_| format!("the proxy address {socks} cannot be parsed"))?;
+    let worker = supervisor.carrier(&app).is_some_and(|carrier| carrier.kind == crate::carrier::CarrierKind::Worker);
+    let host = if worker { WORKER_TARGET_HOST } else { TARGET_HOST };
 
     // Blocking sockets on the main thread freeze the window; every other command
     // in this app learned that the hard way.
-    tauri::async_runtime::spawn_blocking(move || measure(address))
+    tauri::async_runtime::spawn_blocking(move || measure(address, host))
         .await
         .map_err(|error| format!("the latency probe did not finish: {error}"))
 }
@@ -61,7 +69,7 @@ pub async fn probe_latency(supervisor: State<'_, CoreSupervisor>) -> Result<Opti
 /// One round trip through the tunnel, for anything that needs to judge the
 /// route rather than display it.
 pub(crate) fn round_trip_ms(socks: SocketAddr) -> Option<f64> {
-    measure(socks)
+    measure(socks, TARGET_HOST)
 }
 
 /// Times a request and its first byte back, not just the handshake.
@@ -72,14 +80,14 @@ pub(crate) fn round_trip_ms(socks: SocketAddr) -> Option<f64> {
 /// a page still charted at thirty milliseconds, so the screen said the route was
 /// healthy while nothing would load. Waiting for a byte to come back is the
 /// cheapest measurement that moves when the experience does.
-fn measure(socks: SocketAddr) -> Option<f64> {
+fn measure(socks: SocketAddr, host: &str) -> Option<f64> {
     let started = Instant::now();
-    let mut stream = socks5_connect(socks, TARGET_HOST, TARGET_PORT, PROBE_TIMEOUT).ok()?;
+    let mut stream = socks5_connect(socks, host, TARGET_PORT, PROBE_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(PROBE_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(PROBE_TIMEOUT)).ok()?;
     // HEAD, so the answer is a header and nothing is downloaded to time.
     let request = format!(
-        "HEAD / HTTP/1.1\r\nHost: {TARGET_HOST}\r\nUser-Agent: WhiteAesther\r\n\n         Connection: close\r\n\r\n"
+        "HEAD / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: WhiteAesther\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).ok()?;
     let mut first = [0u8; 1];
@@ -324,6 +332,6 @@ mod tests {
     fn a_probe_against_a_dead_listener_reports_nothing_rather_than_zero() {
         // Port 1 on loopback has nothing behind it, so the connect fails fast.
         let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
-        assert_eq!(measure(dead), None, "a failed probe must not read as 0 ms");
+        assert_eq!(measure(dead, TARGET_HOST), None, "a failed probe must not read as 0 ms");
     }
 }

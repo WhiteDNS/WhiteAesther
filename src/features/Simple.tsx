@@ -713,6 +713,10 @@ const TRANSPORT_NAMES: Record<string, string> = {
   "masque-in-masque": "MASQUE in MASQUE",
   "wireguard-over-masque-h2": "WireGuard over MASQUE H2",
   "wireguard-over-masque-h3": "WireGuard over MASQUE H3",
+  // A carrier other than Aether reports its own name as the transport.
+  psiphon: "Psiphon",
+  tor: "Tor",
+  worker: "Cloudflare Worker",
 };
 
 export function transportName(value: CoreSnapshot["transport"]): string {
