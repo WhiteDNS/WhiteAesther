@@ -195,10 +195,11 @@ jobs:
         # answering. apt retries without a deadline by default, so the job never
         # failed and never finished, which is the worst of both.
         #
-        # Bound the wait and make the failure loud: ten minutes is far longer
-        # than this step has ever legitimately needed, and a re-run of one job
-        # costs minutes where a hang costs the whole cycle.
-        timeout-minutes: 10
+        # Bound the wait and make the failure loud. A stalled request already
+        # fails on its own (Acquire::http::Timeout, 3 retries), so this cap only
+        # has to outlast a slow mirror: the Azure one has needed over ten minutes
+        # while still downloading steadily, at about a package a second.
+        timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
           # needrestart asks which services to restart, on a terminal nobody is
