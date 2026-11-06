@@ -108,8 +108,24 @@ impl WorkerApi {
         text.replace(&self.token, "[token]")
     }
 
+    /// One request, retried up to three times when Cloudflare's edge answers 502/503/504.
     fn call(&self, request: ApiRequest) -> ApiResult<Value> {
-        (self.exchange)(&self.token, &request).map_err(|error| ApiError { status: error.status, message: self.scrub(&error.message) })
+        let busy = |status: u64| matches!(status, 502..=504);
+        let mut attempt = 1;
+        loop {
+            let answer = (self.exchange)(&self.token, &request);
+            let status = match &answer {
+                Ok(value) if value["success"] != true => value["httpStatus"].as_u64().unwrap_or(0),
+                Err(error) => u64::from(error.status),
+                Ok(_) => 0,
+            };
+            if !busy(status) || attempt == 3 {
+                return answer.map_err(|error| ApiError { status: error.status, message: self.scrub(&error.message) });
+            }
+            #[cfg(not(test))]
+            std::thread::sleep(Duration::from_secs(2 * attempt));
+            attempt += 1;
+        }
     }
 
     fn send(&self, method: &str, path: &str, body: Option<Value>) -> ApiResult<Value> {
@@ -154,13 +170,19 @@ impl WorkerApi {
                 "compatibility_date": date,
                 "env_vars": { "ENV": { "type": "plain_text", "value": deployment.environment() } },
             });
-            let mut body = json!({ "deployment_configs": { "production": production } });
+            let body = json!({ "deployment_configs": { "production": production } });
+            let patch = |body: Value| self.send("PATCH", &format!("{base}/pages/projects/{}", deployment.name), Some(body));
             let project = if !deployment.created {
-                body["name"] = json!(deployment.name);
-                body["production_branch"] = json!("main");
-                self.send("POST", &format!("{base}/pages/projects"), Some(body))?
+                let mut create = body.clone();
+                create["name"] = json!(deployment.name);
+                create["production_branch"] = json!("main");
+                match self.send("POST", &format!("{base}/pages/projects"), Some(create)) {
+                    // An earlier attempt created it even though its answer was lost.
+                    Err(error) if error.message.to_ascii_lowercase().contains("already exists") => patch(body)?,
+                    other => other?,
+                }
             } else {
-                self.send("PATCH", &format!("{base}/pages/projects/{}", deployment.name), Some(body))?
+                patch(body)?
             };
             let host = project["subdomain"].as_str().ok_or("Cloudflare did not return a Pages project")?;
             deployment.created = true;
@@ -470,9 +492,14 @@ fn request_https(carrier: Option<SocketAddr>, token: &str, request: &ApiRequest)
     if text.trim().is_empty() && (200..300).contains(&status) {
         return Ok(json!({ "success": true, "httpStatus": status }));
     }
-    let mut value: Value = serde_json::from_str(&text).map_err(|_| ApiError { status, message: format!("Cloudflare returned HTTP {status}") })?;
+    // A non-JSON answer (an edge error page) is quoted briefly so the failure can be diagnosed.
+    let unreadable = || {
+        let excerpt: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect();
+        ApiError { status, message: format!("Cloudflare returned HTTP {status}: {excerpt}") }
+    };
+    let mut value: Value = serde_json::from_str(&text).map_err(|_| unreadable())?;
     if !value.is_object() {
-        return Err(ApiError { status, message: format!("Cloudflare returned HTTP {status}") });
+        return Err(unreadable());
     }
     if !(200..300).contains(&status) {
         value["success"] = json!(false);
@@ -946,6 +973,49 @@ mod tests {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(951_782_400), "2000-02-29");
         assert_eq!(utc_instant(1_793_923_199), "2026-11-05T23:59:59Z");
+    }
+
+    #[test]
+    fn a_busy_edge_is_retried_and_then_reported() {
+        let calls = Arc::new(Mutex::new(0));
+        let seen = calls.clone();
+        let exchange: Exchange = Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+            if *seen.lock().unwrap() < 3 {
+                Err(ApiError { status: 503, message: "Cloudflare returned HTTP 503: busy".into() })
+            } else {
+                Ok(json!({ "success": true, "result": [] }))
+            }
+        });
+        let api = WorkerApi::with_exchange(TOKEN, "", exchange).unwrap();
+        assert!(api.accounts().unwrap().is_empty());
+        assert_eq!(*calls.lock().unwrap(), 3);
+
+        let always: Exchange = Box::new(|_, _| Ok(json!({ "success": false, "httpStatus": 503, "errors": [] })));
+        let api = WorkerApi::with_exchange(TOKEN, "", always).unwrap();
+        assert_eq!(api.accounts().unwrap_err().status, 503);
+    }
+
+    #[test]
+    fn a_pages_project_left_by_a_lost_answer_is_patched() {
+        let (api, log) = api(vec![
+            ("POST", "/accounts/0123456789abcdef0123456789abcdef/pages/projects/whiteaesther-abc/deployments", ok(json!({}))),
+            ("POST", "/accounts/0123456789abcdef0123456789abcdef/pages/projects", json!({ "success": false, "httpStatus": 409, "errors": [{ "message": "A project with this name already exists.", "code": 8000002 }] })),
+            ("PATCH", "/accounts/0123456789abcdef0123456789abcdef/pages/projects/whiteaesther-abc", ok(json!({ "subdomain": "whiteaesther-abc.pages.dev" }))),
+        ]);
+        assert!(api.deploy(&fresh(true), &|_| Ok(())).unwrap().ready);
+        assert_eq!(log.lock().unwrap()[1].0, "PATCH");
+    }
+
+    /// Live: a JSON POST with a dummy token must come back as Cloudflare's JSON 401.
+    #[test]
+    #[ignore]
+    fn live_post_reaches_cloudflare() {
+        let body = json!({ "name": "whiteaesther-x", "production_branch": "main" });
+        let request = ApiRequest::new("POST", &format!("/accounts/{ACCOUNT}/pages/projects"), Some(body));
+        let answer = request_https(None, "abcdefghijklmnopqrstuvwxyz0123456789ABCD", &request);
+        println!("{answer:?}");
+        assert_eq!(answer.unwrap()["httpStatus"], 401);
     }
 
     #[test]
