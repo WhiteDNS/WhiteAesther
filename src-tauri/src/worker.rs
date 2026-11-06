@@ -380,11 +380,26 @@ pub(crate) fn random_uuid() -> String {
     format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
+/// A name like "quiet-river-3f9a2c" that looks like any hobby project and says nothing about the app,
+/// so one leaked hostname cannot be used to find and report every other user's deployment.
+pub(crate) fn neutral_name() -> String {
+    const FIRST: [&str; 16] = [
+        "quiet", "amber", "silver", "misty", "bold", "calm", "rapid", "sunny", "lucky", "gentle", "brave", "crisp", "fuzzy", "lively", "royal", "sharp",
+    ];
+    const SECOND: [&str; 16] = [
+        "river", "forest", "meadow", "harbor", "canyon", "breeze", "falcon", "maple", "pebble", "summit", "lagoon", "willow", "comet", "garden", "island", "valley",
+    ];
+    let mut bytes = [0u8; 5];
+    getrandom::fill(&mut bytes).expect("the OS random source is available");
+    let tail: String = bytes[2..].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}-{}-{tail}", FIRST[(bytes[0] & 15) as usize], SECOND[(bytes[1] & 15) as usize])
+}
+
 impl WorkerDeployment {
     pub fn new(account_id: &str, pages: bool, relay: &str) -> Result<Self, String> {
         let deployment = Self {
             account_id: account_id.to_string(),
-            name: format!("whiteaesther-{}", random_uuid().replace('-', "")),
+            name: neutral_name(),
             pages,
             uuid: random_uuid(),
             host: String::new(),
@@ -406,8 +421,13 @@ impl WorkerDeployment {
         if !hex32(&self.account_id) {
             return Err("Invalid Cloudflare account".into());
         }
-        let suffix = self.name.strip_prefix("whiteaesther-").unwrap_or_default();
-        if !(1..=40).contains(&suffix.len()) || !suffix.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+        // Older releases named every deployment "whiteaesther-<hex>"; those stay valid.
+        let name = &self.name;
+        if !(1..=53).contains(&name.len())
+            || name.starts_with('-')
+            || name.ends_with('-')
+            || !name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        {
             return Err("Invalid deployment name".into());
         }
         if !valid_uuid(&self.uuid) {
@@ -1023,6 +1043,22 @@ mod tests {
         };
         deployment.options.mode = mode;
         deployment
+    }
+
+    #[test]
+    fn new_names_are_neutral_and_old_names_stay_valid() {
+        for _ in 0..50 {
+            let fresh = WorkerDeployment::new("0123456789abcdef0123456789abcdef", false, "").unwrap();
+            assert!(!fresh.name.contains("aesther"), "{}", fresh.name);
+            assert_eq!(fresh.name.split('-').count(), 3, "{}", fresh.name);
+        }
+        let mut old = deployment(WorkerMode::Normal);
+        old.name = format!("whiteaesther-{}", random_uuid().replace('-', ""));
+        assert!(old.validate().is_ok());
+        for bad in ["", "-x", "x-", "Upper", "a/b", &"a".repeat(54)] {
+            old.name = bad.into();
+            assert!(old.validate().is_err(), "{bad}");
+        }
     }
 
     #[test]
