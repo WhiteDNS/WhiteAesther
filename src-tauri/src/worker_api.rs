@@ -201,7 +201,7 @@ impl WorkerApi {
                 Err(error) => return Err(error),
             };
             let subdomain = if existing.is_empty() {
-                let wanted = format!("whiteaesther-{}", &random_uuid()[..12]);
+                let wanted = crate::worker::neutral_name();
                 let registered = self.send("PUT", &format!("{base}/workers/subdomain"), Some(json!({ "subdomain": wanted })))?;
                 registered["subdomain"].as_str().ok_or("Could not register workers.dev hostname")?.to_string()
             } else {
@@ -925,7 +925,7 @@ mod tests {
         ]);
         let deployed = api.deploy(&fresh(false), &|_| Ok(())).unwrap();
         assert_eq!(deployed.host, "whiteaesther-abc.new.workers.dev");
-        assert!(log.lock().unwrap().iter().any(|c| c.0 == "PUT" && c.1.ends_with("/workers/subdomain") && c.2.contains("whiteaesther-")));
+        assert!(log.lock().unwrap().iter().any(|c| c.0 == "PUT" && c.1.ends_with("/workers/subdomain") && c.2.contains("\"subdomain\"") && !c.2.contains("whiteaesther")));
     }
 
     #[test]
