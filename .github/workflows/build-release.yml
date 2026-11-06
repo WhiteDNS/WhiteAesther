@@ -297,7 +297,9 @@ jobs:
       - name: Install Go for the Psiphon carrier
         uses: actions/setup-go@v6
         with:
-          go-version: "1.27"
+          # 1.26, not newer: psiphon-tunnel-core v2.0.41's TLS fork panics under
+          # Go 1.27 ("ConnectionState ... struct field count mismatch: 18 vs 17").
+          go-version: "1.26"
           # Keyed on the pinned revision rather than a lockfile: the checkout is
           # made by the staging script and there is no go.sum in this repo.
           cache: false
@@ -308,7 +310,11 @@ jobs:
       # The Worker carrier's engine: Xray-core at the revision the Android client
       # pins, built from source with the Browser Dialer restricted to its own
       # origin. The script writes the checksum the app verifies before running it.
+      # Xray's go.mod needs Go 1.27, so this step alone fetches that toolchain;
+      # Go verifies the download against its checksum database.
       - name: Stage the Worker engine
+        env:
+          GOTOOLCHAIN: auto
         run: pnpm stage:xray
 
       - name: Test the Worker script
