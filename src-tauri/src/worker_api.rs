@@ -164,7 +164,7 @@ impl WorkerApi {
         let mut deployment = WorkerDeployment { ready: false, ..original.clone() };
         deployment.validate()?;
         let base = format!("/accounts/{}", deployment.account_id);
-        let date = utc_date(now_secs());
+        let date = COMPATIBILITY_DATE;
         if deployment.pages {
             let production = json!({
                 "compatibility_date": date,
@@ -237,6 +237,40 @@ impl WorkerApi {
         }
         let kind = if deployment.pages { "pages/projects" } else { "workers/scripts" };
         gone(self.send("DELETE", &format!("/accounts/{}/{kind}/{}", deployment.account_id, deployment.name), None).map(|_| ()))
+    }
+
+    /// Every Worker script and Pages project in the account, including ones made elsewhere.
+    // shortcut: reads the first page of each list (Cloudflare's default size), add paging if accounts grow past it.
+    pub fn list_account(&self, account_id: &str) -> ApiResult<Vec<RemoteDeployment>> {
+        if !hex32(account_id) {
+            return Err("Invalid Cloudflare account".into());
+        }
+        let base = format!("/accounts/{account_id}");
+        let subdomain = self
+            .send("GET", &format!("{base}/workers/subdomain"), None)
+            .map(|value| value["subdomain"].as_str().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        let mut list = Vec::new();
+        for row in self.send("GET", &format!("{base}/workers/scripts"), None)?.as_array().ok_or("Cloudflare did not return Worker scripts")? {
+            let name = row["id"].as_str().unwrap_or_default().to_string();
+            let host = if subdomain.is_empty() { String::new() } else { format!("{name}.{subdomain}.workers.dev") };
+            list.push(RemoteDeployment { name, pages: false, host });
+        }
+        for row in self.send("GET", &format!("{base}/pages/projects"), None)?.as_array().ok_or("Cloudflare did not return Pages projects")? {
+            let name = row["name"].as_str().unwrap_or_default().to_string();
+            list.push(RemoteDeployment { name, pages: true, host: row["subdomain"].as_str().unwrap_or_default().into() });
+        }
+        list.retain(|item| valid_remote_name(&item.name));
+        Ok(list)
+    }
+
+    /// Deletes a Worker script or Pages project by name; one that is already gone is not an error.
+    pub fn delete_named(&self, account_id: &str, name: &str, pages: bool) -> ApiResult<()> {
+        if !hex32(account_id) || !valid_remote_name(name) {
+            return Err("Invalid Cloudflare deployment".into());
+        }
+        let kind = if pages { "pages/projects" } else { "workers/scripts" };
+        gone(self.send("DELETE", &format!("/accounts/{account_id}/{kind}/{name}"), None).map(|_| ()))
     }
 
     pub fn attach_domain(
@@ -406,6 +440,19 @@ impl WorkerApi {
     }
 }
 
+/// A Worker script or Pages project found in the account.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemoteDeployment {
+    pub name: String,
+    pub pages: bool,
+    pub host: String,
+}
+
+/// Script and project names go into API paths, so only Cloudflare's own name characters pass.
+fn valid_remote_name(name: &str) -> bool {
+    (1..=63).contains(&name.len()) && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
 fn gone(outcome: ApiResult<()>) -> ApiResult<()> {
     match outcome {
         Err(error) if error.status == 404 => Ok(()),
@@ -450,6 +497,11 @@ pub(crate) fn multipart(method: &str, path: &str, fields: &[(&str, &str)], file_
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     ApiRequest { method: method.into(), path: path.into(), body: Some(body), content_type: format!("multipart/form-data; boundary={boundary}") }
 }
+
+/// A fixed runtime date the script was tested on end to end. "Today" can be newer than a
+/// Cloudflare runtime supports, and a Worker that cannot load answers every request
+/// with error 1101.
+const COMPATIBILITY_DATE: &str = "2026-10-01";
 
 const API_HOST: &str = "api.cloudflare.com";
 const MAX_RESPONSE: usize = 2_000_000;
@@ -740,6 +792,33 @@ pub async fn worker_delete(app: AppHandle, token: String, key: String) -> Result
     .await
 }
 
+/// Removes a deployment record from this computer only; Cloudflare is not contacted.
+#[tauri::command]
+pub fn worker_forget(app: AppHandle, key: String) -> Result<(), String> {
+    if in_use(&app, &key) {
+        return Err("Disconnect before deleting a deployment".into());
+    }
+    crate::worker::write_deployment(&app, &key, None)
+}
+
+#[tauri::command]
+pub async fn worker_account_list(app: AppHandle, token: String, account_id: String) -> Result<Vec<RemoteDeployment>, String> {
+    with_api(app, token, move |_, api| api.list_account(&account_id)).await
+}
+
+#[tauri::command]
+pub async fn worker_account_delete(app: AppHandle, token: String, account_id: String, name: String, pages: bool) -> Result<(), String> {
+    with_api(app, token, move |app, api| {
+        // A deployment saved here goes through its own path, which also detaches its domain.
+        let kind = if pages { "pages" } else { "workers" };
+        if crate::worker::read_deployments(app)?.iter().any(|row| row.key() == format!("{account_id}/{kind}/{name}")) {
+            return Err("This deployment is listed above; delete it from its own card".into());
+        }
+        api.delete_named(&account_id, &name, pages)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,6 +1052,25 @@ mod tests {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(951_782_400), "2000-02-29");
         assert_eq!(utc_instant(1_793_923_199), "2026-11-05T23:59:59Z");
+    }
+
+    #[test]
+    fn the_account_list_holds_workers_and_pages_and_names_are_checked() {
+        let (api, log) = api(vec![
+            ("GET", "/accounts/0123456789abcdef0123456789abcdef/workers/subdomain", ok(json!({ "subdomain": "me" }))),
+            ("GET", "/accounts/0123456789abcdef0123456789abcdef/workers/scripts", ok(json!([{ "id": "old-proxy" }, { "id": "../bad" }]))),
+            ("GET", "/accounts/0123456789abcdef0123456789abcdef/pages/projects", ok(json!([{ "name": "site", "subdomain": "site.pages.dev" }]))),
+            ("DELETE", "/accounts/", ok(json!({}))),
+        ]);
+        let list = api.list_account(ACCOUNT).unwrap();
+        assert_eq!(list, vec![
+            RemoteDeployment { name: "old-proxy".into(), pages: false, host: "old-proxy.me.workers.dev".into() },
+            RemoteDeployment { name: "site".into(), pages: true, host: "site.pages.dev".into() },
+        ]);
+        api.delete_named(ACCOUNT, "site", true).unwrap();
+        assert_eq!(log.lock().unwrap().last().unwrap().1, "/accounts/0123456789abcdef0123456789abcdef/pages/projects/site");
+        assert!(api.delete_named(ACCOUNT, "../x", false).is_err());
+        assert!(api.list_account("nothex").is_err());
     }
 
     #[test]

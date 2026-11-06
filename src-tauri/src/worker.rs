@@ -589,7 +589,8 @@ pub fn render_config(deployment: &WorkerDeployment, socks_port: u16) -> Result<S
         }]);
     }
     let mut config = json!({
-        "log": { "loglevel": "warning" },
+        // Info, so a failed dial to the Worker (e.g. "500 ... bad handshake") reaches core.log.
+        "log": { "loglevel": "info" },
         "inbounds": [{
             "tag": "worker-in",
             "listen": "127.0.0.1",

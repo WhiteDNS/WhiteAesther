@@ -13,7 +13,10 @@ import {
   workerAccounts,
   workerAttachDomain,
   workerCreate,
+  workerAccountDelete,
+  workerAccountList,
   workerDelete,
+  workerForget,
   workerDeployments,
   workerDetachDomain,
   workerSaveOptions,
@@ -121,6 +124,22 @@ export function WorkerPage({ profile, onChange, onSave, onToast }: WorkerPagePro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Also a toast, so a failure is seen next to whichever card was clicked.
+  const fail = (message: string) => {
+    setError(message);
+    onToast(t("Cloudflare Workers"), message, true);
+  };
+
+  const [others, setOthers] = useState<Array<{ name: string; pages: boolean; host: string }>>([]);
+  const loadOthers = async () => {
+    if (desktop && token.trim() && accountId) setOthers(await workerAccountList(token, accountId));
+  };
+  useEffect(() => {
+    setOthers([]);
+    loadOthers().catch((failure) => fail(String(failure)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId]);
+
   const run = async (action: () => Promise<void>) => {
     if (busy || !desktop) return;
     setBusy(true);
@@ -128,9 +147,10 @@ export function WorkerPage({ profile, onChange, onSave, onToast }: WorkerPagePro
     try {
       await action();
     } catch (failure) {
-      setError(String(failure));
+      fail(String(failure));
     } finally {
       await refresh().catch(() => {});
+      await loadOthers().catch(() => {});
       setBusy(false);
     }
   };
@@ -250,9 +270,46 @@ export function WorkerPage({ profile, onChange, onSave, onToast }: WorkerPagePro
               onChange({ ...profile, worker: { deployment: "" } });
             }
           }}
-          onError={setError}
+          onError={fail}
         />
       ))}
+
+      {accountId && token.trim() ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-[15px]">{t("Other Workers and Pages in this account")}</CardTitle>
+            <CardDescription>{t("Made outside this computer, so they can be deleted here but not connected through.")}</CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="pb-3">
+              <Button variant="outline" disabled={busy} onClick={() => void run(loadOthers)}>
+                {t("Refresh list")}
+              </Button>
+            </div>
+            {others
+              .filter((item) => !deployments.some((row) => row.accountId === accountId && row.name === item.name && row.pages === item.pages))
+              .map((item) => (
+                <div key={`${item.pages}/${item.name}`} className="flex flex-wrap items-center gap-2 border-t border-border py-2.5">
+                  <span className="font-mono text-[12.5px]">{item.name}</span>
+                  <Badge variant="outline">{item.pages ? "Pages" : "Workers"}</Badge>
+                  <span className="font-mono text-[12px] text-muted-foreground">{item.host || "—"}</span>
+                  <Button
+                    variant="outline"
+                    className="ms-auto"
+                    disabled={busy}
+                    onClick={() => {
+                      const question = t("Delete %1$s from Cloudflare? This cannot be undone.").replace("%1$s", item.name);
+                      if (!window.confirm(question)) return;
+                      void run(async () => void (await workerAccountDelete(token, accountId, item.name, item.pages)));
+                    }}
+                  >
+                    {t("Delete")}
+                  </Button>
+                </div>
+              ))}
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }
@@ -306,19 +363,26 @@ function DeploymentCard({
           ) : null}
           <Button
             variant="outline"
-            disabled={busy || !token.trim() || active}
-            onClick={() => void run(async () => void (await workerUpdate(token, deployment.key, deployment.relay)))}
+            disabled={busy}
+            onClick={() => {
+              if (!token.trim()) return onError(t("Paste the API token above to update or delete this deployment."));
+              void run(async () => void (await workerUpdate(token, deployment.key, deployment.relay)));
+            }}
           >
             {deployment.ready ? t("Update deployment") : t("Retry deployment")}
           </Button>
           <Button
             variant="outline"
-            disabled={busy || !token.trim() || active}
+            disabled={busy}
             onClick={() => {
-              const question = t("Delete %1$s from Cloudflare? This removes its remote proxy. Disconnect the VPN first.").replace("%1$s", deployment.name);
+              // Without a token Cloudflare cannot be asked, so only the record here can go.
+              const remote = Boolean(token.trim());
+              const question = remote
+                ? t("Delete %1$s from Cloudflare? This removes its remote proxy. Disconnect the VPN first.").replace("%1$s", deployment.name)
+                : t("Without the API token this only removes %1$s from this computer; it stays on Cloudflare. Remove it here?").replace("%1$s", deployment.name);
               if (!window.confirm(question)) return;
               void run(async () => {
-                await workerDelete(token, deployment.key);
+                await (remote ? workerDelete(token, deployment.key) : workerForget(deployment.key));
                 onDeleted();
               });
             }}

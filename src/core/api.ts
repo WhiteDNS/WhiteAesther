@@ -528,3 +528,20 @@ export async function workerDelete(token: string, key: string): Promise<void> {
   requireDesktop();
   return invoke("worker_delete", { token, key });
 }
+
+/** Removes a deployment from this computer only; it stays on Cloudflare. */
+export async function workerForget(key: string): Promise<void> {
+  requireDesktop();
+  return invoke("worker_forget", { key });
+}
+
+/** Every Worker script and Pages project in the account, including ones made elsewhere. */
+export async function workerAccountList(token: string, accountId: string): Promise<Array<{ name: string; pages: boolean; host: string }>> {
+  requireDesktop();
+  return invoke("worker_account_list", { token, accountId });
+}
+
+export async function workerAccountDelete(token: string, accountId: string, name: string, pages: boolean): Promise<void> {
+  requireDesktop();
+  return invoke("worker_account_delete", { token, accountId, name, pages });
+}

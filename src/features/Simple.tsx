@@ -475,12 +475,15 @@ function Searching({ snapshot }: SimpleProps) {
           label={`${transportName(snapshot.transport)} — ${t("testing gateways")}`}
         />
       </div>
-      <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/[0.06] p-2.5">
-        <Search className="size-3.5 shrink-0 text-primary" />
-        <span className="text-[12px] text-muted-foreground">
-          {t("Retries alternate the two MASQUE transports on their own. Nothing to do.")}
-        </span>
-      </div>
+      {/* Only the Aether engine alternates MASQUE transports; other carriers report their own name. */}
+      {!["psiphon", "tor", "worker"].includes(snapshot.transport ?? "") ? (
+        <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/[0.06] p-2.5">
+          <Search className="size-3.5 shrink-0 text-primary" />
+          <span className="text-[12px] text-muted-foreground">
+            {t("Retries alternate the two MASQUE transports on their own. Nothing to do.")}
+          </span>
+        </div>
+      ) : null}
       {attempt > 0 ? (
         <p className="mt-auto pt-3 text-[12px] text-muted-foreground">
           {t("Attempt")} {attempt} {t("of")} {snapshot.maxAttempts}.

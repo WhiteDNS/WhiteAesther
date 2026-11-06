@@ -441,6 +441,9 @@ pub fn run() {
             worker_api::worker_detach_domain,
             worker_api::worker_usage,
             worker_api::worker_delete,
+            worker_api::worker_forget,
+            worker_api::worker_account_list,
+            worker_api::worker_account_delete,
         ])
         .build(tauri::generate_context!())
         .expect("error while running WhiteAesther")
