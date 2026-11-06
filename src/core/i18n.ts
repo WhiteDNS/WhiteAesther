@@ -17,6 +17,8 @@
  * this is a lookup and a listener.
  */
 
+import { WORKER_FA } from "./worker-i18n.ts";
+
 export type Language = "en" | "fa";
 
 /** Right to left is a property of the language, so it is decided here. */
@@ -32,6 +34,7 @@ const STORAGE_KEY = "whiteaesther.language";
  * understands is worse than an English one they can paste into a search.
  */
 const FA: Record<string, string> = {
+  ...WORKER_FA,
   "ClientHello shape": "شکل ClientHello",
   "Automatic recovery also tries these TLS record layouts.": "بازیابی خودکار این شکل‌های رکورد TLS را هم امتحان می‌کند.",
   "TCP fragments": "تکه‌های TCP",

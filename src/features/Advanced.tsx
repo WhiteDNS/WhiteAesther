@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/core/useT";
 import {
-  Activity, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
+  Activity, Cloud, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,7 @@ import {
 import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
 import { Chain } from "./Chain";
 import { Scanner } from "./Scanner";
+import { WorkerPage } from "./Worker";
 import { transportName } from "./Simple";
 // Bundled into the app rather than read from disk at runtime: the obligation is
 // to ship these words with the binary, and a file read that can fail is not
@@ -55,6 +56,7 @@ type SectionId =
   | "routes"
   | "endpoint"
   | "chain"
+  | "worker"
   | "traffic"
   | "identity"
   | "diagnostics"
@@ -66,6 +68,7 @@ const SECTIONS: Array<{ group: string; items: Array<{ id: SectionId; label: stri
     { id: "routes", label: "Routes & transports", icon: RouteIcon },
     { id: "endpoint", label: "Endpoint", icon: Globe },
     { id: "chain", label: "Exit chain", icon: Link2 },
+    { id: "worker", label: "Cloudflare Workers", icon: Cloud },
   ] },
   { group: "System", items: [
     { id: "traffic", label: "Traffic & DNS", icon: Wifi },
@@ -82,6 +85,7 @@ const BLURB: Record<SectionId, string> = {
   routes: "How hard to search, what the tunnel rides on, and how it hides.",
   endpoint: "Pin a specific gateway, or let the core find one.",
   chain: "Send the tunnel's traffic on through a node of your own, so the address you appear from changes.",
+  worker: "Deploy and manage your own TCP proxy on Workers or Pages.",
   traffic: "Where traffic goes once the tunnel is up.",
   identity: "Cloudflare Zero Trust enrolment, and a backup of this device's identity.",
   diagnostics: "The core executable, logging, and a report you can hand to someone.",
@@ -189,6 +193,7 @@ export function Advanced(props: AdvancedProps) {
             onToast={props.onToast}
           />
         )}
+        {section === "worker" && <WorkerPage {...props} />}
         {section === "traffic" && <Traffic {...props} />}
         {section === "identity" && <Identity {...props} />}
         {section === "diagnostics" && <Diagnostics {...props} />}
@@ -391,12 +396,18 @@ const CARRIERS: Array<{ id: CarrierKind; label: string; detail: string }> = [
     label: "Tor",
     detail: "Three relays. The strongest against being identified, and the slowest. No UDP.",
   },
+  {
+    id: "worker",
+    label: "Cloudflare Worker",
+    detail: "Independent VLESS connection: Normal, Fragment or Browser Dialer.",
+  },
 ];
 
 const CARRIER_NAME: Record<CarrierKind, string> = {
   aether: "Aether",
   psiphon: "Psiphon",
   tor: "Tor",
+  worker: "Cloudflare Worker",
 };
 
 /**
@@ -410,6 +421,7 @@ const AS_EXIT: Record<CarrierKind, string> = {
   aether: "Needs an Aether identity already on this machine — it cannot register a new one through another carrier.",
   psiphon: "Can be pinned to a country below. Slower to connect.",
   tor: "A Tor exit relay, in a country nobody here chooses. No UDP.",
+  worker: "The Cloudflare Worker is a connection method of its own and cannot be chained.",
 };
 
 /** Where the traffic comes out, given the hop that ends the chain. */
@@ -417,6 +429,7 @@ const EXIT_NOTE: Record<CarrierKind, string> = {
   aether: "Comes out on Cloudflare's network, close to you. This does not change your country.",
   psiphon: "Comes out wherever Psiphon has capacity, and can be pinned to a country below.",
   tor: "Comes out at a Tor exit relay.",
+  worker: "Traffic exits through the selected Worker. Choose another connection method to configure an exit node.",
 };
 
 /**
@@ -426,7 +439,7 @@ const EXIT_NOTE: Record<CarrierKind, string> = {
  * "command not supported", which is why it reads false here despite having
  * shipped as true once. A chain carries UDP only if every hop does.
  */
-const CARRIES_UDP: Record<CarrierKind, boolean> = { aether: true, psiphon: false, tor: false };
+const CARRIES_UDP: Record<CarrierKind, boolean> = { aether: true, psiphon: false, tor: false, worker: false };
 
 /** One choice in either hop picker. */
 function CarrierButton({
@@ -1072,7 +1085,10 @@ function CarrierPanel({
               // network through itself for twice the delay.
               onClick={() =>
                 set({
-                  carriers: { first: option.id, second: chain.second === option.id ? null : chain.second },
+                  carriers: {
+                    first: option.id,
+                    second: chain.second === option.id || option.id === "worker" ? null : chain.second,
+                  },
                 })
               }
             />
@@ -1088,7 +1104,8 @@ function CarrierPanel({
             onClick={() => set({ carriers: { first: chain.first, second: null } })}
           />
           {offered
-            .filter((option) => option.id !== chain.first)
+            // The Worker is a connection method of its own, in neither position of a chain.
+            .filter((option) => option.id !== chain.first && option.id !== "worker" && chain.first !== "worker")
             .map((option) => (
               <CarrierButton
                 key={option.id}

@@ -78,6 +78,7 @@ test("no attempt is cut before the carrier it is waiting for can answer", () => 
     aether: 140_000 + 30_000,
     psiphon: 315_000, // ESTABLISH_TIMEOUT, psiphon.rs
     tor: 180_000, // BOOTSTRAP_TIMEOUT, tor.rs
+    worker: 90_000, // START_TIMEOUT, worker.rs
   };
   for (const chain of searchOrder(null)) {
     const needed = (OWN_DEADLINE_MS[chain.first] ?? 0)

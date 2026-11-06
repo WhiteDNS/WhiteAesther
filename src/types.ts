@@ -16,7 +16,7 @@ export const ENDPOINT_MODES: Array<{ id: EndpointMode; label: string; detail: st
  * interface into. The strings are a stored format — they are what the backend
  * serialises into the saved profile.
  */
-export type CarrierKind = "aether" | "psiphon" | "tor";
+export type CarrierKind = "aether" | "psiphon" | "tor" | "worker";
 
 /**
  * An ordered pair of carriers.
@@ -75,6 +75,63 @@ export interface PsiphonSettings {
  * binary — not a list of ours, which would rot between releases.
  */
 export type BridgeMode = "none" | "built-in" | "custom";
+
+export type WorkerMode = "NORMAL" | "FRAGMENT" | "BROWSER";
+
+export interface WorkerFragment {
+  packets: string;
+  lengths: string;
+  delays: string;
+  maxSplit: string;
+}
+
+/** Connection settings for one deployment; validated again by the backend. */
+export interface WorkerOptions {
+  mode: WorkerMode;
+  cleanAddresses: string[];
+  ports: number[];
+  fingerprint: string;
+  remoteDns: string;
+  ech: boolean;
+  echDns: string;
+  customCdn: boolean;
+  cdnAddresses: string[];
+  cdnHost: string;
+  cdnSni: string;
+  fragments: WorkerFragment[];
+  upstreamProxy: string;
+  proxyIps: string[];
+  fallbackUrl: string;
+  tcpFastOpen: boolean;
+  probeInterval: number;
+}
+
+/** A deployment as the backend shows it: its connection identity stays in the backend. */
+export interface WorkerDeployment {
+  key: string;
+  accountId: string;
+  name: string;
+  pages: boolean;
+  host: string;
+  relay: string;
+  created: boolean;
+  ready: boolean;
+  options: WorkerOptions;
+  customDomain: string;
+  domainPending: boolean;
+}
+
+export interface WorkerAccount {
+  id: string;
+  name: string;
+}
+
+export interface WorkerSnapshot {
+  state: "idle" | "connecting" | "connected" | "error";
+  socksPort: number | null;
+  deployment: string | null;
+  lastError: string | null;
+}
 
 export interface TorSettings {
   bridges: BridgeMode;
@@ -269,6 +326,8 @@ export interface ConnectionProfile {
   psiphon: PsiphonSettings;
   /** How the Tor carrier runs. Ignored unless `carrier` selects it. */
   tor: TorSettings;
+  /** Which Cloudflare Worker deployment to connect through; empty picks the only ready one. */
+  worker: { deployment: string };
   /** The second hop that changes the exit address. Off unless configured. */
   chain: ChainSettings;
   /** Whether other devices on this network may use the tunnel. */
@@ -383,6 +442,7 @@ export const DEFAULT_PROFILE: ConnectionProfile = {
   carriers: { first: "aether", second: null },
   psiphon: { egressRegion: "" },
   tor: { bridges: "none", transport: "obfs4", customBridges: "" },
+  worker: { deployment: "" },
   chain: { enabled: false, throughTunnel: true, sources: [], manual: "", node: null },
   lanShare: { enabled: false, port: 1080, username: "", password: "" },
   killSwitch: false,

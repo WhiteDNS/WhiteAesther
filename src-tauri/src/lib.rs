@@ -19,6 +19,8 @@ mod system_proxy;
 mod tls;
 mod tls_options;
 mod tor;
+mod worker;
+mod worker_api;
 
 use chain::Chain;
 use core_supervisor::CoreSupervisor;
@@ -121,6 +123,9 @@ pub(crate) fn carriers_installed(app: &AppHandle) -> Vec<carrier::CarrierKind> {
     }
     if tor::is_available(app) {
         available.push(carrier::CarrierKind::Tor);
+    }
+    if worker::is_available(app) {
+        available.push(carrier::CarrierKind::Worker);
     }
     available
 }
@@ -275,6 +280,7 @@ pub fn run() {
         .manage(Chain::new())
         .manage(psiphon::Psiphon::new())
         .manage(tor::Tor::new())
+        .manage(worker::Worker::new())
         .manage(lan_share::LanDoor::default())
         .setup(|app| {
             // A previous run that was killed rather than closed may have left
@@ -424,6 +430,17 @@ pub fn run() {
             tor_log,
             carriers_available,
             fetch_bridges,
+            worker_api::worker_status,
+            worker_api::worker_token_url,
+            worker_api::worker_deployments,
+            worker_api::worker_accounts,
+            worker_api::worker_create,
+            worker_api::worker_update,
+            worker_api::worker_save_options,
+            worker_api::worker_attach_domain,
+            worker_api::worker_detach_domain,
+            worker_api::worker_usage,
+            worker_api::worker_delete,
         ])
         .build(tauri::generate_context!())
         .expect("error while running WhiteAesther")

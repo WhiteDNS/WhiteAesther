@@ -77,8 +77,18 @@ pub(crate) fn carries_verified_traffic_unless(
     socks: SocketAddr,
     give_up: &dyn Fn() -> bool,
 ) -> Result<(), String> {
+    answers_any(socks, &TARGETS, give_up)
+}
+
+/// The same question against caller-chosen hosts. The Worker carrier needs
+/// targets outside Cloudflare, which a Worker cannot dial directly.
+pub(crate) fn answers_any(
+    socks: SocketAddr,
+    targets: &[&str],
+    give_up: &dyn Fn() -> bool,
+) -> Result<(), String> {
     let mut last = String::from("no targets were tried");
-    for host in TARGETS {
+    for &host in targets {
         if give_up() {
             return Err(last);
         }

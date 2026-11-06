@@ -10,6 +10,10 @@ import type {
   CoreSnapshot,
   PsiphonSnapshot,
   TorSnapshot,
+  WorkerAccount,
+  WorkerDeployment,
+  WorkerOptions,
+  WorkerSnapshot,
 } from "../types";
 
 export function isDesktopRuntime(): boolean {
@@ -464,4 +468,63 @@ export async function chainSelect(node: string): Promise<void> {
 export async function setSystemProxy(enabled: boolean): Promise<boolean> {
   requireDesktop();
   return invoke("set_system_proxy", { enabled });
+}
+
+/*
+ * Cloudflare Worker management. The API token is passed with each call and held
+ * only in the screen's memory; the backend never stores it.
+ */
+export async function workerStatus(): Promise<WorkerSnapshot> {
+  requireDesktop();
+  return invoke("worker_status");
+}
+
+export async function workerTokenUrl(): Promise<string> {
+  requireDesktop();
+  return invoke("worker_token_url");
+}
+
+export async function workerDeployments(): Promise<WorkerDeployment[]> {
+  requireDesktop();
+  return invoke("worker_deployments");
+}
+
+export async function workerAccounts(token: string): Promise<WorkerAccount[]> {
+  requireDesktop();
+  return invoke("worker_accounts", { token });
+}
+
+export async function workerCreate(token: string, accountId: string, pages: boolean, relay: string): Promise<WorkerDeployment> {
+  requireDesktop();
+  return invoke("worker_create", { token, accountId, pages, relay });
+}
+
+export async function workerUpdate(token: string, key: string, relay: string): Promise<WorkerDeployment> {
+  requireDesktop();
+  return invoke("worker_update", { token, key, relay });
+}
+
+export async function workerSaveOptions(token: string, key: string, options: WorkerOptions): Promise<WorkerDeployment> {
+  requireDesktop();
+  return invoke("worker_save_options", { token, key, options });
+}
+
+export async function workerAttachDomain(token: string, key: string, hostname: string): Promise<WorkerDeployment> {
+  requireDesktop();
+  return invoke("worker_attach_domain", { token, key, hostname });
+}
+
+export async function workerDetachDomain(token: string, key: string): Promise<WorkerDeployment> {
+  requireDesktop();
+  return invoke("worker_detach_domain", { token, key });
+}
+
+export async function workerUsage(token: string, key: string): Promise<[number, number]> {
+  requireDesktop();
+  return invoke("worker_usage", { token, key });
+}
+
+export async function workerDelete(token: string, key: string): Promise<void> {
+  requireDesktop();
+  return invoke("worker_delete", { token, key });
 }
