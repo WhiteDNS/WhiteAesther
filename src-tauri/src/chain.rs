@@ -937,7 +937,10 @@ fn render(plan: &RenderPlan) -> String {
                 format!("\n    proxy: {name}"),
             )
         }
-        None => (String::new(), String::new()),
+        // No tunnel: the fetch still has to name a route. Left unset it falls
+        // to MATCH,exit, and the exit group is empty until this very fetch
+        // fills it, so every new subscription was refused (`exit[REJECT]`).
+        None => (String::new(), "\n    proxy: DIRECT".to_string()),
     };
 
     let mut names: Vec<String> = Vec::new();
@@ -1515,11 +1518,21 @@ mod tests {
     }
 
     #[test]
-    fn without_a_tunnel_the_fetch_names_no_proxy_at_all() {
+    fn without_a_tunnel_the_fetch_goes_direct_rather_than_through_the_empty_exit() {
+        // Unset, the fetch fell to MATCH,exit while the exit group was still
+        // empty -- it is filled by this fetch -- so a new subscription was
+        // REJECTed and never loaded.
         let sources = [source("ours", "https://example.com/a")];
         let refs: Vec<&ChainSource> = sources.iter().collect();
-        let config = render(&RenderPlan { mixed: 1820, api: 1821, secret: "s", sources: &refs, ..Default::default() });
+        let config = render(&RenderPlan { mixed: 1820, api: 1821, secret: "s", sources: &refs, manual: "vless://pasted", ..Default::default() });
+        assert!(config.contains("    type: http\n"), "{config}");
+        assert!(config.contains("\n    proxy: DIRECT\n"), "{config}");
         assert!(!config.contains("proxy: aether"), "there is no tunnel to fetch through");
+        assert!(!config.contains(",DIRECT\n  - MATCH"), "a fetch route is not a rule");
+        // The pasted block is a file: nothing to fetch, so no route.
+        let manual = &config[config.find("  manual:").unwrap()..];
+        let manual = &manual[..manual.find("health-check").unwrap()];
+        assert!(!manual.contains("proxy:"), "{manual}");
     }
 
     #[test]
