@@ -98,7 +98,7 @@ pub fn write_combined_routes_file(
 /// than being folded into whichever one came before it. Reimplemented rather
 /// than shared, because it belongs to a different crate; kept in step with
 /// `aether::routing::split_sections` by the tests below.
-fn split_sections(text: &str) -> (String, String) {
+pub(crate) fn split_sections(text: &str) -> (String, String) {
     let mut block = String::new();
     let mut direct = String::new();
     let mut current: Option<&mut String> = None;

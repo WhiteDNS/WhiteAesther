@@ -14,6 +14,7 @@ mod psiphon;
 mod race;
 mod recovery;
 mod route_memory;
+mod rule_lists;
 mod scanner;
 mod system_proxy;
 mod tls;
@@ -150,6 +151,29 @@ async fn fetch_bridges(
     tauri::async_runtime::spawn_blocking(move || moat::fetch_bridges(&country, carrier))
         .await
         .map_err(|error| format!("the bridge request did not finish: {error}"))?
+}
+
+/// Whether this machine has a global IPv6 address with a route out.
+///
+/// Asked of the routing table, not the network: connecting a UDP socket sends
+/// nothing and only picks the source address the OS would use. A link-local or
+/// unique-local source is what a network without IPv6 hands back.
+#[tauri::command]
+fn has_global_ipv6() -> bool {
+    let Ok(socket) = std::net::UdpSocket::bind("[::]:0") else { return false };
+    if socket.connect("[2606:4700:4700::1111]:443").is_err() {
+        return false;
+    }
+    match socket.local_addr() {
+        Ok(std::net::SocketAddr::V6(local)) => is_global_v6(local.ip()),
+        _ => false,
+    }
+}
+
+fn is_global_v6(address: &std::net::Ipv6Addr) -> bool {
+    let first = address.segments()[0];
+    // 2000::/3 is the global unicast space; everything else here is local or special.
+    (first & 0xe000) == 0x2000 && !address.is_loopback()
 }
 
 /// Every node the chain knows about, with the delay each last recorded.
@@ -430,6 +454,12 @@ pub fn run() {
             tor_log,
             carriers_available,
             fetch_bridges,
+            has_global_ipv6,
+            rule_lists::rule_lists,
+            rule_lists::rule_list_import,
+            rule_lists::rule_list_set_enabled,
+            rule_lists::rule_list_delete,
+            rule_lists::rule_match,
             worker_api::worker_status,
             worker_api::worker_token_url,
             worker_api::worker_deployments,
@@ -464,4 +494,24 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod ipv6_tests {
+    use super::is_global_v6;
+
+    #[test]
+    fn only_global_unicast_counts_as_ipv6_here() {
+        for (address, global) in [
+            ("2a01:4f8::1", true),
+            ("2606:4700:4700::1111", true),
+            ("fe80::1", false),
+            ("fd00::1", false),
+            ("::1", false),
+            ("::", false),
+            ("::ffff:192.0.2.1", false),
+        ] {
+            assert_eq!(is_global_v6(&address.parse().unwrap()), global, "{address}");
+        }
+    }
 }

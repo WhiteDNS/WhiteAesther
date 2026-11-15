@@ -186,6 +186,30 @@ const FA: Record<string, string> = {
   Stealth: "مخفی",
   Aggressive: "تهاجمی",
   "IPv4 only": "فقط IPv4",
+  "no equivalent here": "معادلی این\u200cجا ندارد",
+  "needs a geosite or geoip database": "به پایگاه geosite یا geoip نیاز دارد",
+  "too broad": "بیش از حد گسترده",
+  "duplicate": "تکراری",
+  "over the 5,000-rule limit": "بیش از سقف ۵٬۰۰۰ قانون",
+  "{n} rules imported.": "{n} قانون وارد شد.",
+  "Left out:": "کنار گذاشته شد:",
+  "Rule list imported": "فهرست قوانین وارد شد",
+  "Nothing imported": "چیزی وارد نشد",
+  "Imported lists": "فهرست\u200cهای واردشده",
+  "Import never-send list": "وارد کردن فهرست «هرگز نفرست»",
+  "Import bypass list": "وارد کردن فهرست «بدون تونل»",
+  "From a local file: plain domains, hosts files, addresses and CIDRs, or Clash rule lists. Up to 5,000 rules a list and 10,000 across the lists that are on.": "از یک فایل محلی: دامنه\u200cهای ساده، فایل hosts، آدرس و CIDR، یا فهرست قوانین Clash. تا ۵٬۰۰۰ قانون در هر فهرست و ۱۰٬۰۰۰ در مجموع فهرست\u200cهای روشن.",
+  "{n} rules": "{n} قانون",
+  "Delete {name}": "حذف {name}",
+  "Which rule does this destination meet?": "این مقصد با کدام قانون می\u200cخورد؟",
+  "Never sent, by {rule}": "هرگز فرستاده نمی\u200cشود، با قانون {rule}",
+  "Bypasses the tunnel, by {rule}": "بدون تونل می\u200cرود، با قانون {rule}",
+  "Goes through the tunnel: no rule names it.": "از تونل می\u200cرود: هیچ قانونی نامش را نبرده است.",
+  "Worked out from the rules alone, without looking the name up.": "فقط از روی قوانین محاسبه شده، بدون جست\u200cوجوی نام.",
+  "Reconnecting": "اتصال دوباره",
+  "No obfuscation. Faster where nothing inspects the tunnel; on a filtered network it is the setting most likely to stop the connection working.":
+    "بدون مبهم‌سازی. جایی که کسی تونل را بررسی نمی‌کند سریع‌تر است؛ روی شبکهٔ فیلترشده بیشترین احتمال را دارد که اتصال را از کار بیندازد.",
+  "The connection is starting again with the changed setting.": "اتصال با تنظیم تازه دوباره برقرار می‌شود.",
 
   // -- how far the tunnel reaches -------------------------------------------
   "This app only": "فقط همین برنامه",
@@ -240,7 +264,13 @@ const FA: Record<string, string> = {
   "Iran routing lists": "لیست‌های مسیریابی ایران",
   "The addresses and domains behind “Iranian sites bypass the tunnel”, bundled as data. Source at github.com/Chocolate4U/Iran-clash-rules": "آدرس‌ها و دامنه‌های پشت گزینهٔ «سایت‌های ایرانی از تونل خارج شوند»، که به‌صورت داده همراه برنامه‌اند. منبع: github.com/Chocolate4U/Iran-clash-rules",
   "Deeper searches take longer but survive stricter filtering.": "جستجوی عمیق‌تر بیشتر طول می‌کشد ولی از فیلترینگ سخت‌گیرتر عبور می‌کند.",
-  "Turn off IPv6 where the network handles it badly.": "در شبکه‌هایی که IPv6 را درست هندل نمی‌کنند، خاموشش کنید.",
+  "Which Cloudflare addresses the engine dials. Apps inside the tunnel still get both.":
+    "تعیین می‌کند موتور به کدام آدرس‌های Cloudflare وصل شود. برنامه‌های داخل تونل همچنان هر دو را دارند.",
+  "IPv6 only": "فقط IPv6",
+  "This network has no IPv6 address, so IPv6 only will not connect here.":
+    "این شبکه آدرس IPv6 ندارد، پس «فقط IPv6» این‌جا وصل نمی‌شود.",
+  "The custom endpoint is not in the address family chosen under Addresses.":
+    "نقطهٔ پایانی سفارشی با نوع آدرسی که در «آدرس‌ها» انتخاب شده نمی‌خواند.",
   "Reuse the last working edge": "استفادهٔ دوباره از آخرین دروازهٔ سالم",
   "Verify the cached gateway before scanning fresh.": "قبل از جستجوی تازه، دروازهٔ ذخیره‌شده را بررسی می‌کند.",
   "End-to-end data check": "بررسی عبور واقعی داده",
@@ -390,8 +420,8 @@ const FA: Record<string, string> = {
     "در حال جابه‌جایی خروج. این کار دوباره وصل می‌شود، پس به اندازهٔ یک اتصال طول می‌کشد.",
   "The country list is Psiphon's own and arrives once you have connected at least once.":
     "فهرست کشورها را خود سایفون می‌دهد و پس از نخستین اتصال می‌رسد.",
-  "The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.":
-    "تنظیمات ترابرد، جستجو و ضدمسدودسازی به موتور Aether مربوط‌اند. برای دیدنشان بالا Aether را انتخاب کنید.",
+  "Settings on this page belong to the Aether engine. {carrier} does not use it, so they wait until Aether is back in the connection. A Worker has its own TLS options in its settings.":
+    "تنظیم‌های این صفحه مال موتور اتر است. {carrier} از آن استفاده نمی‌کند، پس تا وقتی اتر دوباره در مسیر اتصال نباشد اثری ندارند. Worker گزینه‌های TLS خودش را در تنظیمات خودش دارد.",
   "The first connect on a hard network can take several minutes: Psiphon has to fetch its own settings before it can use the routes that work there. Later connects are much faster.":
     "اولین اتصال روی یک شبکهٔ سخت می‌تواند چند دقیقه طول بکشد: سایفون باید اول تنظیمات خودش را بگیرد تا بتواند از مسیرهایی که آنجا کار می‌کنند استفاده کند. اتصال‌های بعدی خیلی سریع‌ترند.",
   "Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.":

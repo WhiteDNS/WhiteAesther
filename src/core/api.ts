@@ -167,6 +167,12 @@ export async function probeCarrier(): Promise<string | null> {
   return invoke("probe_carrier");
 }
 
+/** Whether this machine has a global IPv6 address the OS would route out of. */
+export async function hasGlobalIpv6(): Promise<boolean> {
+  if (!isDesktopRuntime()) return true;
+  return invoke("has_global_ipv6");
+}
+
 export type EngineRecipe = Pick<ConnectionProfile,
   "protocol" | "masqueTransport" | "fragmentClientHello" | "helloShape" | "fragmentSize" | "fragmentDelay" | "fragmentSni" | "ech" | "ipFamily" | "scanMode"
 >;
@@ -544,4 +550,57 @@ export async function workerAccountList(token: string, accountId: string): Promi
 export async function workerAccountDelete(token: string, accountId: string, name: string, pages: boolean): Promise<void> {
   requireDesktop();
   return invoke("worker_account_delete", { token, accountId, name, pages });
+}
+
+export type RuleAction = "block" | "direct";
+
+/** One imported list. Its rules stay in the app's data directory, never in the profile. */
+export interface RuleList {
+  id: string;
+  name: string;
+  action: RuleAction;
+  importedAt: number;
+  count: number;
+  enabled: boolean;
+}
+
+export type IgnoredBecause = "unsupported" | "needsDatabase" | "tooBroad" | "duplicate" | "overLimit";
+
+export interface RuleImportOutcome {
+  cancelled: boolean;
+  list: RuleList | null;
+  accepted: number;
+  ignored: Partial<Record<IgnoredBecause, number>>;
+}
+
+export interface RuleMatch {
+  /** null is the tunnel. */
+  action: RuleAction | null;
+  rule: string | null;
+}
+
+export async function ruleLists(): Promise<RuleList[]> {
+  if (!isDesktopRuntime()) return [];
+  return invoke("rule_lists");
+}
+
+export async function importRuleList(action: RuleAction): Promise<RuleImportOutcome> {
+  requireDesktop();
+  return invoke("rule_list_import", { action });
+}
+
+export async function setRuleListEnabled(id: string, enabled: boolean): Promise<void> {
+  requireDesktop();
+  return invoke("rule_list_set_enabled", { id, enabled });
+}
+
+export async function deleteRuleList(id: string): Promise<void> {
+  requireDesktop();
+  return invoke("rule_list_delete", { id });
+}
+
+/** Which rule a destination meets, worked out from the rules alone: no lookup. */
+export async function matchRule(destination: string, block: string, direct: string): Promise<RuleMatch> {
+  requireDesktop();
+  return invoke("rule_match", { destination, block, direct });
 }

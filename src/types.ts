@@ -50,9 +50,16 @@ export function carrierChainHas(chain: CarrierChain, kind: CarrierKind): boolean
   return chain.first === kind || chain.second === kind;
 }
 
-/** The Aether engine on its own — the only case its own settings apply to. */
-export function isLoneAether(chain: CarrierChain): boolean {
-  return chain.first === "aether" && chain.second === null;
+/**
+ * Whether the Aether engine is part of this connection, and so whether its
+ * settings (addresses, obfuscation, TLS, a pinned endpoint) do anything.
+ *
+ * The one place that answers it: the screens and the connect checks both read
+ * this. Automatic routing may pick Aether, and Aether in either hop of a chain
+ * still dials Cloudflare with its own settings.
+ */
+export function engineSettingsApply(profile: Pick<ConnectionProfile, "autoRoute" | "carriers">): boolean {
+  return profile.autoRoute || carrierChainHas(profile.carriers, "aether");
 }
 
 export interface PsiphonSettings {

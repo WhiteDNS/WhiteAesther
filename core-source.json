@@ -1,7 +1,7 @@
 {
   "repository": "WhiteDNS/WhiteAestherMobile",
   "version": "2.4.0",
-  "revision": "2409297365e23e3fd320a87c0da73d0656bee67c",
+  "revision": "6e2ade9e86c5f66194c66e6be1e23b40677c2db2",
   "sourceDirectory": "native/aether",
   "overlays": [
     {
@@ -13,7 +13,7 @@
   "patches": [
     {
       "path": "patches/aether/desktop-adapters.patch",
-      "sha256": "349f0a68038f108982810db30dc4b68bf4bd91a46be152b48c3675e186ab55f9"
+      "sha256": "b9042d310326d326f10cb61d7143577ddfb37b8c89aaa990e2ccf9f94dd634c8"
     }
   ],
   "upstream": {

@@ -532,7 +532,7 @@ function Idle({ snapshot, profile }: SimpleProps) {
         <Fact label={t("Search depth")} value={t(profile.scanMode)} />
         <Fact
           label={t("Addresses")}
-          value={profile.ipFamily === "both" ? t("IPv4 and IPv6") : profile.ipFamily}
+          value={profile.ipFamily === "both" ? t("IPv4 and IPv6") : profile.ipFamily === "v6" ? t("IPv6 only") : t("IPv4 only")}
         />
         <Fact
           label={t("Gateway")}

@@ -45,10 +45,16 @@ export function withNormalizedEndpoint<T extends { endpointMode: string; peer: s
 }
 
 /** The message to show under the field, or null when there is nothing to say. */
-export function endpointError(mode: string, value: string): string | null {
+export function endpointError(mode: string, value: string, family: "v4" | "v6" | "both" = "both"): string | null {
   if (mode === "automatic") return null;
   if (!value.trim()) return "Enter an endpoint to pin";
-  if (!normalizeEndpoint(value)) return "Must be a numeric address and port, like 162.159.192.18:443";
+  const canonical = normalizeEndpoint(value);
+  if (!canonical) return "Must be a numeric address and port, like 162.159.192.18:443";
+  // An IPv6 address normalises into brackets; anything else here is IPv4.
+  const v6 = canonical.startsWith("[");
+  if ((family === "v6" && !v6) || (family === "v4" && v6)) {
+    return "The custom endpoint is not in the address family chosen under Addresses.";
+  }
   return null;
 }
 

@@ -530,7 +530,7 @@ function WorkerSettingsForm({
           </Row>
           <Note>{t("This Worker serves VLESS over WebSocket. VMess, Trojan and other server profiles belong in Proxy profiles.")}</Note>
           <div className="pb-3">
-            <Seg value={draft.mode} options={modes} onChange={(mode) => !busy && set({ mode })} />
+            <Seg value={draft.mode} options={modes} onChange={(mode) => !busy && set({ mode, ech: draft.ech && mode === "NORMAL" })} />
           </div>
           <Field label={t("Remote DNS · HTTPS or TCP URL")} value={draft.remoteDns} onChange={(remoteDns) => set({ remoteDns })} disabled={busy} />
           {draft.mode === "BROWSER" ? (

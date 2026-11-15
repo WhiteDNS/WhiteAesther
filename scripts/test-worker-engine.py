@@ -18,11 +18,61 @@ def free_port():
         return listener.getsockname()[1]
 
 
+def socks_greeting(port, methods, login=None):
+    """The listener's method choice and, for a login, its RFC 1929 verdict."""
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+        connection.sendall(bytes([5, len(methods), *methods]))
+        choice = connection.recv(2)
+        if login is None or choice != bytes([5, 2]):
+            return choice, None
+        user, password = (part.encode() for part in login)
+        connection.sendall(bytes([1, len(user)]) + user + bytes([len(password)]) + password)
+        return choice, connection.recv(2)
+
+
+def check_listener_password(binary, fixtures):
+    """Xray's inbound refuses no-auth and a wrong password, and takes the session's own."""
+    with tempfile.TemporaryDirectory(dir=fixtures) as directory:
+        config = json.loads((fixtures / "normal.json").read_text())
+        account = config["inbounds"][0]["settings"]["accounts"][0]
+        assert config["inbounds"][0]["settings"]["auth"] == "password", "The Worker listener has no password"
+        port = config["inbounds"][0]["port"] = free_port()
+        config_path = Path(directory) / "normal.json"
+        config_path.write_text(json.dumps(config))
+        process = subprocess.Popen([str(binary), "run", "-config", str(config_path)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        try:
+            deadline = time.monotonic() + 15
+            while True:
+                assert process.poll() is None, "Xray stopped before its listener opened"
+                try:
+                    choice, _ = socks_greeting(port, [0])
+                    break
+                except OSError:
+                    assert time.monotonic() < deadline, "The Worker listener did not open"
+                    time.sleep(0.1)
+            assert choice == bytes([5, 0xFF]), f"An unauthenticated client was let in ({choice.hex()})"
+            _, wrong = socks_greeting(port, [2], (account["user"], "wrong" + account["pass"][5:]))
+            assert wrong is not None and wrong[1] != 0, f"A wrong password was accepted ({wrong})"
+            _, verdict = socks_greeting(port, [2], (account["user"], account["pass"]))
+            assert verdict == bytes([1, 0]), f"The session's own password was refused ({verdict})"
+            print(f"Worker listener: no-auth {choice.hex()}, wrong password {wrong.hex()}, own password {verdict.hex()}")
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+
+
 def main():
     binary = Path(sys.argv[1]).resolve(strict=True)
     fixtures = Path(sys.argv[2]).resolve(strict=True)
     for mode in ("normal", "fragment", "browser"):
         subprocess.run([str(binary), "run", "-test", "-config", str(fixtures / f"{mode}.json")], check=True, capture_output=True)
+    check_listener_password(binary, fixtures)
     with tempfile.TemporaryDirectory(dir=fixtures) as directory:
         config = json.loads((fixtures / "browser.json").read_text())
         config["inbounds"][0]["port"] = free_port()

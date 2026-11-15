@@ -1,7 +1,7 @@
 # Android and desktop connection parity
 
-Reference: WhiteAestherMobile v1.15.0, commit
-`2409297365e23e3fd320a87c0da73d0656bee67c`.
+Reference: WhiteAestherMobile v1.16.0, commit
+`6e2ade9e86c5f66194c66e6be1e23b40677c2db2`.
 
 This change ports the Android connection policy and its complete Aether 2.4
 network core to the desktop. Android framework services, socket protection and
@@ -40,6 +40,12 @@ the Android BoringSSL patches and post-quantum groups.
 | Psiphon stays alive for the search lifetime | `psiphon.rs` accepts a search-specific budget and adjusts its internal establishment timeout; it is not stopped at the earlier fixed search limit. |
 | Reconnect after Aether or carrier failure | `core_supervisor.rs` re-enters Automatic search after failure when enabled, including a dead Tor/Psiphon process. Manual chains retain their configured chain. Generation checks cancel obsolete recovery work; a held kill-switch proxy stays held during replacement. |
 | Retry pacing | Fast search rounds have Android's one-minute floor, doubling up to eight minutes. Per-session restarts have bounded attempts and cancellable backoff. |
+| Out-of-band lane in API setup (1.16) | Shared core `oob.rs`, `fragment.rs`, `https.rs` and `apifront.rs` arrive with the pinned revision; the adapter patch is unchanged apart from context. The lane starts three seconds after the others and its handshake is certificate-verified like every lane. `oob::tests` and `apifront::tests::every_out_of_band_method_completes_a_verified_handshake` run in CI on each platform. |
+| Password on the Worker's local listener (1.16) | `worker.rs` renders Xray's inbound with a random 32-character username and password per session. `http_bridge.rs` keeps them in memory by listener address and `socks5_connect` answers with RFC 1929, so the carrier probe, latency probe, LAN share and HTTP bridge all authenticate; `chain.rs` writes them on mihomo's socks5 proxy. The Xray config and mihomo's `config.yaml` are deleted when their session stops. `scripts/test-worker-engine.py` runs real Xray and checks no-auth `05ff`, a wrong password `01ff` and the session's own `0100`. |
+| IPv6 only (1.16) | `endpointError` and `CoreProfile::validate` refuse a pinned endpoint outside the chosen family when Aether is in the connection; `has_global_ipv6` asks the routing table for a global source address to warn under the option; a change while connected reconnects. |
+| Settings the connection does not use (1.16) | `engineSettingsApply` in `src/types.ts` (automatic routing, or Aether in either hop) decides both what Advanced shows and which connect checks run. Choosing Fragment or Browser in the Worker form turns ECH off. |
+| Imported rule lists (1.16) | `rule_lists.rs` parses, stores (app data directory, index plus one file per list), caps, matches and translates to mihomo. Engine rules travel in a content-named routes file rather than on the command line, which on Windows is capped at 32,767 characters. |
+| Framing order (1.16) | `recovery::recipes` puts the quick H3 recipe ahead of H2 only when H3 is what last carried traffic on this network; otherwise H2 goes first. A framing won on another network is not evidence here. |
 | Correct packaged/runtime core | `tls_options.rs` rejects an incompatible selected core at runtime. Staging and package extraction verify version, pinned revision, patchset, required features, architecture and Windows CRT imports. The required contract is shared with `core-source.json`. |
 
 ## Platform mapping

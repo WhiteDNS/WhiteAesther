@@ -55,3 +55,12 @@ test("a pinned endpoint reports why it is unusable", () => {
     assert.equal(endpointError(mode, "162.159.192.18:443"), null);
   }
 });
+
+test("a pin outside the chosen address family is refused", () => {
+  const family = /address family/;
+  assert.match(endpointError("custom-only", "162.159.192.18:443", "v6") ?? "", family);
+  assert.match(endpointError("custom-only", "[2606:4700:d0::a29f:c001]:443", "v4") ?? "", family);
+  assert.equal(endpointError("custom-only", "[2606:4700:d0::a29f:c001]:443", "v6"), null);
+  assert.equal(endpointError("custom-first", "162.159.192.18:443", "v4"), null);
+  assert.equal(endpointError("custom-first", "162.159.192.18:443", "both"), null);
+});

@@ -14,9 +14,60 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+/// The username and password a loopback SOCKS5 listener of ours demands.
+///
+/// Any program on the machine can reach loopback, so a listener that only this
+/// app should use (the Worker's Xray inbound) gets fresh random credentials per
+/// session. Both are 32 ASCII letters and digits: safe in RFC 1929 and in
+/// mihomo's unquoted YAML.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SocksAuth {
+    pub username: String,
+    pub password: String,
+}
+
+impl SocksAuth {
+    pub(crate) fn random() -> Self {
+        Self { username: random_token(), password: random_token() }
+    }
+}
+
+impl std::fmt::Debug for SocksAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SocksAuth(..)")
+    }
+}
+
+fn random_token() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).expect("the OS random source is available");
+    // 62 does not divide 256; the bias is under 2% per character and irrelevant
+    // for a 190-bit session secret.
+    bytes.iter().map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char).collect()
+}
+
+/// Credentials by listener address. Held in memory only, never written out.
+static SOCKS_CREDENTIALS: Mutex<Vec<(SocketAddr, SocksAuth)>> = Mutex::new(Vec::new());
+
+/// Records (or with `None`, forgets) what `listener` demands.
+pub(crate) fn set_socks_credentials(listener: SocketAddr, auth: Option<SocksAuth>) {
+    let mut known = SOCKS_CREDENTIALS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    known.retain(|(address, _)| *address != listener);
+    if let Some(auth) = auth {
+        known.push((listener, auth));
+    }
+}
+
+/// What `listener` demands, if it is one of ours that demands anything.
+pub(crate) fn socks_credentials(listener: SocketAddr) -> Option<SocksAuth> {
+    let known = SOCKS_CREDENTIALS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    known.iter().find(|(address, _)| *address == listener).map(|(_, auth)| auth.clone())
+}
 
 /// Long enough for a slow tunnel to answer, short enough that a wedged peer
 /// does not hold a thread forever.
@@ -245,15 +296,45 @@ pub(crate) fn socks5_connect(
     upstream.set_read_timeout(Some(timeout))?;
     upstream.set_nodelay(true)?;
 
-    // Greeting: SOCKS5, one method, "no authentication".
-    upstream.write_all(&[0x05, 0x01, 0x00])?;
-    let mut greeting = [0_u8; 2];
-    upstream.read_exact(&mut greeting)?;
-    if greeting != [0x05, 0x00] {
-        return Err(io::Error::new(
-            io::ErrorKind::ConnectionRefused,
-            "the SOCKS5 listener refused an unauthenticated connection",
-        ));
+    match socks_credentials(socks) {
+        // Greeting: SOCKS5, one method, "no authentication".
+        None => {
+            upstream.write_all(&[0x05, 0x01, 0x00])?;
+            let mut greeting = [0_u8; 2];
+            upstream.read_exact(&mut greeting)?;
+            if greeting != [0x05, 0x00] {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "the SOCKS5 listener refused an unauthenticated connection",
+                ));
+            }
+        }
+        // Greeting with one method, username/password, then RFC 1929.
+        Some(SocksAuth { username, password }) => {
+            upstream.write_all(&[0x05, 0x01, 0x02])?;
+            let mut greeting = [0_u8; 2];
+            upstream.read_exact(&mut greeting)?;
+            if greeting != [0x05, 0x02] {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "the SOCKS5 listener refused password authentication",
+                ));
+            }
+            let mut login = Vec::with_capacity(3 + username.len() + password.len());
+            login.extend_from_slice(&[0x01, username.len() as u8]);
+            login.extend_from_slice(username.as_bytes());
+            login.push(password.len() as u8);
+            login.extend_from_slice(password.as_bytes());
+            upstream.write_all(&login)?;
+            let mut verdict = [0_u8; 2];
+            upstream.read_exact(&mut verdict)?;
+            if verdict != [0x01, 0x00] {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the SOCKS5 listener rejected its own session credentials",
+                ));
+            }
+        }
     }
 
     let host_bytes = host.as_bytes();
@@ -326,6 +407,69 @@ fn splice(client: TcpStream, upstream: TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-shot SOCKS5 server demanding `expected`; returns what it saw.
+    fn password_listener(expected: SocksAuth) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            if greeting != [5, 1, 2] {
+                stream.write_all(&[5, 0xFF]).unwrap();
+                return greeting.to_vec();
+            }
+            stream.write_all(&[5, 2]).unwrap();
+            let mut head = [0_u8; 2];
+            stream.read_exact(&mut head).unwrap();
+            let mut user = vec![0_u8; head[1] as usize];
+            stream.read_exact(&mut user).unwrap();
+            let mut length = [0_u8; 1];
+            stream.read_exact(&mut length).unwrap();
+            let mut pass = vec![0_u8; length[0] as usize];
+            stream.read_exact(&mut pass).unwrap();
+            let good = user == expected.username.as_bytes() && pass == expected.password.as_bytes();
+            stream.write_all(&[1, if good { 0 } else { 1 }]).unwrap();
+            if good {
+                let mut request = [0_u8; 5];
+                stream.read_exact(&mut request).unwrap();
+                let mut rest = vec![0_u8; request[4] as usize + 2];
+                stream.read_exact(&mut rest).unwrap();
+                stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+            }
+            vec![u8::from(good)]
+        });
+        (address, handle)
+    }
+
+    #[test]
+    fn a_listener_with_credentials_gets_them_and_others_get_none() {
+        let auth = SocksAuth::random();
+        assert_eq!(auth.username.len(), 32);
+        assert!(auth.password.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_eq!(format!("{auth:?}"), "SocksAuth(..)");
+
+        let (address, server) = password_listener(auth.clone());
+        set_socks_credentials(address, Some(auth.clone()));
+        let connected = socks5_connect(address, "example.com", 443, Duration::from_secs(3));
+        set_socks_credentials(address, None);
+        assert!(connected.is_ok(), "{connected:?}");
+        assert_eq!(server.join().unwrap(), vec![1]);
+
+        // Unregistered: offers no-auth only and is refused by the password listener.
+        let (address, server) = password_listener(auth.clone());
+        assert!(socks5_connect(address, "example.com", 443, Duration::from_secs(3)).is_err());
+        assert_eq!(server.join().unwrap(), vec![5, 1, 0]);
+
+        // Wrong credentials: refused at the RFC 1929 step.
+        let (address, server) = password_listener(auth);
+        set_socks_credentials(address, Some(SocksAuth::random()));
+        let refused = socks5_connect(address, "example.com", 443, Duration::from_secs(3));
+        set_socks_credentials(address, None);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(server.join().unwrap(), vec![0]);
+    }
 
     #[test]
     fn authority_splits_host_and_port() {
