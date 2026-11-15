@@ -44,12 +44,13 @@ const option = (name) => {
  * asset alive. Expect to bump this on roughly Tor Browser's release cadence,
  * and note that a green build says nothing about tomorrow.
  *
- * The digests below are from 16.0's `sha256sums-signed-build.txt`; they changed
- * from 15.0.23, as they will whenever Tor itself changes. New ones always come
+ * The digests below are from 16.0.1's `sha256sums-signed-build.txt`; they changed
+ * from 16.0, as they will whenever Tor itself changes. (16.0.2 is an
+ * Android-only release with no desktop bundles.) New ones always come
  * from Tor's manifest, never from whatever arrived. Versions can be two-part
  * (16.0) as well as three-part (15.0.23).
  */
-const VERSION = "16.0";
+const VERSION = "16.0.1";
 
 /**
  * Rust target triple to the bundle that serves it, with the SHA-256 Tor
@@ -72,19 +73,19 @@ const VERSION = "16.0";
 const BUNDLES = {
   "x86_64-pc-windows-msvc": {
     asset: `tor-expert-bundle-windows-x86_64-${VERSION}.tar.gz`,
-    sha256: "2ee123e9167318a3742778ff704e75f01d4780f05a14522d451fe011011077c4",
+    sha256: "9eed3c3ff1fe43df034ce360196c9ec95472560d77ff55614d0cd5120edea27b",
   },
   "x86_64-apple-darwin": {
     asset: `tor-expert-bundle-macos-x86_64-${VERSION}.tar.gz`,
-    sha256: "5b1860215c26f2d408392d1d79e798a2f81d65eb939510bb94c11f237bd0bfc3",
+    sha256: "15464d99adc3bb4de1308260d79878336b04a1ac1aeff83e10f192de7d235946",
   },
   "aarch64-apple-darwin": {
     asset: `tor-expert-bundle-macos-aarch64-${VERSION}.tar.gz`,
-    sha256: "b8da251eccbe9e82f3681ee3af3c97fb4291c4a4e153e5b824bde48a1117cd6a",
+    sha256: "0b7d022017c31e3f972d06465bcd7ac50feb66ac825547419a934914fe4bb156",
   },
   "x86_64-unknown-linux-gnu": {
     asset: `tor-expert-bundle-linux-x86_64-${VERSION}.tar.gz`,
-    sha256: "cc950ebe9acb80188325c3a2cd8817def7dd7237d6fdcd861bb87b234a0cb2fd",
+    sha256: "7039cb16060ab22e669852e55774d894b55f25ea8bd0ab7194d3478429a58725",
   },
 };
 
