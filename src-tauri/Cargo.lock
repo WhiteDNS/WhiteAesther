@@ -4396,9 +4396,10 @@ dependencies = [
 
 [[package]]
 name = "whiteaesther"
-version = "1.11.1"
+version = "1.12.0"
 dependencies = [
  "getrandom 0.3.4",
+ "regex",
  "rustls",
  "serde",
  "serde_json",

@@ -18,6 +18,7 @@ import {
   fetchBridges,
   isDesktopRuntime,
   getCoreStatus,
+  hasGlobalIpv6,
   lanShareStatus,
   probeCarrier,
   psiphonStatus,
@@ -38,6 +39,7 @@ import {
 } from "./carrierSearch";
 import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
 import { Chain } from "./Chain";
+import { ImportedRuleLists } from "./ImportedRuleLists";
 import { Scanner } from "./Scanner";
 import { WorkerPage } from "./Worker";
 import { transportName } from "./Simple";
@@ -46,7 +48,7 @@ import { transportName } from "./Simple";
 // that. The same text is installed beside the executable under licences/.
 import notices from "../../THIRD_PARTY_NOTICES.md?raw";
 import {
-  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, isLoneAether,
+  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, engineSettingsApply,
   type CarrierKind,
   type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
 } from "@/types";
@@ -108,6 +110,8 @@ export interface AdvancedProps {
    * effect keyed on the section alone would only fire the first time.
    */
   jumpTo?: { section: SectionId; at: number } | null;
+  /** An imported rule list was added, toggled or deleted. */
+  onRuleListsChanged?: () => void;
 }
 
 /**
@@ -122,7 +126,7 @@ const AETHER_ONLY_SECTIONS: SectionId[] = ["endpoint"];
 export function Advanced(props: AdvancedProps) {
   const t = useT();
   const [section, setSection] = useState<SectionId>("status");
-  const aetherOnly = isLoneAether(props.profile.carriers);
+  const aetherOnly = engineSettingsApply(props.profile);
 
   // Someone who was reading Endpoint and then switched carrier would otherwise
   // be left looking at a section that is no longer in the list.
@@ -1224,14 +1228,24 @@ function Routes({ profile, onChange }: AdvancedProps) {
 
   // Everything below the carrier picker describes the Aether engine: which
   // transport it rides, how hard it searches for a Cloudflare gateway, how it
-  // obfuscates. Under Psiphon or Tor none of it is read.
+  // obfuscates. Under Psiphon, Tor or a Worker alone none of it is read.
   //
   // 1.8.0 left these live and merely added a sentence saying they did nothing,
   // and the first question asked of that screen was "which of these protocols
   // work with Psiphon?" — with MASQUE H2 still highlighted as though it were
   // the answer. A control that saves and does nothing is worse than one that is
   // absent, so they are absent.
-  const aetherOnly = isLoneAether(profile.carriers);
+  const aetherOnly = engineSettingsApply(profile);
+  // Read from the OS when IPv6 only is chosen, so the warning reflects this network.
+  const [noIpv6, setNoIpv6] = useState(false);
+  useEffect(() => {
+    if (profile.ipFamily !== "v6") return;
+    let live = true;
+    void hasGlobalIpv6().then((has) => live && setNoIpv6(!has)).catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [profile.ipFamily]);
 
   return (
     <>
@@ -1240,7 +1254,10 @@ function Routes({ profile, onChange }: AdvancedProps) {
         <Card>
           <CardContent className="py-4">
             <p className="text-[13px] leading-snug text-muted-foreground">
-              {t("The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.")}
+              {t("Settings on this page belong to the Aether engine. {carrier} does not use it, so they wait until Aether is back in the connection. A Worker has its own TLS options in its settings.").replace(
+                "{carrier}",
+                carrierChainLabel(profile.carriers, (kind) => t(CARRIER_NAME[kind])),
+              )}
             </p>
           </CardContent>
         </Card>
@@ -1290,13 +1307,16 @@ function Routes({ profile, onChange }: AdvancedProps) {
             />
           </Row>
           {profile.scanMode === "verified" ? <p className="pb-3 text-[13px] text-muted-foreground">{t("Prioritises known gateways and verifies the current path. Historical results do not guarantee reachability.")}</p> : null}
-          <Row title="Addresses" help="Turn off IPv6 where the network handles it badly.">
+          <Row title="Addresses" help="Which Cloudflare addresses the engine dials. Apps inside the tunnel still get both.">
             <Seg
               value={profile.ipFamily}
               onChange={(ipFamily) => set({ ipFamily })}
-              options={[["both", "both"], ["v4", "IPv4"], ["v6", "IPv6"]]}
+              options={[["both", "both"], ["v4", "IPv4 only"], ["v6", "IPv6 only"]]}
             />
           </Row>
+          {profile.ipFamily === "v6" && noIpv6 ? (
+            <p className="pb-3 text-[13px] text-amber-600 dark:text-amber-400">{t("This network has no IPv6 address, so IPv6 only will not connect here.")}</p>
+          ) : null}
           <Row title="Reuse the last working edge" help="Verify the cached gateway before scanning fresh.">
             <Switch checked={profile.quickReconnect} onCheckedChange={(quickReconnect) => set({ quickReconnect })} />
           </Row>
@@ -1380,6 +1400,9 @@ function Routes({ profile, onChange }: AdvancedProps) {
               options={[["off", "off"], ["light", "light"], ["firewall", "firewall"], ["balanced", "balanced"], ["gfw", "gfw"], ["aggressive", "aggressive"]]}
             />
           </Row>
+          {profile.noize === "off" ? (
+            <p className="pb-3 text-[13px] text-muted-foreground">{t("No obfuscation. Faster where nothing inspects the tunnel; on a filtered network it is the setting most likely to stop the connection working.")}</p>
+          ) : null}
           <Row title="Try other obfuscation profiles" help="On WireGuard, fall back through the other profiles when one finds nothing.">
             <Switch checked={profile.profileRetry} onCheckedChange={(profileRetry) => set({ profileRetry })} />
           </Row>
@@ -1482,7 +1505,7 @@ function AetherTlsSettings({ profile, onChange }: Pick<AdvancedProps, "profile" 
 function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
   const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
-  const error = endpointError(profile.endpointMode, profile.peer ?? "");
+  const error = endpointError(profile.endpointMode, profile.peer ?? "", profile.ipFamily);
   const canonical = normalizeEndpoint(profile.peer ?? "");
   return (
     <>
@@ -1558,7 +1581,7 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
 
 // --------------------------------------------------------------------- traffic
 
-function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProps) {
+function Traffic({ profile, onChange, runtime, snapshot, onToast, onRuleListsChanged }: AdvancedProps) {
   const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
   return (
@@ -1647,6 +1670,12 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProp
               onChange={(routeDirect) => set({ routeDirect })}
             />
           </div>
+          <ImportedRuleLists
+            routeBlock={profile.routeBlock}
+            routeDirect={profile.routeDirect}
+            onChanged={() => onRuleListsChanged?.()}
+            onToast={onToast}
+          />
           <TextField
             label="Rules file" mono value={profile.routesFile ?? ""}
             placeholder="Optional absolute path"

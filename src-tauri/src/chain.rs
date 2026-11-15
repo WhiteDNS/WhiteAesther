@@ -140,6 +140,10 @@ pub struct ChainRequest<'a> {
     pub tun: bool,
     /// The resolvers the user chose, from the profile. See [`doh_upstreams`].
     pub resolvers: Vec<String>,
+    /// The user's Block and Direct rules and the enabled imported lists, as
+    /// mihomo rules (see [`crate::rule_lists::mihomo_section`]). Where mihomo is
+    /// in front of the carrier it is the one that routes, so it has to know them.
+    pub routes: String,
 }
 
 impl ChainRequest<'_> {
@@ -323,6 +327,7 @@ impl Chain {
             bypass_iran_sites: request.bypass_iran_sites,
             exit_chain: request.wants_exit_chain(),
             tun: request.tun,
+            routes: &request.routes,
             resolvers: &request.resolvers,
         });
         let config_path = home.join("config.yaml");
@@ -418,6 +423,8 @@ impl Chain {
         if let Some(mut running) = guard.take() {
             let _ = running.child.kill();
             let _ = running.child.wait();
+            // It can hold a carrier's session credentials; the next start writes it anew.
+            let _ = std::fs::remove_file(running.home.join("config.yaml"));
         }
     }
 
@@ -749,6 +756,7 @@ struct RenderPlan<'a> {
     exit_chain: bool,
     tun: bool,
     resolvers: &'a [String],
+    routes: &'a str,
 }
 
 impl Default for RenderPlan<'_> {
@@ -764,6 +772,7 @@ impl Default for RenderPlan<'_> {
             exit_chain: true,
             tun: false,
             resolvers: &[],
+            routes: "",
         }
     }
 }
@@ -912,8 +921,13 @@ fn render(plan: &RenderPlan) -> String {
             // DNS and QUIC hang rather than failing, and neither falls back
             // because nothing told them to. The REJECT rule below is the other
             // half of the same statement.
+            // A listener that demands the session's credentials (the Worker's)
+            // gets them here; the values are letters and digits only.
+            let login = crate::http_bridge::socks_credentials(chain.listener())
+                .map(|auth| format!(", username: {}, password: {}", auth.username, auth.password))
+                .unwrap_or_default();
             config.push_str(&format!(
-                "proxies:\n  - {{name: {name}, type: socks5, server: {}, port: {}, udp: {}}}\n",
+                "proxies:\n  - {{name: {name}, type: socks5, server: {}, port: {}, udp: {}{login}}}\n",
                 chain.listener().ip(),
                 chain.listener().port(),
                 chain.carries_udp(),
@@ -1026,6 +1040,11 @@ fn render(plan: &RenderPlan) -> String {
             config.push_str(&format!("  - IP-CIDR,{address}/{prefix},DIRECT,no-resolve\n"));
         }
     }
+
+    // The user's own rules and the imported lists: after the carrier's own
+    // traffic, which nothing may claim, and before everything else, so a
+    // destination they chose to block or send direct is never second-guessed.
+    config.push_str(plan.routes);
 
     // The local network, which is not somewhere a tunnel can take you.
     //
@@ -1430,6 +1449,33 @@ mod tests {
     /// One carrier alone, for the properties that differ by kind.
     fn carrier_of(kind: CarrierKind) -> Option<RunningChain> {
         Some(RunningChain::single(hop(kind, 1819, None)))
+    }
+
+    #[test]
+    fn user_rules_come_after_the_carriers_own_traffic_and_before_everything_else() {
+        let routes = crate::rule_lists::mihomo_section("keyword:ads", "example.ir");
+        let config = render(&RenderPlan { carriers: tunnel_via("162.159.198.2"), tun: true, mixed: 1820, api: 1821, secret: "s", routes: &routes, ..Default::default() });
+        let rules = config.split("rules:\n").nth(1).expect("a rules section");
+        let at =|needle: &str| rules.find(needle).unwrap_or_else(|| panic!("{needle} missing: {rules}"));
+        assert!(at("PROCESS-NAME") < at("DOMAIN-KEYWORD,ads,REJECT"));
+        assert!(at("IP-CIDR,162.159.198.2/32") < at("DOMAIN-KEYWORD,ads,REJECT"));
+        assert!(at("DOMAIN-KEYWORD,ads,REJECT") < at("DOMAIN-SUFFIX,example.ir,DIRECT"));
+        assert!(at("DOMAIN-SUFFIX,example.ir,DIRECT") < at("IP-CIDR,10.0.0.0/8"));
+        assert!(at("DOMAIN-SUFFIX,example.ir,DIRECT") < at("MATCH,"));
+    }
+
+    #[test]
+    fn a_password_protected_carrier_is_dialled_with_its_credentials() {
+        // A port no other test uses: the registry is process-wide.
+        let worker = RunningChain::single(hop(CarrierKind::Worker, 47_611, None));
+        let plan = || render(&RenderPlan { carriers: Some(worker.clone()), mixed: 1820, api: 1821, secret: "s", ..Default::default() });
+        assert!(!plan().contains("username:"));
+        let auth = crate::http_bridge::SocksAuth::random();
+        crate::http_bridge::set_socks_credentials(worker.listener(), Some(auth.clone()));
+        let config = plan();
+        crate::http_bridge::set_socks_credentials(worker.listener(), None);
+        assert!(config.contains(&format!("port: 47611, udp: false, username: {}, password: {}}}", auth.username, auth.password)));
+        assert!(!plan().contains("username:"));
     }
 
     /// Two hops, in the order traffic travels.
@@ -1921,6 +1967,7 @@ mod tests {
             exit_chain: true,
             tun: true,
             resolvers: &[],
+            routes: "",
         });
         // The process name is the one line here that differs by platform --
         // `aether.exe` on Windows and `aether` everywhere else -- so it is

@@ -1,7 +1,7 @@
 diff --git a/aether/Cargo.toml b/aether/Cargo.toml
 --- a/aether/Cargo.toml
 +++ b/aether/Cargo.toml
-@@ -87,7 +87,7 @@
+@@ -87,7 +87,7 @@ zstd = { version = "0.14", default-features = false }
  unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tor"))'] }
  
  [patch.crates-io]
@@ -60,7 +60,7 @@ new file mode 100644
 diff --git a/aether/src/account.rs b/aether/src/account.rs
 --- a/aether/src/account.rs
 +++ b/aether/src/account.rs
-@@ -826,7 +826,7 @@
+@@ -826,7 +826,7 @@ async fn api_call_by(
          } else {
              AetherError::Api(described)
          };
@@ -72,12 +72,10 @@ diff --git a/aether/src/account.rs b/aether/src/account.rs
 diff --git a/aether/src/api.rs b/aether/src/api.rs
 --- a/aether/src/api.rs
 +++ b/aether/src/api.rs
-@@ -251,6 +251,54 @@
-             cert_usable: account::cert_still_usable(identity),
-         }
+@@ -253,6 +253,54 @@ impl IdentitySummary {
      }
-+}
-+
+ }
+ 
 +/// Ranks reachable MASQUE gateways without connecting to one.
 +///
 +/// Kept because the desktop client's endpoint scanner is built on it: it runs
@@ -124,10 +122,12 @@ diff --git a/aether/src/api.rs b/aether/src/api.rs
 +            rtt_ms: result.rtt.as_millis() as u64,
 +        })
 +        .collect())
- }
- 
++}
++
  pub fn identity_path(base: &str, transport: Transport, team: Option<&str>) -> String {
-@@ -514,7 +562,8 @@
+     match team {
+         Some(team) => crate::derive_sibling_path(base, &format!("team-{team}")),
+@@ -514,7 +562,8 @@ pub async fn verify_endpoint(
          Transport::Masque => {
              // The check offers the job's ECH key, as its tunnel would.
              let ech = spec.ech.clone();
@@ -137,7 +137,7 @@ diff --git a/aether/src/api.rs b/aether/src/api.rs
              guard(cancel, attempt).await
          }
          Transport::WireGuard => {
-@@ -556,7 +605,8 @@
+@@ -556,7 +605,8 @@ pub async fn connect(
  
      match spec.transport {
          Transport::Masque => {
@@ -147,7 +147,7 @@ diff --git a/aether/src/api.rs b/aether/src/api.rs
              guard(cancel, attempt).await
          }
          Transport::WireGuard => {
-@@ -565,6 +615,7 @@
+@@ -565,6 +615,7 @@ pub async fn connect(
                  peer,
                  spec.aethernoize.clone(),
                  spec.socks,
@@ -158,7 +158,7 @@ diff --git a/aether/src/api.rs b/aether/src/api.rs
 diff --git a/aether/src/cli.rs b/aether/src/cli.rs
 --- a/aether/src/cli.rs
 +++ b/aether/src/cli.rs
-@@ -20,6 +20,8 @@
+@@ -20,6 +20,8 @@ flag beats a variable.
    aether --mim                             two masque hops, for a different exit
  
  Connection:
@@ -167,7 +167,7 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
    --bind <addr>            local SOCKS5 listen address (default 127.0.0.1:1819)
    --http-proxy <addr>      also expose an HTTP CONNECT proxy on this address
                             (off by default, e.g. 127.0.0.1:1820)
-@@ -75,6 +77,22 @@
+@@ -75,6 +77,22 @@ MASQUE-in-MASQUE endpoints:
    --mim-scan               find the outer hop by scanning, ignoring any endpoint
                             left in the environment
  
@@ -190,7 +190,7 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
  Scan mode:
    --scan <mode>            turbo | balanced | thorough | stealth | ironclad
    --turbo                  stop at the first candidate that answers
-@@ -103,7 +121,10 @@
+@@ -103,7 +121,10 @@ MASQUE transport:
    --ech-domain <name>      domain whose HTTPS record holds the ECH key
    --tls-ciphers <list>     TLS 1.2 cipher list (BoringSSL names, ':' separated)
    --disable-grease         omit GREASE from TLS handshakes
@@ -202,7 +202,7 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
    --no-data-check          skip the end-to-end data-plane validation
    --validate-secs <n>      seconds to wait for data-plane validation (default 10)
    --startup-secs <n>       total MASQUE startup deadline (default 30)
-@@ -337,6 +358,7 @@
+@@ -337,6 +358,7 @@ pub fn parse_and_apply() -> crate::error::Result<Parsed> {
  
  pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
      let mut i = 0;
@@ -210,7 +210,7 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
  
      while i < args.len() {
          let arg = args[i].as_str();
-@@ -351,6 +373,20 @@
+@@ -351,6 +373,20 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
          }
  
          match arg {
@@ -231,7 +231,7 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
              "-v" | "--version" => {
                  println!("aether {}", env!("CARGO_PKG_VERSION"));
                  return Ok(Parsed::Done);
-@@ -458,12 +494,22 @@
+@@ -458,6 +494,8 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
                  set("AETHER_WG_RECONNECT_SECS", &value);
              }
              "--dns" => set("AETHER_DNS", next_value!()),
@@ -240,10 +240,10 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
              "--fragment" => set("AETHER_MASQUE_H2_FRAGMENT", "1"),
              "--fragment-size" => set("AETHER_MASQUE_H2_FRAGMENT_SIZE", next_value!()),
              "--fragment-delay" => set("AETHER_MASQUE_H2_FRAGMENT_DELAY", next_value!()),
- 
+@@ -465,6 +503,14 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
              "--keepalive" => set("AETHER_WG_KEEPALIVE", next_value!()),
              "--no-profile-retry" => set("AETHER_WG_NO_PROFILE_RETRY", "1"),
-+
+ 
 +            "--provision-only" => set("AETHER_PROVISION_ONLY", "1"),
 +            "--scan-budget-ms" => set("AETHER_SCAN_BUDGET_MS", next_value!()),
 +            "--scan-only" => set("AETHER_SCAN_ONLY", "1"),
@@ -251,10 +251,11 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
 +            "--test-endpoint" => set("AETHER_TEST_ENDPOINT", next_value!()),
 +            "--export-identity" => set("AETHER_EXPORT_IDENTITY", "1"),
 +            "--import-identity" => set("AETHER_IMPORT_IDENTITY", next_value!()),
- 
++
              "--config" => set("AETHER_CONFIG", next_value!()),
              "--wg-config" => set("AETHER_WG_CONFIG", next_value!()),
-@@ -495,7 +541,62 @@
+             "--masque-config" => set("AETHER_MASQUE_CONFIG", next_value!()),
+@@ -495,9 +541,64 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<Parsed> {
          i += 1;
      }
  
@@ -270,8 +271,8 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
 +        return Ok(Parsed::Done);
 +    }
      Ok(Parsed::Run)
-+}
-+
+ }
+ 
 +/// Checks user input without opening sockets, looking up ECH or registering.
 +pub fn check_network_options() -> crate::error::Result<()> {
 +    crate::upstream::check_setting()?;
@@ -314,9 +315,11 @@ diff --git a/aether/src/cli.rs b/aether/src/cli.rs
 +        }
 +    }
 +    Ok(())
- }
- 
++}
++
  fn set(key: &str, value: &str) {
+     std::env::set_var(key, value);
+ }
 diff --git a/aether/src/engine_thread.rs b/aether/src/engine_thread.rs
 new file mode 100644
 --- /dev/null
@@ -524,7 +527,7 @@ new file mode 100644
 diff --git a/aether/src/fragment.rs b/aether/src/fragment.rs
 --- a/aether/src/fragment.rs
 +++ b/aether/src/fragment.rs
-@@ -46,9 +46,11 @@
+@@ -49,9 +49,11 @@ impl FragmentConfig {
          let size_min = size_min.max(1) as usize;
          let size_max = (size_max.max(size_min as u64)) as usize;
  
@@ -539,20 +542,20 @@ diff --git a/aether/src/fragment.rs b/aether/src/fragment.rs
  
          Self {
              enabled,
-@@ -151,6 +153,12 @@
-     }
- 
+@@ -157,6 +159,12 @@ pub fn sni_host_range(buf: &[u8]) -> Option<(usize, usize)> {
      None
-+}
-+
+ }
+ 
 +/// On unless switched off: the split inside the server name is what asking
 +/// for fragmentation is for.
 +fn sni_split_setting(value: Option<&str>) -> bool {
 +    value.map(is_truthy).unwrap_or(true)
- }
- 
++}
++
  pub struct FragmentingStream<S> {
-@@ -299,7 +307,7 @@
+     inner: S,
+     cfg: FragmentConfig,
+@@ -358,7 +366,7 @@ where
  }
  
  #[cfg(test)]
@@ -561,7 +564,7 @@ diff --git a/aether/src/fragment.rs b/aether/src/fragment.rs
      use super::*;
  
      fn client_hello(host: &str) -> Vec<u8> {
-@@ -461,3 +469,99 @@
+@@ -520,3 +528,100 @@ mod tests {
          }
      }
  }
@@ -652,6 +655,7 @@ diff --git a/aether/src/fragment.rs b/aether/src/fragment.rs
 +            delay_min_ms: 0,
 +            delay_max_ms: 0,
 +            sni_split: true,
++            oob: None,
 +        };
 +        let mut stream = FragmentingStream::new(Vec::new(), cfg);
 +        let written = stream.write(&hello).await.unwrap();
@@ -664,7 +668,7 @@ diff --git a/aether/src/fragment.rs b/aether/src/fragment.rs
 diff --git a/aether/src/https.rs b/aether/src/https.rs
 --- a/aether/src/https.rs
 +++ b/aether/src/https.rs
-@@ -162,7 +162,9 @@
+@@ -170,7 +170,9 @@ pub(crate) async fn open(
      };
      // Nothing goes over a handshake that went without the key it was given.
      if ech.is_some() && !tls.ssl().ech_accepted() {
@@ -678,7 +682,7 @@ diff --git a/aether/src/https.rs b/aether/src/https.rs
 diff --git a/aether/src/identity.rs b/aether/src/identity.rs
 --- a/aether/src/identity.rs
 +++ b/aether/src/identity.rs
-@@ -140,7 +140,7 @@
+@@ -140,7 +140,7 @@ pub struct Device {
      pub warp_enabled: bool,
      /// Only registrations made by this build need activation. Legacy/imported
      /// identities remain usable without another API call on every start.
@@ -687,7 +691,7 @@ diff --git a/aether/src/identity.rs b/aether/src/identity.rs
      pub activation_pending: bool,
      #[serde(default)]
      pub activation_retry_at: u64,
-@@ -724,9 +724,53 @@
+@@ -724,10 +724,54 @@ pub fn save(store_path: &str, store: &Store) -> Result<()> {
      config::write_private(store_path, &store.to_text()?)
  }
  
@@ -719,7 +723,7 @@ diff --git a/aether/src/identity.rs b/aether/src/identity.rs
  #[cfg(test)]
  mod tests {
      use super::*;
-+
+ 
 +    #[tokio::test]
 +    async fn sidecars_wait_for_the_same_store_and_cancel_without_retaining_the_lock() {
 +        let dir = scratch("process-lock");
@@ -738,10 +742,11 @@ diff --git a/aether/src/identity.rs b/aether/src/identity.rs
 +        drop(next);
 +        std::fs::remove_dir_all(dir).unwrap();
 +    }
- 
++
      fn wireguard_device(token: &str) -> Device {
          Device {
-@@ -1265,3 +1309,18 @@
+             access_token: token.to_string(),
+@@ -1265,3 +1309,18 @@ mod tests {
          assert_eq!(identity.assigned_endpoint, back.assigned_endpoint);
      }
  }
@@ -763,7 +768,7 @@ diff --git a/aether/src/identity.rs b/aether/src/identity.rs
 diff --git a/aether/src/lib.rs b/aether/src/lib.rs
 --- a/aether/src/lib.rs
 +++ b/aether/src/lib.rs
-@@ -9,24 +9,24 @@
+@@ -9,25 +9,25 @@ pub mod config;
  pub mod consts;
  pub mod dns;
  pub mod egress;
@@ -785,12 +790,13 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  pub mod masque_h2;
  pub mod netstack;
  pub mod noize;
+ pub mod oob;
  pub mod prober;
 -pub mod psiphon;
  pub mod quic;
  pub mod routing;
  pub mod scan;
-@@ -140,14 +140,22 @@
+@@ -141,14 +141,22 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
  
      install_netstack_panic_guard();
  
@@ -808,15 +814,14 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  
 -    drop(socks::bind_listener("socks5", listen).await?);
 -    drop(bind_http_proxy().await?);
--
 +    let socks_listener = socks::bind_listener("socks5", listen).await?;
 +    let http_listener = bind_http_proxy().await?;
-+
+ 
 +    listeners::scope(socks_listener, listen, http_listener, http_proxy_listen(), async {
      let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
  
      if tor::mode() == tor::Mode::Only {
-@@ -302,6 +310,7 @@
+@@ -303,6 +311,7 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
              run_mim(primary, secondary, ech, listen).await
          }
      }
@@ -824,7 +829,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  }
  
  /// The port Cloudflare's WireGuard edges usually answer on. It is only ever
-@@ -831,6 +840,7 @@
+@@ -832,6 +841,7 @@ pub fn import_identity(base_config: &str, payload: &str) -> Result<()> {
          let identity = config::parse(&text)?;
          let pending = value
              .get("activation_pending")
@@ -832,7 +837,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
              .and_then(toml::Value::as_bool)
              .unwrap_or(false);
          let retry_at = value
-@@ -996,6 +1006,12 @@
+@@ -997,6 +1007,12 @@ pub async fn provision_embedded(config: &EmbeddedConfig) -> Result<Vec<String>>
  }
  
  pub async fn prepare_embedded(config: &EmbeddedConfig) -> Result<EmbeddedPrepared> {
@@ -845,7 +850,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      tls::check_tls_options()?;
      quic::masque_sni()?;
      upstream::check_setting()?;
-@@ -1857,7 +1873,7 @@
+@@ -1858,7 +1874,7 @@ async fn select_embedded_peer(
  ) -> Result<SocketAddr> {
      if let Some(peer) = config.peer {
          if peer_matches_ip_scan(peer, &config.ip_scan)
@@ -854,7 +859,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          {
              return Ok(peer);
          }
-@@ -1874,7 +1890,7 @@
+@@ -1875,7 +1891,7 @@ async fn select_embedded_peer(
          .and_then(|value| value.parse::<SocketAddr>().ok())
      {
          if peer_matches_ip_scan(assigned, &config.ip_scan)
@@ -863,7 +868,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          {
              return Ok(assigned);
          }
-@@ -1891,7 +1907,7 @@
+@@ -1892,7 +1908,7 @@ async fn select_embedded_peer(
          for cached in candidates {
              if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                  if peer_matches_ip_scan(peer, &config.ip_scan)
@@ -872,7 +877,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
                  {
                      return Ok(peer);
                  }
-@@ -1915,7 +1931,7 @@
+@@ -1916,7 +1932,7 @@ async fn select_embedded_peer(
      // refused every protocol.
      if let Some(peer) = stored_masque_peer(identity) {
          if peer_matches_ip_scan(peer, &config.ip_scan)
@@ -881,7 +886,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          {
              return Ok(peer);
          }
-@@ -1927,7 +1943,7 @@
+@@ -1928,7 +1944,7 @@ async fn select_embedded_peer(
              continue;
          }
          if peer_matches_ip_scan(peer, &config.ip_scan)
@@ -890,7 +895,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          {
              log::info!("[+] the endpoint Cloudflare assigned this device answered: {peer}");
              return Ok(peer);
-@@ -2039,6 +2055,7 @@
+@@ -2040,6 +2056,7 @@ const ASSIGNED_ENDPOINT_LOOKUP: std::time::Duration = std::time::Duration::from_
  
  async fn persist_masque_profile(site: &IdentitySite, identity: &account::Identity) -> Result<()> {
      let _provisioning = provisioning_lock().lock().await;
@@ -898,7 +903,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      let mut loaded = identity::load(&site.store_path, &site.legacy)?;
      // A late result must not replace a different identity installed meanwhile.
      if loaded.store.device_id(site.slot) == Some(identity.device_id.as_str()) {
-@@ -2449,6 +2466,7 @@
+@@ -2450,6 +2467,7 @@ async fn run_gool(
          outer_peer = Some(peer);
          inner_peer = Some(inner_peer_now);
  
@@ -906,7 +911,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          match run_warp_in_warp(
              primary.clone(),
              secondary.clone(),
-@@ -2461,7 +2479,7 @@
+@@ -2462,7 +2480,7 @@ async fn run_gool(
              Ok(()) => log::warn!("[-] gool tunnel closed; reconnecting"),
              Err(e) => log::warn!("[-] gool tunnel ended: {e}; reconnecting"),
          }
@@ -915,7 +920,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  
          tokio::time::sleep(wg_reconnect_delay()).await;
      }
-@@ -2976,7 +2994,23 @@
+@@ -2977,7 +2995,23 @@ async fn activate_and_record(
              wait: device.activation_retry_at - now,
          });
      }
@@ -939,7 +944,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          if let AetherError::RateLimited { retry_after, .. } = &error {
              if let Some(device) = store.device_mut(&identity.device_id) {
                  device.activation_retry_at = now.saturating_add(retry_after.unwrap_or(60).max(1));
-@@ -2996,6 +3030,7 @@
+@@ -2997,6 +3031,7 @@ async fn activate_and_record(
  
  async fn load_or_provision_warp(site: &IdentitySite) -> Result<account::Identity> {
      let _provisioning = provisioning_lock().lock().await;
@@ -947,19 +952,19 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      let mut loaded = identity::load(&site.store_path, &site.legacy)?;
  
      if let Some((id, device)) = loaded.store.take_usable(site.slot) {
-@@ -3041,6 +3076,11 @@
-     );
+@@ -3043,6 +3078,11 @@ async fn load_or_provision_warp(site: &IdentitySite) -> Result<account::Identity
      Ok(identity)
  }
-+
+ 
 +/// Save registration and the remaining activation step before another await.
 +
 +/// The caller holds both provisioning and OS store locks. An interrupted or
 +/// refused activation retains the registration and resumes this idempotent step.
- 
++
  fn pending_enrollment_key(store: &identity::Store, id: &str) -> Result<account::MasqueKeyPair> {
      let pending = store
-@@ -3094,7 +3134,22 @@
+         .device(id)
+@@ -3095,7 +3135,22 @@ async fn enrol_and_record(
      }
      identity::save(&site.store_path, store)?;
  
@@ -983,7 +988,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      let identity = enrollment.apply(identity);
      let identity = adopt_team_profile(identity).await;
      record(store, site, &identity)?;
-@@ -3108,6 +3163,7 @@
+@@ -3109,6 +3164,7 @@ async fn enrol_and_record(
  
  async fn load_or_provision_masque(site: &IdentitySite) -> Result<account::Identity> {
      let _provisioning = provisioning_lock().lock().await;
@@ -991,7 +996,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      let mut loaded = identity::load(&site.store_path, &site.legacy)?;
  
      if let Some((id, device)) = loaded.store.take_usable(site.slot) {
-@@ -3200,6 +3256,26 @@
+@@ -3201,6 +3257,26 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
  
      match protocol {
          Protocol::Masque | Protocol::MasqueInMasque | Protocol::WireGuardOverMasque => {
@@ -1018,7 +1023,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
              log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
              let mode = prober::ScanMode::parse(&mode_str);
              let probe = prober::MasqueProbe {
-@@ -3363,7 +3439,7 @@
+@@ -3364,7 +3440,7 @@ fn ech_cache() -> &'static EchCache {
      CACHED.get_or_init(|| tokio::sync::Mutex::new(None))
  }
  
@@ -1027,7 +1032,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  /// A nonblocking lock avoids reversing the cache/TLS lock order during probes.
  pub(crate) fn remember_ech_retry(retry: &[u8]) {
      if let Ok(mut cache) = ech_cache().try_lock() {
-@@ -3384,35 +3460,10 @@
+@@ -3385,35 +3461,10 @@ async fn forget_ech() {
      tls::use_ech(None);
  }
  
@@ -1066,7 +1071,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  }
  
  /// The shape this attempt is being made with.
-@@ -3596,18 +3647,201 @@
+@@ -3597,18 +3648,201 @@ fn masque_startup_timeout() -> std::time::Duration {
      std::time::Duration::from_secs(secs)
  }
  
@@ -1269,14 +1274,11 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      log::info!(
          "[+] selected MASQUE gateway {}:{} (rtt {:?})",
          best.ip,
-@@ -3651,10 +3885,34 @@
+@@ -3652,10 +3886,34 @@ async fn masque_probe(
  /// `aether-masque-lastconn.toml` -- so nobody loses a remembered endpoint and
  /// re-scans on the first connect after updating.
  fn lastconn_path(config_path: &str) -> String {
 -    derive_sibling_path(config_path, "lastconn")
--}
--
--async fn quick_verify_masque_peer(
 +    match std::env::var("AETHER_NETWORK_KEY").ok().as_deref() {
 +        None => derive_sibling_path(config_path, "lastconn"),
 +        Some("unknown") => {
@@ -1292,8 +1294,9 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
 +            )
 +        }
 +    }
-+}
-+
+ }
+ 
+-async fn quick_verify_masque_peer(
 +async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
 +    match attempt_ech().await {
 +        Ok(ech) => quick_verify_masque_with_ech(identity, peer, ech).await,
@@ -1308,7 +1311,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      identity: &account::Identity,
      peer: SocketAddr,
      ech: Option<Vec<u8>>,
-@@ -3755,6 +4013,7 @@
+@@ -3756,6 +4014,7 @@ async fn run_masque(
      listen: SocketAddr,
      lastconn_path: String,
  ) -> Result<()> {
@@ -1316,7 +1319,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      let forced = std::env::var("AETHER_PEER").ok();
  
      let mut quick_peer: Option<SocketAddr> = None;
-@@ -3765,7 +4024,7 @@
+@@ -3766,7 +4025,7 @@ async fn run_masque(
              .and_then(|value| value.parse::<SocketAddr>().ok())
          {
              log::info!("[*] verifying the endpoint the organization assigned: {assigned}");
@@ -1325,7 +1328,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
                  log::info!("[+] the assigned endpoint {assigned} works; skipping the scan");
                  quick_peer = Some(assigned);
              } else {
-@@ -3782,7 +4041,8 @@
+@@ -3783,7 +4042,8 @@ async fn run_masque(
                  if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                      if want_quick_reconnect(&cached).await {
                          log::info!("[*] verifying cached gateway {peer} before reuse");
@@ -1335,7 +1338,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
                              log::info!("[+] cached gateway {peer} still works; skipping scan");
                              quick_peer = Some(peer);
                              break;
-@@ -3804,15 +4064,24 @@
+@@ -3805,15 +4065,24 @@ async fn run_masque(
      };
  
      let mut last_good_peer: Option<SocketAddr> = None;
@@ -1361,7 +1364,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
                          Some(p)
                      } else {
                          log::warn!(
-@@ -3834,7 +4103,14 @@
+@@ -3835,7 +4104,14 @@ async fn run_masque(
                          }
                          Err(_) => return Err(AetherError::Other(format!("bad peer address {p}"))),
                      },
@@ -1377,7 +1380,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
                          Ok(peer) => peer,
                          Err(e) => {
                              log::warn!(
-@@ -3852,24 +4128,91 @@
+@@ -3853,27 +4129,94 @@ async fn run_masque(
  
          last_good_peer = Some(peer);
  
@@ -1406,9 +1409,9 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  
 +        strikes.ended(started.elapsed());
          tokio::time::sleep(masque_reconnect_delay()).await;
-+    }
-+}
-+
+     }
+ }
+ 
 +/// How long a tunnel has to stay up for its end not to count against the MASQUE gateways or
 +/// WireGuard endpoints it went through: one that carried the traffic this long proves them good,
 +/// so its end, a network change say, clears the ends counted before it. Only tunnels that end
@@ -1477,10 +1480,13 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
 +    fn left_out(&mut self, now: Instant) -> HashSet<IpAddr> {
 +        self.resting.retain(|_, until| *until > now);
 +        self.resting.keys().copied().collect()
-     }
- }
- 
-@@ -4003,6 +4346,7 @@
++    }
++}
++
+ struct MasqueHop {
+     stack: netstack::StackHandle,
+     exit: TunnelExit,
+@@ -4004,6 +4347,7 @@ async fn run_masque_tunnel(
      peer: SocketAddr,
      ech: Option<Vec<u8>>,
      listen: SocketAddr,
@@ -1488,19 +1494,19 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  ) -> Result<()> {
      let h2 = masque_h2::enabled();
      let dial = if h2 { masque_h2::h2_peer(peer) } else { peer };
-@@ -4023,6 +4367,11 @@
- 
+@@ -4025,6 +4369,11 @@ async fn run_masque_tunnel(
      let socks_listener = socks::bind_listener("socks5", listen).await?;
      let http_listener = bind_http_proxy().await?;
-+
+ 
 +    // establish_masque has confirmed the data plane; both listeners bound.
 +    if let Some((path, proof)) = memory {
 +        lastconn::save(&path, &peer.to_string(), &proof);
 +    }
- 
++
      let mut tasks = TaskGuard::new();
  
-@@ -4464,6 +4813,7 @@
+     let socks_stack = hop.stack.clone();
+@@ -4465,6 +4814,7 @@ async fn run_mim(
      ech: Option<Vec<u8>>,
      listen: SocketAddr,
  ) -> Result<()> {
@@ -1508,7 +1514,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      let pinned = mim_endpoints_from_env()?;
  
      match (pinned.outer, pinned.inner) {
-@@ -4549,12 +4899,13 @@
+@@ -4550,12 +4900,13 @@ async fn run_mim(
  
          outer_peer = Some(outer);
  
@@ -1523,7 +1529,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
              listen,
          )
          .await
-@@ -4562,7 +4913,7 @@
+@@ -4563,7 +4914,7 @@ async fn run_mim(
              Ok(()) => log::warn!("[-] masque-in-masque tunnel closed; reconnecting"),
              Err(e) => log::warn!("[-] masque-in-masque tunnel ended: {e}; reconnecting"),
          }
@@ -1532,7 +1538,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  
          tokio::time::sleep(masque_reconnect_delay()).await;
      }
-@@ -5119,27 +5470,26 @@
+@@ -5120,27 +5471,26 @@ async fn run_wireguard(
          let remembered_profile = profile_name.clone();
          last_good = Some((peer, profile.clone(), profile_name));
  
@@ -1572,7 +1578,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
          tokio::time::sleep(wg_reconnect_delay()).await;
      }
  }
-@@ -5159,6 +5509,7 @@
+@@ -5160,6 +5510,7 @@ async fn run_wireguard_tunnel(
      peer: SocketAddr,
      aethernoize: aethernoize::AetherNoizeConfig,
      listen: SocketAddr,
@@ -1580,19 +1586,19 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  ) -> Result<()> {
      let private_key = identity.private_key_bytes()?;
      let peer_public = identity.peer_public_key_bytes()?;
-@@ -5204,6 +5555,11 @@
- 
+@@ -5206,6 +5557,11 @@ async fn run_wireguard_tunnel(
      let socks_listener = socks::bind_listener("socks5", listen).await?;
      let http_listener = bind_http_proxy().await?;
-+
+ 
 +    // verify_endpoint_keep_session proved traffic; record before serving it.
 +    if let Some((path, proof)) = memory {
 +        lastconn::save(&path, &peer.to_string(), &proof);
 +    }
- 
++
      let socks_stack = stack.clone();
      let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
-@@ -5384,6 +5740,13 @@
+     tasks.push(socks_task.abort_handle());
+@@ -5385,6 +5741,13 @@ impl Drop for TaskGuard {
      }
  }
  
@@ -1606,7 +1612,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
  async fn spawn_udp_forwarder(
      outer: &netstack::StackHandle,
      remote: SocketAddr,
-@@ -5406,14 +5769,8 @@
+@@ -5407,14 +5770,8 @@ async fn spawn_udp_forwarder(
          // used dropped everything after the move and killed the tunnel, so
          // replies follow whichever port it last sent from.
          while let Ok((n, from)) = up_sock.recv_from(&mut buf).await {
@@ -1623,11 +1629,10 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
              }
              if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
                  break;
-@@ -5757,6 +6114,26 @@
- #[cfg(test)]
+@@ -5759,6 +6116,26 @@ async fn select_ip_version() -> prober::IpScan {
  mod identity_tests {
      use super::*;
-+
+ 
 +    #[tokio::test]
 +    async fn desktop_endpoint_memory_is_scoped_without_moving_the_identity() {
 +        let _settings = crate::upstream::hold_setting().await;
@@ -1647,10 +1652,11 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
 +            None => std::env::remove_var("AETHER_NETWORK_KEY"),
 +        }
 +    }
- 
++
      /// Clears the environment these paths read, so a developer's own settings
      /// cannot decide whether the suite passes.
-@@ -5800,11 +6177,249 @@
+     fn isolated() {
+@@ -5801,6 +6178,191 @@ mod identity_tests {
          }
      }
  
@@ -1842,10 +1848,10 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      fn scratch(name: &str) -> std::path::PathBuf {
          let dir = std::env::temp_dir().join(format!("aether-{name}-{}", std::process::id()));
          let _ = std::fs::remove_dir_all(&dir);
-         std::fs::create_dir_all(&dir).unwrap();
+@@ -5808,6 +6370,59 @@ mod identity_tests {
          dir
-+    }
-+
+     }
+ 
 +    #[tokio::test]
 +    async fn an_enrollment_rate_limit_survives_restart_with_the_same_pending_key() {
 +        use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1897,10 +1903,12 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
 +        assert_eq!(second.store.device("device").unwrap().pending_key_pem, key);
 +        std::env::remove_var("AETHER_ENROLL_ADDRESS");
 +        std::fs::remove_dir_all(dir).unwrap();
-     }
- 
++    }
++
      #[test]
-@@ -7593,10 +8208,7 @@
+     fn an_exported_identity_comes_back_as_the_same_device() {
+         isolated();
+@@ -7594,10 +8209,7 @@ mod ech_tests {
          }
      }
  
@@ -1912,7 +1920,7 @@ diff --git a/aether/src/lib.rs b/aether/src/lib.rs
      #[tokio::test]
      async fn the_http2_framing_resolves_the_key_it_will_offer() {
          let _serial = one_at_a_time();
-@@ -7917,3 +8529,21 @@
+@@ -7918,3 +8530,21 @@ mod migration_tests {
          assert!(!migrate_running_tunnel());
      }
  }
@@ -2050,7 +2058,7 @@ diff --git a/aether/src/main.rs b/aether/src/main.rs
 diff --git a/aether/src/prober.rs b/aether/src/prober.rs
 --- a/aether/src/prober.rs
 +++ b/aether/src/prober.rs
-@@ -595,6 +595,13 @@
+@@ -595,6 +595,13 @@ impl ScanMode {
              strategy.per_probe_timeout = Duration::from_secs(3);
              strategy.concurrency = 8;
          }
@@ -2067,7 +2075,7 @@ diff --git a/aether/src/prober.rs b/aether/src/prober.rs
 diff --git a/aether/src/socks.rs b/aether/src/socks.rs
 --- a/aether/src/socks.rs
 +++ b/aether/src/socks.rs
-@@ -267,6 +267,9 @@
+@@ -267,6 +267,9 @@ pub async fn bind_listener(kind: &str, listen: SocketAddr) -> Result<TcpListener
  }
  
  pub async fn bind_listener_for(kind: &str, listen: SocketAddr, flag: &str) -> Result<TcpListener> {
@@ -2080,7 +2088,7 @@ diff --git a/aether/src/socks.rs b/aether/src/socks.rs
 diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
 --- a/aether/src/upstream.rs
 +++ b/aether/src/upstream.rs
-@@ -70,10 +70,13 @@
+@@ -70,10 +70,13 @@ impl std::fmt::Debug for Upstream {
  ///
  /// Parsing a short string per connection costs less than being wrong about it.
  pub fn configured() -> Option<Upstream> {
@@ -2098,7 +2106,7 @@ diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
  }
  
  tokio::task_local! {
-@@ -89,9 +92,6 @@
+@@ -89,9 +92,6 @@ pub async fn through<T>(proxy: Upstream, operation: impl std::future::Future<Out
  /// Stops aether when AETHER_UPSTREAM, which --upstream sets, names a proxy it cannot dial through:
  /// [`configured`] sets such a setting aside, and every connection would then go straight out,
  /// around the proxy the user named. A blank setting names none.
@@ -2108,12 +2116,10 @@ diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
  
  /// Whether `raw`, a setting of AETHER_UPSTREAM, is blank or names a proxy aether can dial through.
  fn usable(raw: &str) -> Result<()> {
-@@ -142,6 +142,17 @@
-     let upstream = Upstream::from_value(&raw);
-     *seen = Some((raw, upstream.clone()));
+@@ -144,6 +144,17 @@ fn remembered(seen: &mut Option<(String, Option<Upstream>)>, raw: String) -> Opt
      upstream
-+}
-+
+ }
+ 
 +/// Reject a configured proxy before any provisioning or network operation.
 +pub fn check_setting() -> Result<()> {
 +    let value = std::env::var("AETHER_UPSTREAM").unwrap_or_default();
@@ -2123,13 +2129,15 @@ diff --git a/aether/src/upstream.rs b/aether/src/upstream.rs
 +    Upstream::parse(&value)
 +        .map(drop)
 +        .map_err(|error| AetherError::Other(format!("--upstream cannot be used: {error}")))
- }
- 
++}
++
  impl Upstream {
+     pub fn from_env() -> Option<Self> {
+         Self::from_value(&std::env::var("AETHER_UPSTREAM").ok()?)
 diff --git a/aether/src/wg_masque.rs b/aether/src/wg_masque.rs
 --- a/aether/src/wg_masque.rs
 +++ b/aether/src/wg_masque.rs
-@@ -54,6 +54,7 @@
+@@ -54,6 +54,7 @@ async fn inner_identity(
          // the next attempt reuses that key rather than spending another registration.
          let inner = load_or_provision_warp(&site).await?;
          let _lock = provisioning_lock().lock().await;
@@ -2137,7 +2145,7 @@ diff --git a/aether/src/wg_masque.rs b/aether/src/wg_masque.rs
          let mut loaded = identity::load(&site.store_path, &site.legacy)?;
          let enabled = loaded
              .store
-@@ -67,6 +68,7 @@
+@@ -67,6 +68,7 @@ async fn inner_identity(
                  .cloned()
                  .ok_or_else(|| AetherError::Other("inner WARP identity disappeared".into()))?;
              device.warp_enabled = true;

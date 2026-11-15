@@ -21,7 +21,8 @@ import {
   subscribeTrayActions,
 } from "@/core/api";
 import { profileForWinner } from "@/core/winner";
-import { withNormalizedEndpoint } from "@/core/endpoint";
+import { endpointError, withNormalizedEndpoint } from "@/core/endpoint";
+import { engineSettingsApply } from "@/types";
 import {
   DEFAULT_PROFILE, IDLE_SNAPSHOT, type ConnectionProfile, type CoreLogEvent, type CoreProbe,
   type CoreSnapshot,
@@ -197,6 +198,37 @@ export default function App() {
     };
   }, [desktop, snapshot.state]);
 
+  /** Everything Connect does from idle: the checks, the search, the start. */
+  const connect = useCallback(async () => {
+    // Refused here, with the reason beside it, rather than as a search that never ends.
+    if (engineSettingsApply(effective)) {
+      const problem = endpointError(effective.endpointMode, effective.peer ?? "", effective.ipFamily);
+      if (problem) throw new Error(t(problem));
+    }
+    const latest = await probeCore(effective);
+    setProbe(latest);
+    if (!latest.available) throw new Error(latest.message);
+
+    // Connect finds a way out rather than trying one. Almost nobody opens
+    // Advanced: they press this button, and if it does not connect they stop
+    // using the app — they do not go looking for a carrier picker they have
+    // never heard of to discover that Psiphon would have worked here.
+    //
+    // The race says so on screen while it runs, so the minutes it can take on
+    // a hard network are minutes of something visibly happening.
+    let chosen = effective;
+    if (effective.autoRoute) {
+      const report = await raceCarriers(effective);
+      if (report.cancelled) return;
+      if (report.winner) chosen = profileForWinner(effective, report.winner);
+      // No winner is not a reason to refuse to try. The configured carrier
+      // still gets its ordinary attempt, with the supervisor's own retries
+      // and a real error at the end of them — which is more use to somebody
+      // than a search that shrugs.
+    }
+    setSnapshot(await startCore(chosen));
+  }, [effective, t]);
+
   const toggleConnection = useCallback(async () => {
     try {
       if (ACTIVE.has(snapshot.state)) {
@@ -204,32 +236,33 @@ export default function App() {
         notify("Disconnected", "The core stopped cleanly.");
         return;
       }
-      const latest = await probeCore(effective);
-      setProbe(latest);
-      if (!latest.available) throw new Error(latest.message);
-
-      // Connect finds a way out rather than trying one. Almost nobody opens
-      // Advanced: they press this button, and if it does not connect they stop
-      // using the app — they do not go looking for a carrier picker they have
-      // never heard of to discover that Psiphon would have worked here.
-      //
-      // The race says so on screen while it runs, so the minutes it can take on
-      // a hard network are minutes of something visibly happening.
-      let chosen = effective;
-      if (effective.autoRoute) {
-        const report = await raceCarriers(effective);
-        if (report.cancelled) return;
-        if (report.winner) chosen = profileForWinner(effective, report.winner);
-        // No winner is not a reason to refuse to try. The configured carrier
-        // still gets its ordinary attempt, with the supervisor's own retries
-        // and a real error at the end of them — which is more use to somebody
-        // than a search that shrugs.
-      }
-      setSnapshot(await startCore(chosen));
+      await connect();
     } catch (error) {
       showError(error);
     }
-  }, [snapshot.state, effective, notify, showError]);
+  }, [snapshot.state, connect, notify, showError]);
+
+  // Settings the running engine read at start and cannot change in place: when
+  // one changes mid-session the connection is made again with the new value.
+  // Bumped by Advanced when an imported rule list is added, toggled or deleted.
+  const [ruleListsVersion, setRuleListsVersion] = useState(0);
+  const restartKey = `${effective.ipFamily}|${ruleListsVersion}`;
+  const lastRestartKey = useRef(restartKey);
+  useEffect(() => {
+    if (lastRestartKey.current === restartKey) return;
+    lastRestartKey.current = restartKey;
+    if (!desktop || !ACTIVE.has(snapshot.state)) return;
+    void (async () => {
+      try {
+        setSnapshot(await stopCore());
+        notify(t("Reconnecting"), t("The connection is starting again with the changed setting."));
+        await connect();
+      } catch (error) {
+        showError(error);
+      }
+    })();
+    // Only a change of the key restarts; the rest is read when it does.
+  }, [restartKey]);
 
   // Held in a ref so the listeners below never need re-registering. Depending on
   // the callback itself tore down and rebuilt a Tauri listener over IPC on every
@@ -521,6 +554,7 @@ export default function App() {
             onSave={() => void saveProfile()}
             onToast={notify}
             jumpTo={jumpTo}
+            onRuleListsChanged={() => setRuleListsVersion((version) => version + 1)}
           />
         )}
       </main>

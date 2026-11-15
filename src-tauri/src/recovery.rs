@@ -142,7 +142,10 @@ pub fn recipes(
     h2.hello_shape.clear();
     let mut h3 = h2.clone();
     h3.masque_transport = "h3".into();
-    if p.masque_transport == "h3" {
+    // The framing that last carried traffic on *this* network goes first; with
+    // nothing proven here, H2. The profile's own framing may have been won on
+    // another network, which says nothing about this one.
+    if remembered.is_some_and(|r| r.masque_transport == "h3") {
         add(h3.clone());
         add(h2.clone());
     } else {
@@ -259,6 +262,19 @@ mod tests {
         }
         assert!(all.iter().any(|r| r.scan_mode == "balanced"));
         assert!(all.iter().all(|r| r.budget() <= Duration::from_secs(300)));
+    }
+    #[test]
+    fn only_this_networks_proven_framing_moves_h3_ahead() {
+        let quick = |all: &[EngineRecipe]| -> Vec<String> {
+            all.iter().filter(|r| r.label() == "aether h2" || r.label() == "aether h3").take(2).map(EngineRecipe::label).collect()
+        };
+        // An H3 profile won elsewhere is not evidence here: H2 first.
+        let mut p = CoreProfile::default();
+        p.masque_transport = "h3".into();
+        assert_eq!(quick(&recipes(&p, None, None)), ["aether h2", "aether h3"]);
+        // H3 proven on this network: H3 first.
+        let proven = recipes(&p, None, None).into_iter().find(|r| r.label() == "aether h3").unwrap();
+        assert_eq!(quick(&recipes(&CoreProfile::default(), Some(&proven), None)), ["aether h3", "aether h2"]);
     }
     #[test]
     fn ipv4_and_ech_off_are_not_overridden() {

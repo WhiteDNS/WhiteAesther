@@ -29,6 +29,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::carrier::{Carrier, CarrierKind};
 use crate::core_supervisor::CoreSupervisor;
+use crate::http_bridge::SocksAuth;
 
 /// The script deployed to Cloudflare, byte for byte the Android 1.15.1 asset.
 pub(crate) const WORKER_SCRIPT: &str = include_str!("../assets/worker.js");
@@ -507,7 +508,7 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 /// BPB's Worker variants, rendered for the pinned Xray core.
-pub fn render_config(deployment: &WorkerDeployment, socks_port: u16) -> Result<String, String> {
+pub fn render_config(deployment: &WorkerDeployment, socks_port: u16, auth: &SocksAuth) -> Result<String, String> {
     let options = &deployment.options;
     options.validate()?;
     if socks_port == 0 {
@@ -616,7 +617,12 @@ pub fn render_config(deployment: &WorkerDeployment, socks_port: u16) -> Result<S
             "listen": "127.0.0.1",
             "port": socks_port,
             "protocol": "socks",
-            "settings": { "auth": "noauth", "udp": false },
+            // Loopback is reachable by every program on the machine; only this app knows these.
+            "settings": {
+                "auth": "password",
+                "accounts": [{ "user": auth.username, "pass": auth.password }],
+                "udp": false,
+            },
         }],
         "outbounds": outbounds,
         "routing": routing,
@@ -805,6 +811,8 @@ struct Inner {
     child: Mutex<Option<Child>>,
     snapshot: Mutex<WorkerSnapshot>,
     config: Mutex<Option<PathBuf>>,
+    /// The inbound whose session credentials are registered with the bridge.
+    listener: Mutex<Option<SocketAddr>>,
     generation: AtomicU64,
 }
 
@@ -828,6 +836,7 @@ impl Worker {
                 child: Mutex::new(None),
                 snapshot: Mutex::new(WorkerSnapshot { state: "idle".into(), ..WorkerSnapshot::default() }),
                 config: Mutex::new(None),
+                listener: Mutex::new(None),
                 generation: AtomicU64::new(0),
             }),
         }
@@ -909,9 +918,13 @@ impl Worker {
             .join("runtime");
         std::fs::create_dir_all(&directory).map_err(|error| format!("cannot prepare the Worker directory: {error}"))?;
         let config = directory.join(format!("connection-{generation}.json"));
-        std::fs::write(&config, render_config(deployment, port)?)
+        let auth = SocksAuth::random();
+        std::fs::write(&config, render_config(deployment, port, &auth)?)
             .map_err(|error| format!("cannot write the Worker config: {error}"))?;
         *lock(&self.inner.config) = Some(config.clone());
+        let listener = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        *lock(&self.inner.listener) = Some(listener);
+        crate::http_bridge::set_socks_credentials(listener, Some(auth.clone()));
 
         let mut command = Command::new(&binary);
         command
@@ -930,9 +943,11 @@ impl Worker {
         for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
             let app = app.clone();
             let deployment = deployment.clone();
+            let auth = auth.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stream).lines() {
                     let Ok(line) = line else { break };
+                    let line = line.replace(&auth.password, "[redacted]").replace(&auth.username, "[redacted]");
                     let text: String = deployment.redact(&line).chars().take(500).collect();
                     app.state::<CoreSupervisor>().record("worker", "info", text);
                 }
@@ -962,7 +977,7 @@ impl Worker {
         if browser {
             open_dialer(app, dialer_port)?;
         }
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let address = listener;
         loop {
             if !running() {
                 return Err("Worker engine stopped during connection testing".into());
@@ -984,6 +999,9 @@ impl Worker {
         }
         if let Some(config) = lock(&self.inner.config).take() {
             let _ = std::fs::remove_file(config);
+        }
+        if let Some(listener) = lock(&self.inner.listener).take() {
+            crate::http_bridge::set_socks_credentials(listener, None);
         }
         if let Some(window) = app.get_webview_window(DIALER_LABEL) {
             let _ = window.destroy();
@@ -1065,7 +1083,7 @@ mod tests {
     fn normal_mode_balances_every_address_and_port_by_latency() {
         let mut d = deployment(WorkerMode::Normal);
         d.options.ports = vec![443, 8443];
-        let config: Value = serde_json::from_str(&render_config(&d, 1080).unwrap()).unwrap();
+        let config: Value = serde_json::from_str(&render_config(&d, 1080, &SocksAuth::random()).unwrap()).unwrap();
         let nodes: Vec<&Value> = config["outbounds"].as_array().unwrap().iter().filter(|o| o["protocol"] == "vless").collect();
         // Host plus two clean addresses, on two ports.
         assert_eq!(nodes.len(), 6);
@@ -1079,6 +1097,14 @@ mod tests {
         assert_eq!(config["routing"]["rules"][0]["outboundTag"], "worker-block");
         assert_eq!(config["observatory"]["probeInterval"], "60s");
         assert_eq!(config["inbounds"][0]["listen"], "127.0.0.1");
+        assert_eq!(config["inbounds"][0]["settings"]["auth"], "password");
+        let account = &config["inbounds"][0]["settings"]["accounts"][0];
+        for field in ["user", "pass"] {
+            let value = account[field].as_str().unwrap();
+            assert_eq!(value.len(), 32);
+            assert!(value.chars().all(|c| c.is_ascii_alphanumeric()));
+        }
+        assert_ne!(account["user"], account["pass"]);
         assert_eq!(config["inbounds"][0]["settings"]["udp"], false);
     }
 
@@ -1091,7 +1117,7 @@ mod tests {
         d.options.cdn_host = "h.example.com".into();
         d.options.cdn_sni = "s.example.com".into();
         d.options.upstream_proxy = "relay.example.com:443".into();
-        let config: Value = serde_json::from_str(&render_config(&d, 1080).unwrap()).unwrap();
+        let config: Value = serde_json::from_str(&render_config(&d, 1080, &SocksAuth::random()).unwrap()).unwrap();
         let nodes: Vec<&Value> = config["outbounds"].as_array().unwrap().iter().filter(|o| o["protocol"] == "vless").collect();
         assert_eq!(nodes.len(), 3, "no CDN or upstream candidates in fragment mode");
         let stream = &nodes[0]["streamSettings"];
@@ -1104,7 +1130,7 @@ mod tests {
     #[test]
     fn browser_mode_uses_one_node_on_443_without_fingerprint() {
         let d = deployment(WorkerMode::Browser);
-        let config: Value = serde_json::from_str(&render_config(&d, 1080).unwrap()).unwrap();
+        let config: Value = serde_json::from_str(&render_config(&d, 1080, &SocksAuth::random()).unwrap()).unwrap();
         let nodes: Vec<&Value> = config["outbounds"].as_array().unwrap().iter().filter(|o| o["protocol"] == "vless").collect();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0]["settings"]["port"], 443);
@@ -1123,7 +1149,7 @@ mod tests {
         d.options.cdn_host = "h.example.com".into();
         d.options.cdn_sni = "s.example.com".into();
         d.options.upstream_proxy = "[2001:4860::1]:8443".into();
-        let config: Value = serde_json::from_str(&render_config(&d, 1080).unwrap()).unwrap();
+        let config: Value = serde_json::from_str(&render_config(&d, 1080, &SocksAuth::random()).unwrap()).unwrap();
         let nodes: Vec<&Value> = config["outbounds"].as_array().unwrap().iter().filter(|o| o["protocol"] == "vless").collect();
         assert_eq!(nodes.len(), 5);
         let cdn = nodes.iter().find(|n| n["settings"]["address"] == "cdn.example.com").unwrap();
@@ -1148,7 +1174,7 @@ mod tests {
     fn an_unready_deployment_renders_nothing() {
         let mut d = deployment(WorkerMode::Normal);
         d.ready = false;
-        assert!(render_config(&d, 1080).is_err());
+        assert!(render_config(&d, 1080, &SocksAuth::random()).is_err());
     }
 
     #[test]
@@ -1237,7 +1263,7 @@ mod tests {
             let mut d = deployment(mode);
             d.options.ech = mode == WorkerMode::Normal;
             let path = directory.join(format!("{mode:?}.json").to_lowercase());
-            std::fs::write(&path, render_config(&d, 10808).unwrap()).unwrap();
+            std::fs::write(&path, render_config(&d, 10808, &SocksAuth::random()).unwrap()).unwrap();
             if let Ok(dump) = std::env::var("WHITEAESTHER_XRAY_FIXTURES") {
                 std::fs::create_dir_all(&dump).unwrap();
                 std::fs::copy(&path, PathBuf::from(&dump).join(path.file_name().unwrap())).unwrap();

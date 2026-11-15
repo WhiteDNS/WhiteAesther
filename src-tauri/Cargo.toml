@@ -1,6 +1,6 @@
 [package]
 name = "whiteaesther"
-version = "1.11.1"
+version = "1.12.0"
 description = "Cross-platform desktop client for the Aether connection core"
 authors = ["WhiteDNS"]
 # WhiteAesther links the Aether engine, which is AGPL-3.0, so it is a derivative
@@ -54,6 +54,9 @@ webpki-roots = "1"
 # The save and open pickers for the identity backup. Used from Rust only, so
 # the file, which holds private keys, never passes through the webview.
 tauri-plugin-dialog = "2"
+# Checking an imported DOMAIN-REGEX compiles, with the same engine the core uses.
+# Already in the tree through Tauri.
+regex = "1"
 
 # System proxy control. Both are already in the tree via Tauri; naming them here
 # only adds the dependency edge.
