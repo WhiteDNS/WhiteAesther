@@ -42,7 +42,7 @@ Builds use the pinned Android Aether 2.4 source with desktop adapters, including
 
 ```sh
 git clone https://github.com/WhiteDNS/WhiteAestherMobile.git aether-source
-git -C aether-source checkout --detach 6e2ade9e86c5f66194c66e6be1e23b40677c2db2
+git -C aether-source checkout --detach 697a558b6d287dce29f6ddeedc392ba6a10d7015
 node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
 cargo build --release --locked --manifest-path aether-core/aether/Cargo.toml
 ```

@@ -25,7 +25,7 @@ concurrency:
 env:
   # The fork adds the reporting modes the endpoint scanner needs. Pinned to a
   # commit rather than a branch so a release is reproducible.
-  AETHER_REVISION: 6e2ade9e86c5f66194c66e6be1e23b40677c2db2
+  AETHER_REVISION: 697a558b6d287dce29f6ddeedc392ba6a10d7015
   # BoringSSL's C++ runtime must not depend on a developer's installed VC DLLs.
   # Target-specific: ignored by the macOS/Linux jobs; also applies to Tauri.
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
