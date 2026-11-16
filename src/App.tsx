@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpCircle, BadgeCheck, Search, Settings2, ShieldAlert, X } from "lucide-react";
+import { ArrowUpCircle, BadgeCheck, Search, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Advanced } from "@/features/Advanced";
 import { Simple } from "@/features/Simple";
 import { type CarryMode, carryFromProfile } from "@/features/carry";
@@ -78,6 +77,8 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(MODE_KEY, mode);
   }, [mode]);
+  // Stable, because the curtain's Escape listener re-subscribes when it changes.
+  const setAdvanced = useCallback((open: boolean) => setMode(open ? "advanced" : "simple"), []);
 
   useEffect(() => {
     let disposed = false;
@@ -421,7 +422,6 @@ export default function App() {
         <div className="flex items-center gap-2.5">
           <img src={logo} alt="" className="size-[26px] rounded-[7px]" />
           <span className="text-[14.5px] font-semibold tracking-tight">WhiteAesther</span>
-          <StateChip snapshot={snapshot} />
         </div>
         <div className="flex items-center gap-2.5">
           <button
@@ -437,15 +437,6 @@ export default function App() {
               Ctrl K
             </kbd>
           </button>
-          <Tabs value={mode} onValueChange={(value) => setMode(value as Mode)}>
-            <TabsList className="h-8">
-              <TabsTrigger value="simple" className="px-3 py-1 text-[13px]">{t("Simple")}</TabsTrigger>
-              <TabsTrigger value="advanced" className="px-3 py-1 text-[13px]">{t("Advanced")}</TabsTrigger>
-            </TabsList>
-          </Tabs>
-          <Button variant="ghost" size="icon" aria-label={t("Advanced settings")} onClick={() => setMode("advanced")}>
-            <Settings2 />
-          </Button>
           {/* Two languages, so a toggle rather than a menu: one press, and the
               label is always the language you would get, not the one you have. */}
           <Button
@@ -527,36 +518,36 @@ export default function App() {
       ) : null}
 
       <main className="min-h-0 flex-1">
-        {mode === "simple" ? (
-          <Simple
-            snapshot={snapshot}
-            profile={profile}
-            probe={probe}
-            carry={carry}
-            latency={latency}
-            onCarry={setCarry}
-            onToggle={() => void toggleConnection()}
-            onAdvanced={() => setMode("advanced")}
-            onRetryStealth={() => void retryStealth()}
-            onReport={() => setMode("advanced")}
-            onProfile={applyProfile}
-            onToast={notify}
-          />
-        ) : (
-          <Advanced
-            profile={profile}
-            onChange={setProfile}
-            snapshot={snapshot}
-            probe={probe}
-            logs={logs}
-            runtime={runtime}
-            appVersion={appVersion}
-            onSave={() => void saveProfile()}
-            onToast={notify}
-            jumpTo={jumpTo}
-            onRuleListsChanged={() => setRuleListsVersion((version) => version + 1)}
-          />
-        )}
+        <Simple
+          snapshot={snapshot}
+          profile={profile}
+          probe={probe}
+          carry={carry}
+          latency={latency}
+          onCarry={setCarry}
+          onToggle={() => void toggleConnection()}
+          advancedOpen={mode === "advanced"}
+          onAdvanced={setAdvanced}
+          onRetryStealth={() => void retryStealth()}
+          onReport={() => setMode("advanced")}
+          onProfile={applyProfile}
+          onToast={notify}
+          advanced={
+            <Advanced
+              profile={profile}
+              onChange={setProfile}
+              snapshot={snapshot}
+              probe={probe}
+              logs={logs}
+              runtime={runtime}
+              appVersion={appVersion}
+              onSave={() => void saveProfile()}
+              onToast={notify}
+              jumpTo={jumpTo}
+              onRuleListsChanged={() => setRuleListsVersion((version) => version + 1)}
+            />
+          }
+        />
       </main>
 
       <CommandPalette
@@ -640,36 +631,6 @@ export default function App() {
         </div>
       ) : null}
     </div>
-  );
-}
-
-function StateChip({ snapshot }: { snapshot: CoreSnapshot }) {
-  if (snapshot.state === "connected")
-    return (
-      <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-primary/30 bg-primary/[0.13] px-2.5 text-[11.5px] font-semibold text-primary">
-        <span className="size-1.5 rounded-full bg-current" />
-        Connected
-      </span>
-    );
-  if (snapshot.state === "error")
-    return (
-      <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 text-[11.5px] font-semibold text-destructive">
-        <span className="size-1.5 rounded-full bg-current" />
-        Stopped
-      </span>
-    );
-  if (!ACTIVE.has(snapshot.state))
-    return (
-      <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border bg-muted px-2.5 text-[11.5px] font-semibold text-muted-foreground">
-        <span className="size-1.5 rounded-full bg-current" />
-        Not connected
-      </span>
-    );
-  return (
-    <span className="ms-1.5 inline-flex h-[22px] items-center gap-1.5 rounded-full border border-warning/30 bg-warning/[0.13] px-2.5 text-[11.5px] font-semibold text-warning">
-      <span className="size-1.5 animate-pulse rounded-full bg-current" />
-      {snapshot.attempt > 0 ? `Searching · ${snapshot.attempt} of ${snapshot.maxAttempts}` : "Searching"}
-    </span>
   );
 }
 

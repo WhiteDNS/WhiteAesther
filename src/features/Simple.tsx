@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
-import { Check, FileText, Gauge, Globe, Lock, Plug, Power, Radar, Search, ShieldAlert, X, Zap, type LucideIcon } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
+import { Check, ChevronRight, FileText, Gauge, Globe, Lock, Plug, Power, Radar, Search, ShieldAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { type ExitInfo, chainStatus, exitInfo, speedTest } from "@/core/api";
-import { useT } from "@/core/useT";
+import { useLanguage, useT } from "@/core/useT";
+import { ExitFlag, countryName, hasFlag } from "./ExitFlag";
 import { ConnectOrb, type OrbState } from "./ConnectOrb";
 import { Sparkline } from "./Sparkline";
 import { type Sample, summarise } from "./latency";
@@ -21,7 +22,10 @@ interface SimpleProps {
   latency: Sample[];
   onCarry: (mode: CarryMode) => void;
   onToggle: () => void;
-  onAdvanced: () => void;
+  /** Whether the Advanced curtain is drawn back over the middle panel. */
+  advancedOpen: boolean;
+  onAdvanced: (open: boolean) => void;
+  advanced: ReactNode;
   onRetryStealth: () => void;
   onReport: () => void;
   onProfile: (patch: Partial<ConnectionProfile>) => void;
@@ -70,6 +74,17 @@ export function Simple(props: SimpleProps) {
   const failed = snapshot.state === "error";
   const live = snapshot.state === "connected";
 
+  const { advancedOpen, onAdvanced } = props;
+  useEffect(() => {
+    if (!advancedOpen) return;
+    const close = (event: KeyboardEvent) => {
+      // A dialog on top (the settings search) owns Escape for itself.
+      if (event.key === "Escape" && !document.querySelector('[role="dialog"]')) onAdvanced(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [advancedOpen, onAdvanced]);
+
   const orbState: OrbState = live ? "live" : busy ? "working" : failed ? "failed" : "idle";
   const caption = live
     ? t("Connected")
@@ -83,10 +98,46 @@ export function Simple(props: SimpleProps) {
     <div className="flex h-full min-h-0 flex-col overflow-y-auto">
       {/* Keep the panels at their content height on short windows so the carry
           picker follows them in the scroll area instead of covering settings. */}
-      <div className="flex min-h-fit flex-1 shrink-0 gap-5 px-5 pt-5">
+      <div className="flex min-h-fit flex-1 shrink-0 gap-3 px-5 pt-5">
+        <button
+          type="button"
+          aria-expanded={props.advancedOpen}
+          onClick={() => props.onAdvanced(!props.advancedOpen)}
+          className={[
+            "surface flex w-10 shrink-0 flex-col items-center justify-center gap-3 rounded-xl border transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            props.advancedOpen ? "border-primary/55 bg-primary/[0.09] text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          ].join(" ")}
+        >
+          <ChevronRight
+            className={["size-4 transition-transform", props.advancedOpen ? "rotate-180 rtl:rotate-0" : "rtl:rotate-180"].join(" ")}
+          />
+          <span className="rotate-180 text-[13px] font-semibold [writing-mode:vertical-rl]">{t("Advanced settings")}</span>
+        </button>
+
+        {/* The curtain slides in from the tab's side and covers only this panel,
+            so the connect box stays in reach while settings are open. */}
+        <div className="relative flex min-w-0 flex-1 flex-col gap-3.5 overflow-hidden">
+          {live ? <Connected {...props} carryAddress={carryAddress} /> : null}
+          {busy ? <Searching {...props} /> : null}
+          {failed ? <Failed {...props} /> : null}
+          {!live && !busy && !failed ? <Idle {...props} /> : null}
+          <div
+            inert={!props.advancedOpen}
+            className={[
+              "absolute inset-0 overflow-hidden rounded-xl border bg-background transition-transform duration-300 ease-out",
+              props.advancedOpen ? "translate-x-0" : "-translate-x-[105%] rtl:translate-x-[105%]",
+            ].join(" ")}
+          >
+            {props.advanced}
+          </div>
+        </div>
+
         <aside
           className={[
-            "flex w-[386px] shrink-0 flex-col items-center justify-center rounded-xl border",
+            "flex shrink-0 flex-col items-center justify-center rounded-xl border transition-[width] duration-300 ease-out",
+            // Narrower while settings are open, so they are not squeezed on small windows.
+            props.advancedOpen ? "w-[300px]" : "w-[386px]",
             live ? "bg-[radial-gradient(120%_80%_at_50%_30%,hsl(var(--primary)/0.055),transparent_70%)]" : "",
             busy ? "bg-[radial-gradient(120%_80%_at_50%_30%,hsl(var(--warning)/0.05),transparent_70%)]" : "",
           ].join(" ")}
@@ -100,13 +151,6 @@ export function Simple(props: SimpleProps) {
           <Headline {...props} carryAddress={carryAddress} />
           <Actions {...props} />
         </aside>
-
-        <div className="flex min-w-0 flex-1 flex-col gap-3.5">
-          {live ? <Connected {...props} carryAddress={carryAddress} /> : null}
-          {busy ? <Searching {...props} /> : null}
-          {failed ? <Failed {...props} /> : null}
-          {!live && !busy && !failed ? <Idle {...props} /> : null}
-        </div>
       </div>
 
       <div className="shrink-0 px-5 pb-4 pt-3.5">
@@ -345,6 +389,7 @@ const RETRY_AFTER_MS = 2_500;
 
 function ExitCard({ carryAddress }: { carryAddress: string }) {
   const t = useT();
+  const language = useLanguage();
   const [info, setInfo] = useState<ExitInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -384,21 +429,30 @@ function ExitCard({ carryAddress }: { carryAddress: string }) {
 
   return (
     <Card className="surface flex items-center gap-3.5 p-3.5">
-      <div
-        className={[
-          "grid size-[34px] shrink-0 place-items-center rounded-lg",
-          good ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
-        ].join(" ")}
-      >
-        <Globe className="size-[17px]" />
-      </div>
+      {info && hasFlag(info.country) ? (
+        <ExitFlag country={info.country} />
+      ) : (
+        <div
+          className={[
+            "grid size-[34px] shrink-0 place-items-center rounded-lg",
+            good ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
+          ].join(" ")}
+        >
+          <Globe className="size-[17px]" />
+        </div>
+      )}
       <div className="min-w-0 flex-1">
         <div className="text-[12.5px] font-semibold">{t("What websites see")}</div>
         <div dir="auto" className="mt-0.5 truncate text-[11.5px] text-muted-foreground">
           {error
             ? error
             : info
-              ? `${info.ip} · ${info.country}${info.colo ? ` · via ${info.colo}` : ""}`
+              ? (
+                <>
+                  <span className="font-medium text-foreground">{countryName(info.country, language)}</span>
+                  {` · ${info.ip}${info.colo ? ` · via ${info.colo}` : ""}`}
+                </>
+              )
               : t("Checking…")}
         </div>
       </div>
@@ -588,7 +642,7 @@ function Failed({ onReport, onAdvanced }: SimpleProps) {
           <FileText />
           {t("Build a report")}
         </Button>
-        <Button variant="ghost" onClick={onAdvanced}>
+        <Button variant="ghost" onClick={() => onAdvanced(true)}>
           {t("Open Advanced")}
         </Button>
       </div>

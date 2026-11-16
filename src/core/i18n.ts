@@ -84,8 +84,6 @@ const FA: Record<string, string> = {
 
   // -- the shell -------------------------------------------------------------
   "Search settings": "جستجوی تنظیمات",
-  Simple: "ساده",
-  Advanced: "پیشرفته",
   "Advanced settings": "تنظیمات پیشرفته",
   Language: "زبان",
   "Traffic is blocked, not broken": "ترافیک مسدود شده، نه خراب",
@@ -539,7 +537,6 @@ const FA: Record<string, string> = {
   "Nothing answered on either transport. This network is filtering hard.": "هیچ‌کدام از دو پروتکل جوابی نداد. این شبکه سخت‌گیرانه فیلتر می‌کند.",
   "Enter a numeric address and port first.": "اول یک آدرس عددی و پورت وارد کنید.",
   "Find a gateway": "پیدا کردن دروازه",
-  "Working": "در حال کار",
   "What will run": "چه چیزی اجرا می‌شود",
   "No events yet. Connect to populate this.": "هنوز رویدادی نیست. برای پر شدن، وصل شوید.",
   "What this is built on": "این برنامه بر چه چیزی ساخته شده",

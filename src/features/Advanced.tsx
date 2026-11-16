@@ -3,7 +3,6 @@ import { useT } from "@/core/useT";
 import {
   Activity, Cloud, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -179,7 +178,6 @@ export function Advanced(props: AdvancedProps) {
             <p className="text-sm text-muted-foreground">{t(BLURB[section])}</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <StateBadge snapshot={props.snapshot} />
             <Button variant="outline" size="sm" onClick={props.onSave}>
               {t("Save profile")}
             </Button>
@@ -204,21 +202,6 @@ export function Advanced(props: AdvancedProps) {
         {section === "licences" && <Licences />}
       </div>
     </div>
-  );
-}
-
-function StateBadge({ snapshot }: { snapshot: CoreSnapshot }) {
-  const t = useT();
-  if (snapshot.state === "connected")
-    return <Badge variant="ok" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />{t("Connected")}</Badge>;
-  if (snapshot.state === "error")
-    return <Badge variant="bad" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />{t("Stopped")}</Badge>;
-  if (snapshot.state === "idle") return <Badge variant="outline">{t("Idle")}</Badge>;
-  return (
-    <Badge variant="warn" className="gap-1.5">
-      <span className="size-1.5 animate-pulse rounded-full bg-current" />
-      {snapshot.attempt > 0 ? `${t("Attempt")} ${snapshot.attempt}/${snapshot.maxAttempts}` : t("Working")}
-    </Badge>
   );
 }
 

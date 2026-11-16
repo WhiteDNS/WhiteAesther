@@ -62,3 +62,12 @@ for (const viewport of [{ width: 1366, height: 715 }, { width: 1100, height: 560
     expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(viewport.height);
   });
 }
+
+test('the exit card shows the country flag and its name', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 860 });
+  await page.goto('/');
+  await expect(page.getByText('Netherlands', { exact: true })).toBeVisible();
+  const flag = page.locator('img[src^="data:image/svg+xml"]');
+  await expect(flag).toBeVisible();
+  expect(await flag.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
+});
