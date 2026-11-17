@@ -236,7 +236,9 @@ pub async fn test_endpoint(
             &inner,
             &profile,
             &["--test-endpoint".into(), endpoint],
-            Duration::from_secs(25),
+            // The engine's full-traffic check runs to 15 s and asks once more
+            // after a quick refusal; this leaves room for both and its startup.
+            Duration::from_secs(30),
             &stop,
         )
         .and_then(|v| candidate_from(&v).ok_or_else(|| "unreadable endpoint answer".into()));

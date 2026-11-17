@@ -68,7 +68,11 @@ export function CommandPalette({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Escape") onClose();
+              if (event.key === "Escape") {
+                // Closes the search only, not the settings curtain behind it.
+                event.stopPropagation();
+                onClose();
+              }
               if (event.key === "ArrowDown") {
                 event.preventDefault();
                 setActive((current) => Math.min(current + 1, results.length - 1));

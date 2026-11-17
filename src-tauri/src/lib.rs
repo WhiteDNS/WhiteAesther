@@ -20,6 +20,7 @@ mod system_proxy;
 mod tls;
 mod tls_options;
 mod tor;
+mod tray_status;
 mod worker;
 mod worker_api;
 
@@ -37,7 +38,7 @@ use tauri::{
 /// it only notices on the next hover -- so every path that ends this process
 /// has to remove the icon itself. A build installed over a running copy is the
 /// common way to collect a row of dead icons.
-const TRAY_ID: &str = "whiteaesther";
+pub(crate) const TRAY_ID: &str = "whiteaesther";
 
 /// Takes the tray icon away before the process goes.
 ///

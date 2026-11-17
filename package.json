@@ -1,8 +1,8 @@
 {
   "name": "whiteaesther",
   "private": true,
-  "version": "1.12.1",
-  "prerelease": true,
+  "version": "1.13.0",
+  "prerelease": false,
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -37,6 +37,7 @@
     "@tauri-apps/plugin-opener": "^2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "country-flag-icons": "1.6.20",
     "lucide-react": "^1.29.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

@@ -4313,6 +4313,7 @@ pub fn start_pump(app: AppHandle, supervisor: &CoreSupervisor) {
         }
         if inner.snapshot_dirty.swap(false, Ordering::SeqCst) {
             let snapshot = lock(&inner.snapshot).clone();
+            crate::tray_status::show(&app, &snapshot);
             let _ = app.emit("core-status", &snapshot);
         }
     });

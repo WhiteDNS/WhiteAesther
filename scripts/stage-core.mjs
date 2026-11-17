@@ -14,8 +14,8 @@ const option = (name) => {
 
 const target = option("--target") ?? process.env.CARGO_BUILD_TARGET ?? rustHost();
 const extension = target.includes("windows") ? ".exe" : "";
-const source = await findCore(extension);
 const expected = JSON.parse(await readFile(join(appRoot, "core-source.json"), "utf8"));
+const source = await findCore(extension);
 const destination = join(appRoot, "src-tauri", "binaries", `aether-${target}${extension}`);
 const version = execFileSync(source, ["--version"], {
   encoding: "utf8",
@@ -75,6 +75,8 @@ async function findCore(binaryExtension) {
     join(appRoot, "..", "Aether-whiteaesther", "aether", "target", "debug", `aether${binaryExtension}`),
     join(appRoot, "..", "Aether", "aether", "target", "release", `aether${binaryExtension}`),
     join(appRoot, "..", "Aether", "aether", "target", "debug", `aether${binaryExtension}`),
+    // The binary a previous build already staged, last: copying it over itself is a no-op.
+    join(appRoot, "src-tauri", "binaries", `aether-${target}${binaryExtension}`),
   ].filter(Boolean);
 
   if (requested) {
@@ -82,13 +84,19 @@ async function findCore(binaryExtension) {
     return resolve(requested);
   }
 
+  // An older engine left in one of these places used to win and then fail the
+  // contract check, so only a binary built from the pinned revision is taken.
   for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
-      return resolve(candidate);
+      const { revision } = JSON.parse(execFileSync(candidate, ["--desktop-capabilities"], {
+        encoding: "utf8", timeout: 10_000, windowsHide: true,
+      }));
+      if (revision === expected.revision) return resolve(candidate);
+      console.warn(`Skipping ${candidate}: revision ${revision}, want ${expected.revision}`);
     } catch {
-      // Try the next explicit or conventional location.
+      // Missing, not runnable, or too old to report capabilities: try the next one.
     }
   }
-  throw new Error("Aether core not found. Set AETHER_CORE_SOURCE or pass --source <path>.");
+  throw new Error(`No Aether core at revision ${expected.revision} found. Set AETHER_CORE_SOURCE or pass --source <path>.`);
 }
