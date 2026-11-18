@@ -1749,7 +1749,13 @@ pub async fn set_chain(
                 session.profile.chain = settings.clone();
                 (session.profile.bypass_iran_sites, session.profile.full_tunnel)
             }
-            None => (false, false),
+            // Disconnected: the profile carries the change to the next connect.
+            // Starting mihomo here left it holding the listen port, so that
+            // connect's engine failed to bind and retried until it gave up.
+            None => {
+                chain.stop();
+                return Ok(false);
+            }
         }
     };
 
@@ -3237,6 +3243,7 @@ fn aether_hop_is_alive(inner: &SupervisorInner) -> bool {
 /// On a network that filters, that is the one thing this must never do.
 fn stop_all_hops(app: &AppHandle, inner: &SupervisorInner) {
     stop_carriers(app);
+    *lock(&inner.chain) = None;
     let mut child = lock(&inner.child).take();
     if let Some(child) = child.as_mut() {
         let _ = child.kill();
@@ -3979,6 +3986,9 @@ fn stop_inner(inner: &SupervisorInner, app: &AppHandle) -> Result<(), String> {
     // and a carrier left running after a stop is a process holding a tunnel
     // nothing is routed into and nothing will ever stop.
     stop_carriers(app);
+    // The recorded hops die with them. Left set, `current_chain` kept handing
+    // the next `set_chain` a Psiphon listener nothing answered on any more.
+    *lock(&inner.chain) = None;
     // Invalidate first. A retry sleeping out its backoff has no child to kill,
     // and would otherwise launch a process after the user asked it to stop.
     inner.generation.fetch_add(1, Ordering::SeqCst);
