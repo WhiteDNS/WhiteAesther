@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
-import { type ExitInfo, chainStatus, exitInfo, speedTest } from "@/core/api";
+import { AUTOMATIC_NODE, type ExitInfo, chainStatus, exitInfo, speedTest } from "@/core/api";
 import { useLanguage, useT } from "@/core/useT";
 import { ExitFlag, countryName, hasFlag } from "./ExitFlag";
 import { ConnectOrb, type OrbState } from "./ConnectOrb";
@@ -30,6 +30,16 @@ interface SimpleProps {
   onReport: () => void;
   onProfile: (patch: Partial<ConnectionProfile>) => void;
   onToast: (title: string, message: string, error?: boolean) => void;
+  /** Opens the exit chain's node list. */
+  onOpenChain: () => void;
+}
+
+/** Where traffic leaves, and which node of the second hop carries it. */
+interface Carrying {
+  address: string;
+  /** What the exit group is on: a node, or the fastest-node group. */
+  node: string | null;
+  auto: string | null;
 }
 
 const BUSY = new Set(["starting", "scanning", "connecting", "reconnecting"]);
@@ -41,20 +51,26 @@ const BUSY = new Set(["starting", "scanning", "connecting", "reconnecting"]);
  * after that. Everything the screen says about "point apps here" and everything
  * it measures has to follow this, or it describes a route nothing is taking.
  */
-function useCarryAddress(snapshot: CoreSnapshot): string {
-  const [chain, setChain] = useState<string | null>(null);
+function useCarrying(snapshot: CoreSnapshot): Carrying {
+  const [chain, setChain] = useState<{ address: string | null; node: string | null; auto: string | null }>(
+    { address: null, node: null, auto: null },
+  );
   const live = snapshot.state === "connected";
 
   useEffect(() => {
+    const none = { address: null, node: null, auto: null };
     if (!live) {
-      setChain(null);
+      setChain(none);
       return;
     }
     let disposed = false;
     const read = () => {
       void chainStatus()
-        .then((status) => { if (!disposed) setChain(status.running ? status.address : null); })
-        .catch(() => { if (!disposed) setChain(null); });
+        .then((status) => {
+          if (disposed) return;
+          setChain(status.running ? { address: status.address, node: status.node, auto: status.auto } : none);
+        })
+        .catch(() => { if (!disposed) setChain(none); });
     };
     read();
     // The hop can be switched on from the Advanced screen while this one is
@@ -63,13 +79,14 @@ function useCarryAddress(snapshot: CoreSnapshot): string {
     return () => { disposed = true; window.clearInterval(timer); };
   }, [live]);
 
-  return chain ?? snapshot.socksAddress;
+  return { ...chain, address: chain.address ?? snapshot.socksAddress };
 }
 
 export function Simple(props: SimpleProps) {
   const { snapshot, probe } = props;
   const t = useT();
-  const carryAddress = useCarryAddress(snapshot);
+  const carrying = useCarrying(snapshot);
+  const carryAddress = carrying.address;
   const busy = BUSY.has(snapshot.state);
   const failed = snapshot.state === "error";
   const live = snapshot.state === "connected";
@@ -118,7 +135,7 @@ export function Simple(props: SimpleProps) {
         {/* The curtain slides in from the tab's side and covers only this panel,
             so the connect box stays in reach while settings are open. */}
         <div className="relative flex min-w-0 flex-1 flex-col gap-3.5 overflow-hidden">
-          {live ? <Connected {...props} carryAddress={carryAddress} /> : null}
+          {live ? <Connected {...props} carryAddress={carryAddress} carrying={carrying} /> : null}
           {busy ? <Searching {...props} /> : null}
           {failed ? <Failed {...props} /> : null}
           {!live && !busy && !failed ? <Idle {...props} /> : null}
@@ -292,7 +309,9 @@ function Connected({
   latency,
   onProfile,
   carryAddress,
-}: SimpleProps & { carryAddress: string }) {
+  carrying,
+  onOpenChain,
+}: SimpleProps & { carryAddress: string; carrying: Carrying }) {
   const t = useT();
   const summary = summarise(latency);
   const shown = summary.last ?? snapshot.latencyMs;
@@ -347,6 +366,12 @@ function Connected({
           <span>{t("now")}</span>
         </div>
       </Card>
+
+      {profile.chain.enabled ? (
+        <Card className="surface px-3.5 py-1">
+          <ExitNode profile={profile} carrying={carrying} onOpen={onOpenChain} />
+        </Card>
+      ) : null}
 
       <ExitCard carryAddress={carryAddress} />
 
@@ -573,7 +598,35 @@ function Step({
   );
 }
 
-function Idle({ snapshot, profile }: SimpleProps) {
+/**
+ * Which node of the second hop carries traffic, and the way to the list.
+ *
+ * The live pick while connected, so "Automatic node" names what it chose; the
+ * saved choice otherwise.
+ */
+function ExitNode({ profile, carrying, onOpen }: { profile: ConnectionProfile; carrying: Carrying | null; onOpen: () => void }) {
+  const t = useT();
+  const value = carrying
+    ? carrying.node === AUTOMATIC_NODE
+      ? `${t("Automatic node")} · ${carrying.auto ?? "…"}`
+      : (carrying.node ?? "—")
+    : (profile.chain.node ?? t("Automatic node"));
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center justify-between gap-4 border-b py-2 text-start last:border-b-0 hover:text-primary"
+    >
+      <span className="text-[12.5px] text-muted-foreground">{t("Exit node")}</span>
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate font-mono text-[12.5px]">{value}</span>
+        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground rtl:rotate-180" />
+      </span>
+    </button>
+  );
+}
+
+function Idle({ snapshot, profile, onOpenChain }: SimpleProps) {
   const t = useT();
   return (
     <Card className="surface flex flex-1 flex-col p-4">
@@ -595,6 +648,7 @@ function Idle({ snapshot, profile }: SimpleProps) {
           }
         />
         <Fact label={t("Local proxy")} value={profile.socksAddress} />
+        {profile.chain.enabled ? <ExitNode profile={profile} carrying={null} onOpen={onOpenChain} /> : null}
       </div>
       <p className="mt-auto pt-3 text-[12px] text-muted-foreground">
         {t("Retries try other connection methods automatically, up to")} {snapshot.maxAttempts}{" "}
