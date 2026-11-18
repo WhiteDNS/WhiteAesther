@@ -55,15 +55,37 @@ struct ChainStatus {
     /// Where applications and the system proxy point while the chain carries
     /// traffic. None means the tunnel is carrying it directly.
     address: Option<String>,
+    /// What the exit group is on: a node, or the fastest-node group.
+    node: Option<String>,
+    /// The node the fastest-node group picked, when `node` is that group.
+    auto: Option<String>,
 }
 
-/// Whether the second hop is up, and what it is listening on.
+/// Whether the second hop is up, what it is listening on, and which node it uses.
 #[tauri::command]
 async fn chain_status(chain: tauri::State<'_, Chain>) -> Result<ChainStatus, String> {
+    let (node, auto) = chain.selection().map_or((None, None), |(node, auto)| (Some(node), auto));
     Ok(ChainStatus {
         running: chain.is_running(),
         address: chain.address().map(|value| value.to_string()),
+        node,
+        auto,
     })
+}
+
+/// Makes the node list readable while disconnected, fetching the
+/// subscriptions first when `update` asks. Connected, `update` refetches them
+/// over each one's own route.
+#[tauri::command]
+async fn chain_preview(app: AppHandle, settings: chain::ChainSettings, update: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<Chain>().preview(&app, &settings, update))
+        .await
+        .map_err(|error| format!("the node list did not load: {error}"))?
+}
+
+#[tauri::command]
+fn chain_preview_stop(chain: tauri::State<'_, Chain>) {
+    chain.stop_probe();
 }
 
 /// What the Psiphon carrier is doing, including the exit countries it has.
@@ -205,8 +227,15 @@ async fn chain_test(
 }
 
 #[tauri::command]
-async fn chain_select(chain: tauri::State<'_, Chain>, node: String) -> Result<(), String> {
-    chain.select(&node)
+async fn chain_select(
+    chain: tauri::State<'_, Chain>,
+    supervisor: tauri::State<'_, CoreSupervisor>,
+    node: String,
+) -> Result<(), String> {
+    chain.select(&node)?;
+    // So a reconnect within this session comes back to it.
+    supervisor.remember_chain_node((node != chain::AUTO_GROUP).then_some(node));
+    Ok(())
 }
 
 /// Shrinks the window to the screen when the screen is smaller than it.
@@ -446,6 +475,8 @@ pub fn run() {
             latency::speed_test,
             latency::exit_info,
             chain_status,
+            chain_preview,
+            chain_preview_stop,
             chain_nodes,
             chain_test,
             chain_select,

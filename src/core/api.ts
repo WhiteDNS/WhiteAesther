@@ -291,7 +291,14 @@ export interface ChainStatus {
   running: boolean;
   /** Where traffic is carried while the chain is up, or null when it is not. */
   address: string | null;
+  /** What the exit group is on: a node name, or {@link AUTOMATIC_NODE}. */
+  node: string | null;
+  /** The node the fastest-node group picked, when `node` is that group. */
+  auto: string | null;
 }
+
+/** The fastest-node group. Selecting it is what "Automatic node" means. */
+export const AUTOMATIC_NODE = "__whiteaesther_auto";
 
 export interface ChainNode {
   name: string;
@@ -444,6 +451,21 @@ export async function setLanShare(settings: LanSettings): Promise<LanStatus> {
 export async function lanShareStatus(): Promise<LanStatus> {
   requireDesktop();
   return invoke("lan_share_status");
+}
+
+/**
+ * Makes the node list readable while disconnected. With `update`, every
+ * subscription is fetched now; connected, over each one's own route.
+ */
+export async function chainPreview(settings: ChainSettings, update: boolean): Promise<void> {
+  requireDesktop();
+  return invoke("chain_preview", { settings, update });
+}
+
+/** Stops the listener-less engine the node list uses while disconnected. */
+export async function chainPreviewStop(): Promise<void> {
+  requireDesktop();
+  return invoke("chain_preview_stop");
 }
 
 export async function chainNodes(): Promise<ChainNode[]> {

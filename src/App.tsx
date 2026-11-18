@@ -532,6 +532,10 @@ export default function App() {
           onReport={() => setMode("advanced")}
           onProfile={applyProfile}
           onToast={notify}
+          onOpenChain={() => {
+            setMode("advanced");
+            setJumpTo({ section: "chain", at: Date.now() });
+          }}
           advanced={
             <Advanced
               profile={profile}

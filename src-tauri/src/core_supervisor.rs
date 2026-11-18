@@ -783,6 +783,13 @@ impl CoreSupervisor {
         current_chain(app, &self.inner)
     }
 
+    /// Keeps the node chosen on the live chain in the session's profile.
+    pub fn remember_chain_node(&self, node: Option<String>) {
+        if let Some(session) = lock(&self.inner.session).as_mut() {
+            session.profile.chain.node = node;
+        }
+    }
+
     /// Records a line from something the app runs alongside the core.
     ///
     /// The chain uses this for mihomo's output. Anything with a piped stream

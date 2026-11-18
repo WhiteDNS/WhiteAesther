@@ -35,6 +35,17 @@ use crate::core_supervisor::CoreSupervisor;
 
 /// The group every rule points at. Selecting a node means selecting into this.
 const EXIT_GROUP: &str = "exit";
+/// The fastest-node group, listed first in [`EXIT_GROUP`] so it is the default.
+///
+/// Nothing chosen used to mean mihomo's first node, which is whichever the
+/// subscription happens to list first, working or not.
+pub const AUTO_GROUP: &str = "__whiteaesther_auto";
+/// How long a run waits for its subscriptions to fill before choosing a node.
+///
+/// mihomo answers its API before its providers have loaded, so a selection made
+/// at once names a node that does not exist yet, and the fastest-node group
+/// picks REJECT with nothing to choose from.
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(20);
 /// The provider holding whatever the user pasted by hand.
 const MANUAL_PROVIDER: &str = "manual";
 /// The bundled rule-providers that let Iranian sites skip the exit group.
@@ -86,7 +97,8 @@ pub struct ChainSettings {
     /// so vless, vmess, trojan, ss, hysteria2 and the rest all work without us
     /// parsing anything.
     pub manual: String,
-    /// The node last selected, so a reconnect returns to it.
+    /// The node last selected, so a reconnect returns to it. None, or a node
+    /// the subscription has since dropped, means the fastest one.
     pub node: Option<String>,
 }
 
@@ -201,6 +213,17 @@ pub struct Running {
 #[derive(Default)]
 pub struct Chain {
     running: Mutex<Option<Running>>,
+    /// A listener-less mihomo for the node list and ping tests while nothing
+    /// is connected.
+    probe: Mutex<Option<Probe>>,
+}
+
+struct Probe {
+    run: Running,
+    /// The sources it read, so an unchanged list is not restarted.
+    key: String,
+    /// Whether its subscriptions are fetched, rather than read from the cache.
+    fetch: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +265,9 @@ impl Chain {
     /// that never came up.
     pub fn start(&self, app: &AppHandle, request: &ChainRequest) -> Result<SocketAddr, String> {
         self.stop();
+        // The session's run answers every question the probe did, with the
+        // nodes dialled the way they will actually be used.
+        self.stop_probe();
 
         let settings = request.settings;
         let carriers = request.carriers.as_ref();
@@ -270,21 +296,7 @@ impl Chain {
             return Err("connect first: full tunnel has nothing to forward to".into());
         }
 
-        let binary = locate(app)?;
-        let home = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("no application data directory: {error}"))?
-            .join("chain");
-        std::fs::create_dir_all(home.join("providers"))
-            .map_err(|error| format!("cannot prepare the chain directory: {error}"))?;
-        prune_provider_cache(
-            &home.join("providers"),
-            &usable
-                .iter()
-                .map(|source| provider_cache(&source.url))
-                .collect::<Vec<_>>(),
-        );
+        let home = prepare_home(app, &usable, &settings.manual)?;
 
         // The mixed port is an address a person types into a browser, so it has
         // to be the same one tomorrow. An ephemeral port meant every launch
@@ -300,10 +312,6 @@ impl Chain {
         let api = free_port()?;
         let secret = secret();
 
-        if !settings.manual.trim().is_empty() {
-            std::fs::write(home.join("providers").join("manual.txt"), settings.manual.trim())
-                .map_err(|error| format!("cannot write the pasted configs: {error}"))?;
-        }
         if request.bypass_iran_sites {
             std::fs::write(
                 home.join("providers").join(format!("{IRAN_IP_PROVIDER}.txt")),
@@ -329,77 +337,32 @@ impl Chain {
             tun: request.tun,
             routes: &request.routes,
             resolvers: &request.resolvers,
+            ..Default::default()
         });
-        let config_path = home.join("config.yaml");
-        std::fs::write(&config_path, config)
-            .map_err(|error| format!("cannot write the chain config: {error}"))?;
-
-        let mut command = Command::new(&binary);
-        command
-            .arg("-f")
-            .arg(&config_path)
-            .arg("-d")
-            .arg(&home)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // Without this every launch flashes a console window.
-            command.creation_flags(0x0800_0000);
-        }
-
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot start the chain: {error}"))?;
-
-        // Piped and never read is a process that blocks on its own logging once
-        // the pipe fills. It also threw away the only account of what the chain
-        // was doing: mihomo marks every node dead when the tunnel underneath
-        // slows down, and none of that reached anyone.
-        for (reader, name) in [
-            (child.stdout.take().map(|out| Box::new(out) as Box<dyn Read + Send>), "chain"),
-            (child.stderr.take().map(|err| Box::new(err) as Box<dyn Read + Send>), "chain"),
-        ] {
-            let Some(reader) = reader else {
-                continue;
-            };
-            let app = app.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let level = if line.contains("level=error") {
-                        "error"
-                    } else if line.contains("level=warning") {
-                        "warn"
-                    } else {
-                        "info"
-                    };
-                    app.state::<CoreSupervisor>().record(name, level, line.to_string());
-                }
-            });
-        }
-
         let api_address = SocketAddr::from((Ipv4Addr::LOCALHOST, api));
-        let mut outcome = wait_until_ready(api_address, &secret);
+        let mut child = spawn(app, &home, "config.yaml", &config, api_address, &secret)?;
+
         // mihomo does not exit when it cannot create the device: it logs the
         // refusal and carries on serving its mixed port, so a run that captured
         // nothing at all would otherwise look exactly like a successful one.
         // Its API reports the device's real state rather than what the config
         // asked for, which is what makes this checkable.
-        if outcome.is_ok() && request.tun {
-            outcome = wait_until_tun_is_up(api_address, &secret);
+        if request.tun {
+            if let Err(error) = wait_until_tun_is_up(api_address, &secret) {
+                // A half-started chain must never be left behind: the system proxy
+                // would point at a port nothing is listening on.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
         }
-        if let Err(error) = outcome {
-            // A half-started chain must never be left behind: the system proxy
-            // would point at a port nothing is listening on.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+        if request.wants_exit_chain() {
+            wait_for_providers(api_address, &secret);
+            // A saved node the subscription dropped is refused here, which
+            // leaves `exit` on the fastest-node group it starts on.
+            if let Some(node) = &settings.node {
+                let _ = select_in(api_address, &secret, node);
+            }
         }
 
         let mixed_address = SocketAddr::from((Ipv4Addr::LOCALHOST, mixed));
@@ -428,21 +391,146 @@ impl Chain {
         }
     }
 
+    pub fn stop_probe(&self) {
+        let Ok(mut guard) = self.probe.lock() else {
+            return;
+        };
+        if let Some(mut probe) = guard.take() {
+            let _ = probe.run.child.kill();
+            let _ = probe.run.child.wait();
+            let _ = std::fs::remove_file(probe.run.home.join("probe.yaml"));
+        }
+    }
+
+    /// Makes the node list readable without a connection.
+    ///
+    /// Nothing to do while a session's run is up. Otherwise a mihomo with no
+    /// listener reads the subscriptions, dialling nodes directly when tested.
+    /// It fetches them only when `update` asks, or when the nodes are not
+    /// dialled through the tunnel (a connect would fetch them directly anyway);
+    /// through the tunnel and unasked, it reads only what is already cached.
+    pub fn preview(&self, app: &AppHandle, settings: &ChainSettings, update: bool) -> Result<(), String> {
+        if self.is_running() {
+            return if update { self.update_providers() } else { Ok(()) };
+        }
+        let fetch = update || !settings.through_tunnel;
+        let enabled: Vec<&ChainSource> = settings
+            .sources
+            .iter()
+            .filter(|source| source.enabled && !source.url.trim().is_empty())
+            .collect();
+        let key = format!(
+            "{:?}|{}",
+            enabled.iter().map(|source| &source.url).collect::<Vec<_>>(),
+            settings.manual.trim()
+        );
+        {
+            let mut guard = self.probe.lock().map_err(|_| "the chain lock is poisoned")?;
+            if let Some(probe) = guard.as_mut() {
+                let alive = matches!(probe.run.child.try_wait(), Ok(None));
+                if alive && probe.key == key && (probe.fetch || !fetch) {
+                    drop(guard);
+                    return if update { self.update_providers() } else { Ok(()) };
+                }
+            }
+        }
+        self.stop_probe();
+
+        let home = prepare_home(app, &enabled, &settings.manual)?;
+        // Read-only: a subscription never fetched has nothing to show yet, and
+        // naming its missing file would only fill the log with errors.
+        let usable: Vec<&ChainSource> = enabled
+            .iter()
+            .copied()
+            .filter(|source| {
+                fetch || home.join("providers").join(format!("{}.yaml", provider_cache(&source.url))).is_file()
+            })
+            .collect();
+        if usable.is_empty() && settings.manual.trim().is_empty() {
+            return Ok(());
+        }
+
+        let api = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()?));
+        let secret = secret();
+        let config = render(&RenderPlan {
+            api: api.port(),
+            secret: &secret,
+            sources: &usable,
+            manual: &settings.manual,
+            probe: true,
+            fetch,
+            ..Default::default()
+        });
+        let child = spawn(app, &home, "probe.yaml", &config, api, &secret)?;
+        wait_for_providers(api, &secret);
+        *self.probe.lock().map_err(|_| "the chain lock is poisoned")? = Some(Probe {
+            run: Running {
+                child,
+                // Never listened on; kept so the struct stays one shape.
+                mixed: api,
+                api,
+                secret,
+                through_tunnel: false,
+                datagram_blocker: None,
+                home,
+            },
+            key,
+            fetch,
+        });
+        // Freshly started, so whatever was missing has just been fetched.
+        if update {
+            self.update_providers()?;
+        }
+        Ok(())
+    }
+
+    /// Fetches every subscription now, over each one's own route.
+    fn update_providers(&self) -> Result<(), String> {
+        let (api, secret, ..) = self.live()?;
+        let body = get(api, &secret, "/providers/proxies")?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("the chain sent something unreadable: {error}"))?;
+        let mut failed = Vec::new();
+        if let Some(providers) = parsed.get("providers").and_then(|value| value.as_object()) {
+            for (name, provider) in providers {
+                if provider.get("vehicleType").and_then(|v| v.as_str()) != Some("HTTP") {
+                    continue;
+                }
+                if put(api, &secret, &format!("/providers/proxies/{}", encode(name)), "").is_err() {
+                    failed.push(name.clone());
+                }
+            }
+        }
+        match failed.is_empty() {
+            true => Ok(()),
+            false => Err(format!("could not download {}", failed.join(", "))),
+        }
+    }
+
+    /// What `exit` is on, and the node the fastest-node group picked when that
+    /// is what it is on. From the session's run only: a probe carries nothing.
+    pub fn selection(&self) -> Option<(String, Option<String>)> {
+        let (api, secret) = {
+            let guard = self.running.lock().ok()?;
+            let running = guard.as_ref()?;
+            (running.api, running.secret.clone())
+        };
+        let now = |group: &str| -> Option<String> {
+            let body = get(api, &secret, &format!("/proxies/{}", encode(group))).ok()?;
+            let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+            parsed.get("now")?.as_str().map(str::to_string)
+        };
+        let exit = now(EXIT_GROUP)?;
+        let auto = (exit == AUTO_GROUP).then(|| now(AUTO_GROUP)).flatten();
+        Some((exit, auto))
+    }
+
     /// Every node from every source, with the delay each last recorded.
     pub fn nodes(&self, carries_quic: bool) -> Result<Vec<ChainNode>, String> {
-        let (api, secret) = self.control()?;
-        let (through_tunnel, carrier, home) = {
-            let guard = self.running.lock().map_err(|_| "the chain lock is poisoned")?;
-            match guard.as_ref() {
-                Some(running) => {
-                    (running.through_tunnel, running.datagram_blocker, Some(running.home.clone()))
-                }
-                None => (false, None, None),
-            }
-        };
+        let (api, secret, through_tunnel, carrier, home) = self.live()?;
         // Read once for the whole list rather than per node: it is one small
         // file per subscription and the answer is the same for every entry.
-        let reality = home.as_deref().map(reality_nodes).unwrap_or_default();
+        let reality = reality_nodes(&home);
         let body = get(api, &secret, "/providers/proxies")?;
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| format!("the chain sent something unreadable: {error}"))?;
@@ -505,7 +593,7 @@ impl Chain {
     /// it is not. Nodes supplied by a provider are not addressable through
     /// `/proxies/{name}/delay`; they answer only under their own provider.
     pub fn test(&self, source: &str, node: &str) -> Result<Option<u32>, String> {
-        let (api, secret) = self.control()?;
+        let (api, secret, ..) = self.live()?;
         let path = format!(
             "/providers/proxies/{}/{}/healthcheck?url={}&timeout=8000",
             encode(source),
@@ -525,16 +613,161 @@ impl Chain {
 
     /// Routes traffic through one node.
     pub fn select(&self, node: &str) -> Result<(), String> {
-        let (api, secret) = self.control()?;
-        let body = format!("{{\"name\":{}}}", serde_json::to_string(node).unwrap_or_default());
-        put(api, &secret, &format!("/proxies/{}", encode(EXIT_GROUP)), &body)
+        let (api, secret, ..) = self.live()?;
+        select_in(api, &secret, node)
     }
 
-    fn control(&self) -> Result<(SocketAddr, String), String> {
-        let guard = self.running.lock().map_err(|_| "the chain lock is poisoned")?;
-        let running = guard.as_ref().ok_or("the chain is not running")?;
-        Ok((running.api, running.secret.clone()))
+    /// The session's run when there is one, otherwise the probe.
+    fn live(&self) -> Result<(SocketAddr, String, bool, Option<CarrierKind>, PathBuf), String> {
+        let read = |running: &Running| {
+            (
+                running.api,
+                running.secret.clone(),
+                running.through_tunnel,
+                running.datagram_blocker,
+                running.home.clone(),
+            )
+        };
+        if let Some(running) = self.running.lock().map_err(|_| "the chain lock is poisoned")?.as_ref() {
+            return Ok(read(running));
+        }
+        let guard = self.probe.lock().map_err(|_| "the chain lock is poisoned")?;
+        guard
+            .as_ref()
+            .map(|probe| read(&probe.run))
+            .ok_or_else(|| "the chain is not running".into())
     }
+}
+
+fn select_in(api: SocketAddr, secret: &str, node: &str) -> Result<(), String> {
+    let body = format!("{{\"name\":{}}}", serde_json::to_string(node).unwrap_or_default());
+    put(api, secret, &format!("/proxies/{}", encode(EXIT_GROUP)), &body)
+}
+
+/// The chain directory, with its provider cache pruned to `sources` and the
+/// pasted configs written where the `manual` provider reads them.
+fn prepare_home(app: &AppHandle, sources: &[&ChainSource], manual: &str) -> Result<PathBuf, String> {
+    let home = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("no application data directory: {error}"))?
+        .join("chain");
+    std::fs::create_dir_all(home.join("providers"))
+        .map_err(|error| format!("cannot prepare the chain directory: {error}"))?;
+    prune_provider_cache(
+        &home.join("providers"),
+        &sources.iter().map(|source| provider_cache(&source.url)).collect::<Vec<_>>(),
+    );
+    if !manual.trim().is_empty() {
+        std::fs::write(home.join("providers").join("manual.txt"), manual.trim())
+            .map_err(|error| format!("cannot write the pasted configs: {error}"))?;
+    }
+    Ok(home)
+}
+
+/// Writes `config` to `home/file`, starts mihomo on it, and waits for its API.
+fn spawn(
+    app: &AppHandle,
+    home: &Path,
+    file: &str,
+    config: &str,
+    api: SocketAddr,
+    secret: &str,
+) -> Result<Child, String> {
+    let binary = locate(app)?;
+    let config_path = home.join(file);
+    std::fs::write(&config_path, config)
+        .map_err(|error| format!("cannot write the chain config: {error}"))?;
+
+    let mut command = Command::new(&binary);
+    command
+        .arg("-f")
+        .arg(&config_path)
+        .arg("-d")
+        .arg(home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Without this every launch flashes a console window.
+        command.creation_flags(0x0800_0000);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot start the chain: {error}"))?;
+
+    // Piped and never read is a process that blocks on its own logging once
+    // the pipe fills. It also threw away the only account of what the chain
+    // was doing: mihomo marks every node dead when the tunnel underneath
+    // slows down, and none of that reached anyone.
+    for reader in [
+        child.stdout.take().map(|out| Box::new(out) as Box<dyn Read + Send>),
+        child.stderr.take().map(|err| Box::new(err) as Box<dyn Read + Send>),
+    ] {
+        let Some(reader) = reader else {
+            continue;
+        };
+        let app = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let level = if line.contains("level=error") {
+                    "error"
+                } else if line.contains("level=warning") {
+                    "warn"
+                } else {
+                    "info"
+                };
+                app.state::<CoreSupervisor>().record("chain", level, line.to_string());
+            }
+        });
+    }
+
+    if let Err(error) = wait_until_ready(api, secret) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(child)
+}
+
+/// Waits, up to [`PROVIDER_TIMEOUT`], until every subscription and pasted
+/// list has nodes. One that never fills (a fetch that failed) costs the wait;
+/// selecting before the rest have loaded would cost the session its node.
+fn wait_for_providers(api: SocketAddr, secret: &str) {
+    let deadline = Instant::now() + PROVIDER_TIMEOUT;
+    while Instant::now() < deadline {
+        let loaded = get(api, secret, "/providers/proxies")
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .is_some_and(|parsed| providers_loaded(&parsed));
+        if loaded {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Whether every provider that is not mihomo's built-in one has nodes.
+fn providers_loaded(parsed: &serde_json::Value) -> bool {
+    let Some(providers) = parsed.get("providers").and_then(|value| value.as_object()) else {
+        return false;
+    };
+    providers
+        .values()
+        .filter(|provider| provider.get("vehicleType").and_then(|v| v.as_str()) != Some("Compatible"))
+        .all(|provider| {
+            provider
+                .get("proxies")
+                .and_then(|value| value.as_array())
+                .is_some_and(|list| !list.is_empty())
+        })
 }
 
 /// Said against every REALITY node, because this build cannot use one.
@@ -719,6 +952,7 @@ fn unusable_behind_the_carrier(kind: &str, carrier: Option<CarrierKind>) -> Opti
 impl Drop for Chain {
     fn drop(&mut self) {
         self.stop();
+        self.stop_probe();
     }
 }
 
@@ -757,6 +991,10 @@ struct RenderPlan<'a> {
     tun: bool,
     resolvers: &'a [String],
     routes: &'a str,
+    /// No listener at all: only the API, for listing and testing nodes.
+    probe: bool,
+    /// Fetch subscriptions. Off, each is read from its cache file only.
+    fetch: bool,
 }
 
 impl Default for RenderPlan<'_> {
@@ -773,6 +1011,8 @@ impl Default for RenderPlan<'_> {
             tun: false,
             resolvers: &[],
             routes: "",
+            probe: false,
+            fetch: true,
         }
     }
 }
@@ -819,10 +1059,14 @@ fn render(plan: &RenderPlan) -> String {
         exit_chain,
         tun,
         resolvers,
+        probe,
+        fetch,
         ..
     } = *plan;
     let mut config = String::new();
-    config.push_str(&format!("mixed-port: {mixed}\n"));
+    if !probe {
+        config.push_str(&format!("mixed-port: {mixed}\n"));
+    }
     // Loopback only, with a secret that changes every run. Without both, any
     // web page the user opens could drive this API and reroute their traffic.
     config.push_str(&format!("external-controller: 127.0.0.1:{api}\n"));
@@ -835,7 +1079,7 @@ fn render(plan: &RenderPlan) -> String {
     // The device that makes this a full tunnel rather than a proxy. Written
     // line by line because it is YAML, where one wrong space changes what it
     // means.
-    if tun {
+    if tun && !probe {
         config.push_str("tun:\n");
         config.push_str("  enable: true\n");
         // gVisor rather than the system stack: it needs no kernel driver
@@ -889,15 +1133,13 @@ fn render(plan: &RenderPlan) -> String {
     // Written as plain addresses they would move every lookup to UDP and undo
     // DoH, so a resolver with no known DoH endpoint is left out -- and the
     // screen says so -- rather than downgrading the rest.
-    let upstreams = doh_upstreams(resolvers);
-    config.push_str("  nameserver:\n");
+    let mut upstreams = doh_upstreams(resolvers);
     if upstreams.is_empty() {
-        config.push_str("    - https://1.1.1.1/dns-query\n    - https://dns.google/dns-query\n");
-    } else {
-        for upstream in &upstreams {
-            config.push_str(&format!("    - {upstream}\n"));
-        }
+        upstreams = vec!["https://1.1.1.1/dns-query".into(), "https://dns.google/dns-query".into()];
     }
+    let servers: String = upstreams.iter().map(|upstream| format!("    - {upstream}\n")).collect();
+    config.push_str("  nameserver:\n");
+    config.push_str(&servers);
     // Resolving the proxies' own hostnames cannot go through the proxies: that
     // is the same circle as fetching a subscription through the node it
     // describes.
@@ -907,6 +1149,15 @@ fn render(plan: &RenderPlan) -> String {
     // where the traffic goes, so the resolver and the exit end up in different
     // countries -- which is both a leak and a mismatch anyone can see.
     config.push_str("  respect-rules: true\n");
+    // With no carrier, a DIRECT dial (the subscription fetch above all) would
+    // have its name looked up through those rules, which end at `exit`: empty
+    // until that very fetch fills it, so the lookup was refused and the fetch
+    // failed with `dns resolve failed`. Looked up directly instead, which is
+    // where the connection itself goes anyway.
+    if carriers.is_none() {
+        config.push_str("  direct-nameserver:\n");
+        config.push_str(&servers);
+    }
 
     // Declared only when there is a carrier to declare. A socks5 proxy pointing
     // at a port nothing is listening on would fail every node it fronted.
@@ -950,6 +1201,13 @@ fn render(plan: &RenderPlan) -> String {
     for (index, source) in sources.iter().enumerate().filter(|_| exit_chain) {
         let key = format!("source{index}");
         names.push(key.clone());
+        if !fetch {
+            config.push_str(&format!(
+                "  {key}:\n    type: file\n    path: ./providers/{}.yaml{through}\n",
+                provider_cache(&source.url),
+            ));
+            continue;
+        }
         config.push_str(&format!(
             "  {key}:\n    type: http\n    url: {}\n    interval: 3600\n    \
              path: ./providers/{}.yaml{fetch_through}{through}\n    \
@@ -969,9 +1227,15 @@ fn render(plan: &RenderPlan) -> String {
     }
 
     if exit_chain {
+        // Fastest first, so it is what `exit` starts on. `empty-fallback`
+        // refuses traffic rather than letting it out past an empty group.
+        let names = names.join(", ");
         config.push_str(&format!(
-            "proxy-groups:\n  - name: {EXIT_GROUP}\n    type: select\n    use: [{}]\n",
-            names.join(", ")
+            "proxy-groups:\n  - name: {AUTO_GROUP}\n    type: url-test\n    use: [{names}]\n    \
+             url: https://www.gstatic.com/generate_204\n    expected-status: 204\n    \
+             interval: 300\n    tolerance: 100\n    empty-fallback: REJECT\n  \
+             - name: {EXIT_GROUP}\n    type: select\n    use: [{names}]\n    \
+             proxies: [{AUTO_GROUP}]\n    empty-fallback: REJECT\n"
         ));
     }
 
@@ -1452,6 +1716,46 @@ mod tests {
     /// One carrier alone, for the properties that differ by kind.
     fn carrier_of(kind: CarrierKind) -> Option<RunningChain> {
         Some(RunningChain::single(hop(kind, 1819, None)))
+    }
+
+    #[test]
+    fn a_probe_listens_nowhere_and_reads_only_the_cache_unless_told_to_fetch() {
+        let sub = source("ours", "https://example.com/sub");
+        let refs = vec![&sub];
+        let cached = render(&RenderPlan { secret: "s", sources: &refs, probe: true, fetch: false, tun: true, ..Default::default() });
+        assert!(!cached.contains("mixed-port"), "{cached}");
+        assert!(!cached.contains("tun:"), "{cached}");
+        assert!(cached.contains("  source0:\n    type: file\n    path: ./providers/be832933271178f6.yaml\n"), "{cached}");
+        assert!(!cached.contains("type: http"), "{cached}");
+
+        let fetched = render(&RenderPlan { secret: "s", sources: &refs, probe: true, ..Default::default() });
+        assert!(fetched.contains("type: http"), "{fetched}");
+        assert!(fetched.contains("proxy: DIRECT"), "{fetched}");
+        assert!(fetched.contains("  direct-nameserver:\n    - https://1.1.1.1/dns-query\n"), "{fetched}");
+        assert!(!fetched.contains("dialer-proxy"), "a probe dials nodes directly: {fetched}");
+    }
+
+    #[test]
+    fn exit_starts_on_the_fastest_node_group() {
+        let config = render(&RenderPlan { carriers: tunnel(), secret: "s", manual: "vless://x", ..Default::default() });
+        let groups = config.split("proxy-groups:\n").nth(1).expect("groups");
+        assert!(groups.starts_with("  - name: __whiteaesther_auto\n    type: url-test\n"), "{groups}");
+        assert!(groups.contains("  - name: exit\n    type: select\n    use: [manual]\n    proxies: [__whiteaesther_auto]\n"), "{groups}");
+    }
+
+    #[test]
+    fn providers_count_as_loaded_only_once_every_one_has_nodes() {
+        let parse = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let builtin = r#""default":{"vehicleType":"Compatible","proxies":[]}"#;
+        assert!(!providers_loaded(&parse(&format!(
+            r#"{{"providers":{{{builtin},"source0":{{"vehicleType":"HTTP","proxies":[]}}}}}}"#
+        ))));
+        assert!(!providers_loaded(&parse(&format!(
+            r#"{{"providers":{{{builtin},"source0":{{"vehicleType":"HTTP","proxies":[{{"name":"a"}}]}},"manual":{{"vehicleType":"File"}}}}}}"#
+        ))));
+        assert!(providers_loaded(&parse(&format!(
+            r#"{{"providers":{{{builtin},"source0":{{"vehicleType":"HTTP","proxies":[{{"name":"a"}}]}}}}}}"#
+        ))));
     }
 
     #[test]
@@ -1981,6 +2285,8 @@ mod tests {
             tun: true,
             resolvers: &[],
             routes: "",
+            probe: false,
+            fetch: true,
         });
         // The process name is the one line here that differs by platform --
         // `aether.exe` on Windows and `aether` everywhere else -- so it is
@@ -2019,7 +2325,11 @@ mod tests {
             "health-check: {enable: true, url: \"http://www.gstatic.com/generate_204\", interval: 300, lazy: true}\n",
             "  manual:\n    type: file\n    path: ./providers/manual.txt\n    dialer-proxy: aether\n    ",
             "health-check: {enable: true, url: \"http://www.gstatic.com/generate_204\", interval: 300, lazy: true}\n",
-            "proxy-groups:\n  - name: exit\n    type: select\n    use: [source0, manual]\n",
+            "proxy-groups:\n  - name: __whiteaesther_auto\n    type: url-test\n    use: [source0, manual]\n",
+            "    url: https://www.gstatic.com/generate_204\n    expected-status: 204\n",
+            "    interval: 300\n    tolerance: 100\n    empty-fallback: REJECT\n",
+            "  - name: exit\n    type: select\n    use: [source0, manual]\n",
+            "    proxies: [__whiteaesther_auto]\n    empty-fallback: REJECT\n",
             "rules:\n",
             ),
             tail = concat!(
