@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.14.1",
   "prerelease": false,
+  "draft": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
