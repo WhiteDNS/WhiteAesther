@@ -198,6 +198,7 @@ const FA: Record<string, string> = {
   "Import bypass list": "وارد کردن فهرست «بدون تونل»",
   "From a local file: plain domains, hosts files, addresses and CIDRs, or Clash rule lists. Up to 5,000 rules a list and 10,000 across the lists that are on.": "از یک فایل محلی: دامنه\u200cهای ساده، فایل hosts، آدرس و CIDR، یا فهرست قوانین Clash. تا ۵٬۰۰۰ قانون در هر فهرست و ۱۰٬۰۰۰ در مجموع فهرست\u200cهای روشن.",
   "{n} rules": "{n} قانون",
+  "Not a rule, ignored:": "قانون نیست و نادیده گرفته می‌شود:",
   "Delete {name}": "حذف {name}",
   "Which rule does this destination meet?": "این مقصد با کدام قانون می\u200cخورد؟",
   "Never sent, by {rule}": "هرگز فرستاده نمی\u200cشود، با قانون {rule}",

@@ -21,7 +21,7 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -155,7 +155,15 @@ pub struct ChainRequest<'a> {
     /// The user's Block and Direct rules and the enabled imported lists, as
     /// mihomo rules (see [`crate::rule_lists::mihomo_section`]). Where mihomo is
     /// in front of the carrier it is the one that routes, so it has to know them.
-    pub routes: String,
+    pub routes: ChainRoutes,
+}
+
+/// The user's rules as mihomo reads them, and whether to read a name out of a
+/// connection that arrives as a bare address.
+#[derive(Debug, Clone, Default)]
+pub struct ChainRoutes {
+    pub rules: String,
+    pub sniff: bool,
 }
 
 impl ChainRequest<'_> {
@@ -325,6 +333,8 @@ impl Chain {
             .map_err(|error| format!("cannot write the Iran domain list: {error}"))?;
         }
 
+        // Read before the device is up, so they are the physical network's.
+        let direct_dns = crate::route_memory::network_resolvers();
         let config = render(&RenderPlan {
             carriers: carriers.cloned(),
             mixed,
@@ -335,7 +345,9 @@ impl Chain {
             bypass_iran_sites: request.bypass_iran_sites,
             exit_chain: request.wants_exit_chain(),
             tun: request.tun,
-            routes: &request.routes,
+            routes: &request.routes.rules,
+            sniff: request.routes.sniff,
+            direct_dns: &direct_dns,
             resolvers: &request.resolvers,
             ..Default::default()
         });
@@ -991,6 +1003,10 @@ struct RenderPlan<'a> {
     tun: bool,
     resolvers: &'a [String],
     routes: &'a str,
+    /// Sniff a name out of connections that arrive as a bare address.
+    sniff: bool,
+    /// The real network's resolvers, for names that skip the tunnel.
+    direct_dns: &'a [IpAddr],
     /// No listener at all: only the API, for listing and testing nodes.
     probe: bool,
     /// Fetch subscriptions. Off, each is read from its cache file only.
@@ -1011,6 +1027,8 @@ impl Default for RenderPlan<'_> {
             tun: false,
             resolvers: &[],
             routes: "",
+            sniff: false,
+            direct_dns: &[],
             probe: false,
             fetch: true,
         }
@@ -1042,6 +1060,26 @@ pub(crate) fn doh_upstreams(resolvers: &[String]) -> Vec<String> {
         }
     }
     upstreams
+}
+
+/// The network's own resolvers as mihomo nameservers, or mihomo's reading of
+/// the system's when none was found. Plain DNS, as the network itself is asked.
+fn direct_nameservers(resolvers: &[IpAddr]) -> String {
+    let usable: Vec<String> = resolvers
+        .iter()
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        // A link-local IPv6 resolver needs its scope, which is lost here; the
+        // fake-ip range is mihomo itself.
+        .filter(|ip| match ip {
+            IpAddr::V4(v4) => !(v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18),
+            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+        })
+        .map(|ip| match ip {
+            IpAddr::V4(v4) => format!("    - udp://{v4}:53\n"),
+            IpAddr::V6(v6) => format!("    - udp://[{v6}]:53\n"),
+        })
+        .collect();
+    if usable.is_empty() { "    - system\n".into() } else { usable.concat() }
 }
 
 fn render(plan: &RenderPlan) -> String {
@@ -1154,9 +1192,27 @@ fn render(plan: &RenderPlan) -> String {
     // until that very fetch fills it, so the lookup was refused and the fetch
     // failed with `dns resolve failed`. Looked up directly instead, which is
     // where the connection itself goes anyway.
-    if carriers.is_none() {
-        config.push_str("  direct-nameserver:\n");
-        config.push_str(&servers);
+    //
+    // With a carrier, a name the user sends around the tunnel is looked up by
+    // their own network, as it would be without the app: through the tunnel's
+    // DoH a domestic site may resolve elsewhere or not at all, and a site the
+    // network refuses by DNS would open anyway.
+    config.push_str("  direct-nameserver:\n");
+    match carriers {
+        None => config.push_str(&servers),
+        Some(_) => config.push_str(&direct_nameservers(plan.direct_dns)),
+    }
+
+    // A connection that arrives as an address -- the browser's own DoH, an app
+    // with a hard-coded IP -- meets no name rule unless the name is read out of
+    // its first bytes. The destination is left alone; the name only decides
+    // the rule.
+    if plan.sniff {
+        config.push_str("sniffer:\n  enable: true\n  override-destination: false\n");
+        config.push_str("  force-dns-mapping: true\n  parse-pure-ip: true\n  sniff:\n");
+        config.push_str("    TLS: {ports: [443, 8443]}\n");
+        config.push_str("    HTTP: {ports: [80, 8080-8880]}\n");
+        config.push_str("    QUIC: {ports: [443, 8443]}\n");
     }
 
     // Declared only when there is a carrier to declare. A socks5 proxy pointing
@@ -2266,6 +2322,16 @@ mod tests {
     }
 
     #[test]
+    fn names_that_skip_a_carrier_are_resolved_by_the_network_and_sniffing_follows_its_switch() {
+        let config = render(&RenderPlan { carriers: carrier_of(CarrierKind::Psiphon), ..Default::default() });
+        assert!(config.contains("  direct-nameserver:\n    - system\n"), "{config}");
+        assert!(!config.contains("sniffer:"), "{config}");
+        let config = render(&RenderPlan { carriers: carrier_of(CarrierKind::Tor), sniff: true, ..Default::default() });
+        assert!(config.contains("sniffer:\n  enable: true\n"), "{config}");
+        assert!(config.contains("  parse-pure-ip: true\n"), "{config}");
+    }
+
+    #[test]
     fn the_aether_path_renders_exactly_what_it_did_before_carriers() {
         let source = ChainSource {
             name: "ours".into(),
@@ -2285,6 +2351,8 @@ mod tests {
             tun: true,
             resolvers: &[],
             routes: "",
+            sniff: true,
+            direct_dns: &["192.168.1.1".parse().unwrap(), "fe80::1".parse().unwrap(), "2001:db8::53".parse().unwrap()],
             probe: false,
             fetch: true,
         });
@@ -2318,6 +2386,12 @@ mod tests {
             "  nameserver:\n    - https://1.1.1.1/dns-query\n    - https://dns.google/dns-query\n",
             "  proxy-server-nameserver:\n    - https://1.1.1.1/dns-query\n",
             "  respect-rules: true\n",
+            "  direct-nameserver:\n    - udp://192.168.1.1:53\n    - udp://[2001:db8::53]:53\n",
+            "sniffer:\n  enable: true\n  override-destination: false\n",
+            "  force-dns-mapping: true\n  parse-pure-ip: true\n  sniff:\n",
+            "    TLS: {ports: [443, 8443]}\n",
+            "    HTTP: {ports: [80, 8080-8880]}\n",
+            "    QUIC: {ports: [443, 8443]}\n",
             "proxies:\n  - {name: aether, type: socks5, server: 127.0.0.1, port: 1819, udp: true}\n",
             "proxy-providers:\n",
             "  source0:\n    type: http\n    url: \"https://example.com/sub\"\n    interval: 3600\n    ",

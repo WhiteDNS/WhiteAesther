@@ -14,6 +14,7 @@ import { REPORT_EVENT_LIMIT, buildReport, reportFilename } from "@/core/report";
 import {
   type LanStatus,
   carriersAvailable,
+  checkRules,
   fetchBridges,
   isDesktopRuntime,
   getCoreStatus,
@@ -1564,9 +1565,30 @@ function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
 
 // --------------------------------------------------------------------- traffic
 
+/** The entries of a rules box that are not rules, read by the backend's own grammar. */
+function useInvalidRules(text: string): string[] {
+  const [invalid, setInvalid] = useState<string[]>([]);
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let current = true;
+    const timer = window.setTimeout(() => {
+      void checkRules(text)
+        .then((check) => current && setInvalid(check.invalid))
+        .catch(() => current && setInvalid([]));
+    }, 300);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [text]);
+  return invalid;
+}
+
 function Traffic({ profile, onChange, runtime, snapshot, onToast, onRuleListsChanged }: AdvancedProps) {
   const t = useT();
   const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  const invalidBlock = useInvalidRules(profile.routeBlock);
+  const invalidDirect = useInvalidRules(profile.routeDirect);
   return (
     <>
       <Card>
@@ -1643,12 +1665,12 @@ function Traffic({ profile, onChange, runtime, snapshot, onToast, onRuleListsCha
           </Row>
           <div className="grid grid-cols-2 gap-4">
             <RulesField
-              label="Never send" value={profile.routeBlock}
+              label="Never send" value={profile.routeBlock} invalid={invalidBlock}
               placeholder={"keyword:doubleclick\nport:25"}
               onChange={(routeBlock) => set({ routeBlock })}
             />
             <RulesField
-              label="Bypass the tunnel" value={profile.routeDirect}
+              label="Bypass the tunnel" value={profile.routeDirect} invalid={invalidDirect}
               placeholder={"private\n10.0.0.0/8"}
               onChange={(routeDirect) => set({ routeDirect })}
             />

@@ -247,7 +247,21 @@ export default function App() {
   // one changes mid-session the connection is made again with the new value.
   // Bumped by Advanced when an imported rule list is added, toggled or deleted.
   const [ruleListsVersion, setRuleListsVersion] = useState(0);
-  const restartKey = `${effective.ipFamily}|${ruleListsVersion}`;
+  // The routing rules too, once typing has paused: a reconnect per keystroke
+  // would drop the connection a dozen times for one edit.
+  const routingKey = JSON.stringify([
+    effective.routeBlock,
+    effective.routeDirect,
+    effective.routesFile,
+    effective.routeSniff,
+    effective.bypassIranSites,
+  ]);
+  const [settledRouting, setSettledRouting] = useState(routingKey);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettledRouting(routingKey), 1500);
+    return () => window.clearTimeout(timer);
+  }, [routingKey]);
+  const restartKey = `${effective.ipFamily}|${ruleListsVersion}|${settledRouting}`;
   const lastRestartKey = useRef(restartKey);
   useEffect(() => {
     if (lastRestartKey.current === restartKey) return;

@@ -25,7 +25,7 @@ concurrency:
 env:
   # The fork adds the reporting modes the endpoint scanner needs. Pinned to a
   # commit rather than a branch so a release is reproducible.
-  AETHER_REVISION: 697a558b6d287dce29f6ddeedc392ba6a10d7015
+  AETHER_REVISION: 64f926c90f7c5054507c25f25051ce3e9660d3da
   # BoringSSL's C++ runtime must not depend on a developer's installed VC DLLs.
   # Target-specific: ignored by the macOS/Linux jobs; also applies to Tauri.
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
@@ -35,7 +35,10 @@ jobs:
     name: Decide whether this publishes
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # Write, though nothing is written: a draft release is invisible to a
+      # read-only token, so a later merge would think the draft's version was
+      # never released and overwrite its installers with newer code.
+      contents: write
       # Reads the workflow history to find the run that already built this
       # source. The workflow-wide default is contents-only, which would fail.
       actions: read
@@ -43,6 +46,7 @@ jobs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
       prerelease: ${{ steps.decide.outputs.prerelease }}
+      draft: ${{ steps.decide.outputs.draft }}
       reuse: ${{ steps.decide.outputs.reuse }}
     steps:
       - uses: actions/checkout@v7
@@ -69,6 +73,10 @@ jobs:
           # versions only.
           prerelease="$(node -p "require('./package.json').prerelease === true")"
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          # A draft is built and attached but seen only by maintainers, and its
+          # tag is made when someone publishes it by hand.
+          draft="$(node -p "require('./package.json').draft === true")"
+          echo "draft=${draft}" >> "$GITHUB_OUTPUT"
 
           publish=false
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -111,7 +119,7 @@ jobs:
             fi
           fi
           echo "reuse=${reuse}" >> "$GITHUB_OUTPUT"
-          echo "version ${version}, prerelease ${prerelease}, publish ${publish}, reuse ${reuse:-none}"
+          echo "version ${version}, prerelease ${prerelease}, draft ${draft}, publish ${publish}, reuse ${reuse:-none}"
 
   package:
     name: ${{ matrix.name }}
@@ -521,6 +529,10 @@ jobs:
             flags=()
             if [[ "${{ needs.gate.outputs.prerelease }}" == "true" ]]; then
               flags+=(--prerelease)
+            fi
+            # Publishing it later: `gh release edit <tag> --draft=false --latest`.
+            if [[ "${{ needs.gate.outputs.draft }}" == "true" ]]; then
+              flags+=(--draft)
             fi
             if [[ -f "docs/releases/${tag}.md" ]]; then
               flags+=(--notes-file "docs/releases/${tag}.md")
