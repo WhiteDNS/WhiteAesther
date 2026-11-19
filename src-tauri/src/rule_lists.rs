@@ -152,6 +152,10 @@ fn valid_domain(host: &str) -> bool {
         return false;
     }
     let labels: Vec<&str> = host.split('.').collect();
+    // An all-digit last label is a mistyped address, not a name.
+    if labels.last().is_some_and(|label| label.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
     labels.iter().enumerate().all(|(index, label)| {
         let last = index == labels.len() - 1;
         let bytes = label.as_bytes();
@@ -248,6 +252,162 @@ fn address(value: &str) -> Option<Result<String, Ignored>> {
         return Some(Err(Ignored::TooBroad));
     }
     Some(Ok(format!("cidr:{ip}/{prefix}")))
+}
+
+// ---------------------------------------------------------------------------
+// The grammar, in one place
+// ---------------------------------------------------------------------------
+//
+// Every rule, typed or imported, passes through `canonical` before anything
+// uses it, so the engine, mihomo, the lookup and the count read one form:
+// `domain:` `full:` `keyword:` `regexp:` `cidr:<address>/<prefix>`
+// `port:<low>[-<high>]` and `private`. Each used to read the raw text its own
+// way, and they disagreed: `1.2.3.4` and `*.example.com` became suffix rules in
+// mihomo that never matched, and a pasted URL or bare IPv6 address was dropped
+// while the screen still counted it.
+
+const KINDS: [&str; 12] =
+    ["domain", "suffix", "full", "exact", "keyword", "regexp", "regex", "ip", "cidr", "port", "geoip", "geosite"];
+
+/// The entries of a rule list, without blanks and `#` notes.
+pub fn entries(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split(['\n', ',', ';']).map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#'))
+}
+
+/// `raw` rewritten one canonical rule per line, without what is not a rule.
+pub fn normalize(raw: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    entries(raw).filter_map(canonical).filter(|rule| seen.insert(rule.clone())).collect::<Vec<_>>().join("\n")
+}
+
+/// The entries of `raw` that are not rules, as written.
+pub fn invalid(raw: &str) -> Vec<String> {
+    entries(raw).filter(|entry| canonical(entry).is_none()).map(String::from).collect()
+}
+
+/// One entry in canonical form, or None when it is not a rule.
+pub fn canonical(entry: &str) -> Option<String> {
+    let text = entry.trim();
+    if text.is_empty() || text.starts_with('#') {
+        return None;
+    }
+    let Some((kind, value)) = text.split_once(':').filter(|(kind, _)| KINDS.contains(&kind.trim().to_ascii_lowercase().as_str()))
+    else {
+        return bare(text);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "domain" | "suffix" => domain(host_of(value)).map(|name| format!("domain:{name}")),
+        "full" | "exact" => domain(host_of(value)).map(|name| format!("full:{name}")),
+        "keyword" => yaml_safe(value).then(|| format!("keyword:{}", value.to_ascii_lowercase())),
+        "regexp" | "regex" => {
+            (yaml_safe(value) && regex::Regex::new(value).is_ok()).then(|| format!("regexp:{value}"))
+        }
+        "ip" | "cidr" => network(value).map(|net| format!("cidr:{net}")),
+        "port" => ports(value).map(|ports| format!("port:{ports}")),
+        _ => (value.eq_ignore_ascii_case("private") || value.eq_ignore_ascii_case("lan")).then(|| "private".into()),
+    }
+}
+
+/// An entry with no kind: `private`, an address or network, a URL, or a name.
+fn bare(text: &str) -> Option<String> {
+    if text.eq_ignore_ascii_case("private") {
+        return Some("private".into());
+    }
+    if !text.contains("://") {
+        if let Some(net) = network(text) {
+            return Some(format!("cidr:{net}"));
+        }
+    }
+    let host = host_of(text);
+    if let Some(net) = network(host) {
+        return Some(format!("cidr:{net}"));
+    }
+    domain(host).map(|name| format!("domain:{name}"))
+}
+
+/// The host of a URL or of `host:port`; anything else unchanged.
+fn host_of(value: &str) -> &str {
+    let mut host = value.trim();
+    if let Some((_, rest)) = host.split_once("://") {
+        host = rest;
+    }
+    host = host.split(['/', '?', '#']).next().unwrap_or("");
+    host = host.rsplit('@').next().unwrap_or("");
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("");
+    }
+    // One colon is a port; more than one is an IPv6 address.
+    if let Some((name, port)) = host.split_once(':') {
+        if !port.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+            return name;
+        }
+    }
+    host
+}
+
+fn domain(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    let host = lower.trim_end_matches('.');
+    let host = host.strip_prefix("*.").or_else(|| host.strip_prefix("+.")).or_else(|| host.strip_prefix('.')).unwrap_or(host);
+    valid_domain(host).then(|| host.to_string())
+}
+
+/// mihomo's rules are unquoted YAML: nothing that could end the scalar.
+fn yaml_safe(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(|c| c.is_whitespace() || "#'\"{}`".contains(c))
+}
+
+/// `address/prefix`, masked, with the prefix spelled out.
+fn network(value: &str) -> Option<String> {
+    // `[v6]` and `[v6]/prefix` only: `[v6]:443` must not lose its brackets
+    // and read as a longer address.
+    let text = value.trim();
+    let text = match text.strip_prefix('[').and_then(|rest| rest.split_once(']')) {
+        Some((host, rest)) if rest.is_empty() || rest.starts_with('/') => format!("{host}{rest}"),
+        Some(_) => return None,
+        None => text.to_string(),
+    };
+    let (host, prefix) = match text.split_once('/') {
+        Some((host, prefix)) => (host, Some(prefix)),
+        None => (text.as_str(), None),
+    };
+    let ip: IpAddr = host.parse().ok()?;
+    let bits: u8 = if ip.is_ipv4() { 32 } else { 128 };
+    let prefix = match prefix {
+        None => bits,
+        Some(text) => text.parse::<u8>().ok().filter(|prefix| *prefix <= bits)?,
+    };
+    let masked = match ip {
+        IpAddr::V4(v4) => IpAddr::V4((u32::from(v4) & u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0)).into()),
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0)).into()),
+    };
+    Some(format!("{masked}/{prefix}"))
+}
+
+fn ports(value: &str) -> Option<String> {
+    let parts: Vec<u16> = value.split('-').map(|part| part.trim().parse().ok()).collect::<Option<_>>()?;
+    let (low, high) = match parts.as_slice() {
+        [one] => (*one, *one),
+        [a, b] => (*a.min(b), *a.max(b)),
+        _ => return None,
+    };
+    (low > 0).then(|| if low == high { low.to_string() } else { format!("{low}-{high}") })
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleCheck {
+    pub count: usize,
+    pub invalid: Vec<String>,
+}
+
+/// How many entries of `text` are rules, and which are not, for the screen.
+#[tauri::command]
+pub fn rule_check(text: String) -> RuleCheck {
+    RuleCheck { count: normalize(&text).lines().count(), invalid: invalid(&text) }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,18 +550,16 @@ pub struct RuleMatch {
     pub rule: Option<String>,
 }
 
-fn rule_lines(raw: &str) -> impl Iterator<Item = &str> {
-    raw.split(['\n', ',', ';']).map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#'))
-}
-
 /// Block first, then direct, as both engines order them. Port rules need a
-/// port, which a name alone does not have, so they never match here.
+/// port, which a name alone does not have, so they never match here. The
+/// destination may be pasted as a URL or `host:port`; the rule named is the
+/// entry as the user wrote it.
 pub fn match_destination(destination: &str, block: &str, direct: &str) -> RuleMatch {
-    let lower = destination.trim().to_ascii_lowercase();
+    let lower = host_of(destination).to_ascii_lowercase();
     let target = lower.trim_end_matches('.');
     if !target.is_empty() {
         for (action, list) in [(RuleAction::Block, block), (RuleAction::Direct, direct)] {
-            if let Some(rule) = rule_lines(list).find(|rule| matches(rule, target)) {
+            if let Some(rule) = entries(list).find(|rule| canonical(rule).is_some_and(|rule| matches(&rule, target))) {
                 return RuleMatch { action: Some(action), rule: Some(rule.to_string()) };
             }
         }
@@ -409,30 +567,17 @@ pub fn match_destination(destination: &str, block: &str, direct: &str) -> RuleMa
     RuleMatch { action: None, rule: None }
 }
 
-/// The kind prefix and the value of one rule in our grammar.
-fn split_rule(rule: &str) -> (String, &str) {
-    match rule.split_once(':') {
-        Some((kind, value)) if !kind.contains('.') && !kind.contains('/') && kind.chars().all(|c| c.is_ascii_alphabetic()) => {
-            (kind.trim().to_ascii_lowercase(), value.trim())
-        }
-        _ => (String::new(), rule.trim()),
-    }
-}
-
+/// One canonical rule against a name or an address.
 fn matches(rule: &str, target: &str) -> bool {
-    let (kind, value) = split_rule(rule);
-    let value_lower = value.to_ascii_lowercase();
-    let address: Option<IpAddr> = target.trim_start_matches('[').trim_end_matches(']').parse().ok();
-    match kind.as_str() {
-        "domain" | "suffix" => address.is_none() && suffix(&value_lower, target),
-        "full" | "exact" => address.is_none() && target == value_lower,
-        "keyword" => address.is_none() && !value_lower.is_empty() && target.contains(&value_lower),
-        "regexp" | "regex" => address.is_none() && regex::Regex::new(value).is_ok_and(|pattern| pattern.is_match(target)),
-        "ip" | "cidr" => address.is_some_and(|address| in_net(&value_lower, address)),
-        "geoip" | "geosite" => value_lower == "private" && is_private(target, address),
-        "" if value_lower == "private" => is_private(target, address),
-        "" if value_lower.contains('/') => address.is_some_and(|address| in_net(&value_lower, address)),
-        "" => address.is_none() && suffix(&value_lower, target),
+    let (kind, value) = rule.split_once(':').unwrap_or((rule, ""));
+    let address: Option<IpAddr> = target.parse().ok();
+    match kind {
+        "domain" => address.is_none() && suffix(value, target),
+        "full" => address.is_none() && target == value,
+        "keyword" => address.is_none() && target.contains(value),
+        "regexp" => address.is_none() && regex::Regex::new(value).is_ok_and(|pattern| pattern.is_match(target)),
+        "cidr" => address.is_some_and(|address| in_net(value, address)),
+        "private" => is_private(target, address),
         _ => false,
     }
 }
@@ -474,30 +619,19 @@ fn in_net(cidr: &str, address: IpAddr) -> bool {
 /// it against a block: that lookup would leave the tunnel and name the
 /// destination to whoever is watching.
 pub fn mihomo_rules(pattern: &str, action: &str) -> Vec<String> {
-    let entry = pattern.trim();
-    if entry.is_empty() || entry.starts_with('#') {
-        return Vec::new();
-    }
-    let (kind, value) = split_rule(entry);
-    // The rules are unquoted YAML: anything that could end the scalar is dropped.
-    if value.is_empty() || value.chars().any(|c| c.is_whitespace() || "#'\"{}`".contains(c)) {
-        return Vec::new();
-    }
-    let cidr = |value: &str| {
-        let family = if value.contains(':') { "IP-CIDR6" } else { "IP-CIDR" };
-        vec![format!("{family},{value},{action},no-resolve")]
-    };
-    match kind.as_str() {
-        "domain" | "suffix" => vec![format!("DOMAIN-SUFFIX,{value},{action}")],
-        "full" | "exact" => vec![format!("DOMAIN,{value},{action}")],
+    let Some(rule) = canonical(pattern) else { return Vec::new() };
+    let (kind, value) = rule.split_once(':').unwrap_or((rule.as_str(), ""));
+    match kind {
+        "domain" => vec![format!("DOMAIN-SUFFIX,{value},{action}")],
+        "full" => vec![format!("DOMAIN,{value},{action}")],
         "keyword" => vec![format!("DOMAIN-KEYWORD,{value},{action}")],
-        "regexp" | "regex" => vec![format!("DOMAIN-REGEX,{value},{action}")],
-        "ip" | "cidr" => cidr(value),
+        "regexp" => vec![format!("DOMAIN-REGEX,{value},{action}")],
+        "cidr" => {
+            let family = if value.contains(':') { "IP-CIDR6" } else { "IP-CIDR" };
+            vec![format!("{family},{value},{action},no-resolve")]
+        }
         "port" => vec![format!("DST-PORT,{value},{action}")],
-        "geoip" | "geosite" if value.eq_ignore_ascii_case("private") => private_rules(action),
-        "" if value.eq_ignore_ascii_case("private") => private_rules(action),
-        "" if value.contains('/') => cidr(value),
-        "" => vec![format!("DOMAIN-SUFFIX,{value},{action}")],
+        "private" => private_rules(action),
         _ => Vec::new(),
     }
 }
@@ -521,7 +655,7 @@ fn private_rules(action: &str) -> Vec<String> {
 pub fn mihomo_section(block: &str, direct: &str) -> String {
     let mut out = String::new();
     for (list, action) in [(block, "REJECT"), (direct, "DIRECT")] {
-        for pattern in rule_lines(list) {
+        for pattern in normalize(list).lines() {
             for rule in mihomo_rules(pattern, action) {
                 out.push_str("  - ");
                 out.push_str(&rule);
@@ -718,6 +852,91 @@ private
         assert_eq!(lines[3], "  - IP-CIDR6,2001:db8::/32,DIRECT,no-resolve");
         assert!(section.contains("  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve\n"));
         assert!(!section.contains("bad"));
+    }
+
+    #[test]
+    fn every_way_people_write_a_rule_becomes_one_canonical_form() {
+        for (written, canonical_form) in [
+            ("example.com", "domain:example.com"),
+            ("*.example.com", "domain:example.com"),
+            ("+.Example.COM.", "domain:example.com"),
+            ("https://www.example.com/path?q=1", "domain:www.example.com"),
+            ("http://user@example.com:8080/", "domain:example.com"),
+            ("example.com:443", "domain:example.com"),
+            ("domain:https://example.com/", "domain:example.com"),
+            ("suffix:example.com", "domain:example.com"),
+            ("full:www.example.com", "full:www.example.com"),
+            ("exact:https://www.example.com/", "full:www.example.com"),
+            ("keyword:Tracker", "keyword:tracker"),
+            ("regexp:^ad[0-9]+\\.example$", "regexp:^ad[0-9]+\\.example$"),
+            ("1.2.3.4", "cidr:1.2.3.4/32"),
+            ("1.2.3.4:443", "cidr:1.2.3.4/32"),
+            ("https://1.2.3.4/", "cidr:1.2.3.4/32"),
+            ("10.20.0.5/16", "cidr:10.20.0.0/16"),
+            ("ip:203.0.113.7", "cidr:203.0.113.7/32"),
+            ("2001:db8::1", "cidr:2001:db8::1/128"),
+            ("[2001:db8::1]", "cidr:2001:db8::1/128"),
+            ("[2001:db8::1]:443", "cidr:2001:db8::1/128"),
+            ("https://[2001:db8::1]/", "cidr:2001:db8::1/128"),
+            ("2001:db8::/32", "cidr:2001:db8::/32"),
+            ("cidr:2001:db8:1::5/48", "cidr:2001:db8:1::/48"),
+            ("port:8443", "port:8443"),
+            ("port:3010-3000", "port:3000-3010"),
+            ("private", "private"),
+            ("GEOIP:private", "private"),
+            ("geosite:lan", "private"),
+        ] {
+            assert_eq!(canonical(written).as_deref(), Some(canonical_form), "{written}");
+            assert_eq!(canonical(canonical_form).as_deref(), Some(canonical_form), "{canonical_form} is a fixed point");
+        }
+        for not_a_rule in [
+            "bad value", "geosite:netflix", "port:0", "port:70000", "port:a-b", "cidr:1.2.3.4/33",
+            "regexp:^(a", "keyword:a#b", "domain:", "-x.example", "https://", "1.2.3",
+        ] {
+            assert_eq!(canonical(not_a_rule), None, "{not_a_rule}");
+        }
+    }
+
+    #[test]
+    fn the_screen_counts_only_rules_and_names_the_rest() {
+        let text = "example.com\n*.example.com\nbad value; 1.2.3.4\n# note\nport:0";
+        assert_eq!(normalize(text), "domain:example.com\ncidr:1.2.3.4/32");
+        assert_eq!(invalid(text), ["bad value", "port:0"]);
+        assert_eq!(rule_check(text.into()).count, 2);
+    }
+
+    #[test]
+    fn mihomo_gets_rules_that_can_match() {
+        let section = mihomo_section(
+            "",
+            "1.2.3.4\n*.example.com\nhttps://site.example/\n2001:db8::1\nsite2.example:443\nfull:exact.example\nport:3000-3010",
+        );
+        assert_eq!(
+            section.lines().collect::<Vec<_>>(),
+            [
+                "  - IP-CIDR,1.2.3.4/32,DIRECT,no-resolve",
+                "  - DOMAIN-SUFFIX,example.com,DIRECT",
+                "  - DOMAIN-SUFFIX,site.example,DIRECT",
+                "  - IP-CIDR6,2001:db8::1/128,DIRECT,no-resolve",
+                "  - DOMAIN-SUFFIX,site2.example,DIRECT",
+                "  - DOMAIN,exact.example,DIRECT",
+                "  - DST-PORT,3000-3010,DIRECT",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pasted_destination_is_matched_by_its_host() {
+        let direct = "*.example.com\n2001:db8::/32\n1.2.3.4";
+        let check = |destination: &str, rule: Option<&str>| {
+            assert_eq!(match_destination(destination, "", direct).rule.as_deref(), rule, "{destination}");
+        };
+        check("https://www.example.com/page", Some("*.example.com"));
+        check("example.com:443", Some("*.example.com"));
+        check("[2001:db8::5]:443", Some("2001:db8::/32"));
+        check("2001:db8::5", Some("2001:db8::/32"));
+        check("http://1.2.3.4/", Some("1.2.3.4"));
+        check("1.2.3.5", None);
     }
 
     #[test]

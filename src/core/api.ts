@@ -621,6 +621,12 @@ export async function deleteRuleList(id: string): Promise<void> {
   return invoke("rule_list_delete", { id });
 }
 
+/** How many entries of a rules box are rules, and the ones that are not. */
+export async function checkRules(text: string): Promise<{ count: number; invalid: string[] }> {
+  requireDesktop();
+  return invoke("rule_check", { text });
+}
+
 /** Which rule a destination meets, worked out from the rules alone: no lookup. */
 export async function matchRule(destination: string, block: string, direct: string): Promise<RuleMatch> {
   requireDesktop();

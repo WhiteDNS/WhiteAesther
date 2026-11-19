@@ -255,6 +255,22 @@ pub fn current_network() -> Option<String> {
     key_of(&stable_parts(platform::identity()?))
 }
 
+/// The resolvers of the adapter the default route leaves by, as the network
+/// handed them out. Empty when they cannot be read.
+pub fn network_resolvers() -> Vec<std::net::IpAddr> {
+    let mut resolvers: Vec<std::net::IpAddr> = Vec::new();
+    for part in platform::identity().unwrap_or_default() {
+        let address = part.strip_prefix("dns ").or_else(|| part.strip_prefix("nameserver "));
+        // Windows lists an adapter's resolvers once per address family it has.
+        if let Some(ip) = address.and_then(|address| address.trim().parse().ok()) {
+            if !resolvers.contains(&ip) {
+                resolvers.push(ip);
+            }
+        }
+    }
+    resolvers
+}
+
 /// Leaves out every IPv6 address when there is an IPv4 gateway to go by.
 fn stable_parts(parts: Vec<String>) -> Vec<String> {
     let address = |part: &String| part.split_whitespace().nth(1).map(str::to_string);

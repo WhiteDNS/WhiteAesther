@@ -154,12 +154,15 @@ export function RulesField({
   onChange,
   placeholder,
   help,
+  invalid,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   help?: string;
+  /** Entries that are not rules, shown so they are not mistaken for working ones. */
+  invalid?: string[];
 }) {
   const t = useT();
   return (
@@ -171,7 +174,13 @@ export function RulesField({
         value={value}
         placeholder={placeholder ? t(placeholder) : undefined}
         onChange={(event) => onChange(event.target.value)}
+        aria-invalid={invalid && invalid.length > 0 ? true : undefined}
       />
+      {invalid && invalid.length > 0 ? (
+        <span role="alert" className="text-[13px] leading-snug text-destructive">
+          {t("Not a rule, ignored:")} <span dir="ltr" className="font-mono">{invalid.join(", ")}</span>
+        </span>
+      ) : null}
       {help ? (
         <span className="text-[13px] leading-snug text-muted-foreground">{t(help)}</span>
       ) : null}

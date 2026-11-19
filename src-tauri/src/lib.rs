@@ -492,6 +492,7 @@ pub fn run() {
             rule_lists::rule_list_set_enabled,
             rule_lists::rule_list_delete,
             rule_lists::rule_match,
+            rule_lists::rule_check,
             worker_api::worker_status,
             worker_api::worker_token_url,
             worker_api::worker_deployments,

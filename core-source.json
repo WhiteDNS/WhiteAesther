@@ -1,7 +1,7 @@
 {
   "repository": "WhiteDNS/WhiteAestherMobile",
   "version": "2.4.0",
-  "revision": "697a558b6d287dce29f6ddeedc392ba6a10d7015",
+  "revision": "64f926c90f7c5054507c25f25051ce3e9660d3da",
   "sourceDirectory": "native/aether",
   "overlays": [
     {
